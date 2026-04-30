@@ -178,9 +178,18 @@ mode = "tui"           # "tui" | "rpc" | "embed"
 log_level = "info"
 
 [provider.default]
-kind = "anthropic"
+kind = "claude"            # "claude" | "openai" | "opencode"
 model = "claude-opus-4-7"
 # api_key sourced from env; never written in config
+
+[provider.gpt]
+kind = "openai"
+model = "gpt-5"
+# base_url override supported for OpenAI-compatible gateways
+
+[provider.local-opencode]
+kind = "opencode"
+endpoint = "http://localhost:4096"
 
 [session.default]
 system_prompt_path = "./prompts/system.md"
@@ -257,7 +266,15 @@ Tools are registered at session start. Built-in tools live in `src/tools/`. Thir
 
 ### 9.2 Providers
 
-A **provider** turns a session's message list into a stream of events (tokens, tool calls, completions). Providers implement a small adapter interface and live in `src/providers/`. Day-one targets: Anthropic, OpenAI-compatible. Local models (llama.cpp, etc.) are a plugin concern.
+A **provider** turns a session's message list into a stream of events (tokens, tool calls, completions). Providers implement a small adapter interface and live in `src/providers/`.
+
+Day-one providers (shipped in core):
+
+- **`claude`** — Anthropic Messages API. Native tool-use schema; primary target for the Opus / Sonnet / Haiku 4.x family. Streaming over SSE.
+- **`openai`** — OpenAI Chat Completions / Responses API. Used for GPT-class models and any OpenAI-compatible endpoint that follows the same wire format (so self-hosted gateways, Azure OpenAI, etc., flow through this adapter with a base-URL override).
+- **`opencode`** — adapter for [opencode](https://opencode.ai) as a backend. Lets Phoenix delegate a turn to an opencode session and stream its events back through the Phoenix loop. Useful as both a provider and as a way to A/B against another harness without leaving Phoenix.
+
+Each adapter normalizes its native event stream into Phoenix's internal event type (`token`, `tool_call`, `tool_result`, `done`, `error`) so the session loop stays provider-agnostic. Other providers (local models via llama.cpp, Bedrock, Vertex, etc.) are plugin territory.
 
 ### 9.3 MCP — explicitly external
 
@@ -320,7 +337,7 @@ phoenix/
 ├── .zigversion
 ├── src/
 │   ├── core/              # session loop, plan FSM, dispatch
-│   ├── providers/         # anthropic, openai-compat
+│   ├── providers/         # claude, openai, opencode
 │   ├── tools/             # built-in tools
 │   ├── store/             # beans backend, store interface
 │   ├── tui/               # opentui frontend
@@ -341,7 +358,8 @@ phoenix/
 
 ## 14. Roadmap (rough)
 
-- **M0 — Skeleton.** `build.zig`, `justfile`, hello-world TUI, hello-world RPC, store interface stub, single Anthropic provider, two tools (`read_file`, `run_shell`).
+- **M0 — Skeleton.** `build.zig`, `justfile`, hello-world TUI, hello-world RPC, store interface stub, `claude` provider, two tools (`read_file`, `run_shell`).
+- **M0.5 — Provider parity.** Add `openai` and `opencode` provider adapters; share the event-normalization layer; integration tests against a recorded fixture per provider.
 - **M1 — Sessions & loop.** Real session loop, tool dispatch, audit log to Beans, cancel semantics.
 - **M2 — Plan mode.** FSM, TUI surface, RPC events, plan persistence in store.
 - **M3 — Tabs & orchestration.** TUI tabs; `spawn_session` tool; multi-session shared store.
