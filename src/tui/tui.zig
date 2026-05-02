@@ -20,7 +20,7 @@ const ChatLine = struct {
 
 const paste_char_threshold = 80;
 
-pub fn run(init: std.process.Init) !void {
+pub fn run(init: std.process.Init, config: *const core.Config) !void {
     const io = init.io;
     const allocator = init.gpa;
 
@@ -76,7 +76,6 @@ pub fn run(init: std.process.Init) !void {
     try vx.setBracketedPaste(writer, true);
     try vx.setMouseMode(writer, true);
     try writer.flush();
-
 
     while (true) {
         const event = try loop.nextEvent();
@@ -251,7 +250,7 @@ pub fn run(init: std.process.Init) !void {
 
         {
             const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
-            drawStatusBar(swin, w, scroll_offset);
+            drawStatusBar(swin, w, scroll_offset, config);
         }
 
         try vx.render(writer);
@@ -503,7 +502,7 @@ fn drawInput(win: vaxis.Window, lines: []const std.ArrayList(u8), cursor_line: u
     vx.screen.cursor_vis = true;
 }
 
-fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16) void {
+fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, config: *const core.Config) void {
     const style: vaxis.Style = .{
         .fg = .{ .rgb = .{ 0, 0, 0 } },
         .bg = .{ .rgb = .{ 100, 140, 255 } },
@@ -512,15 +511,21 @@ fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16) void {
     for (0..w) |x| {
         win.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = " " }, .style = style });
     }
+    var buf: [128]u8 = undefined;
     if (scroll_offset > 0) {
-        var buf: [64]u8 = undefined;
         const indicator = std.fmt.bufPrint(&buf, " phoenix v0.0.0 | scrolled +{d} rows", .{scroll_offset}) catch " phoenix v0.0.0";
         _ = win.print(&.{.{ .text = indicator, .style = style }}, .{});
     } else {
-        _ = win.print(
-            &.{.{ .text = " phoenix v0.0.0 | provider: none", .style = style }},
-            .{},
-        );
+        const default_provider = config.provider("default");
+        const kind_str: []const u8 = if (default_provider) |p| @tagName(p.kind) else "none";
+        const model_str: []const u8 = if (default_provider) |p| p.model else "none";
+        const n_sources = config.sources.len;
+        const text = std.fmt.bufPrint(&buf, " phoenix v0.0.0 | provider: {s} | model: {s} | sources: {d}", .{
+            kind_str,
+            model_str,
+            n_sources,
+        }) catch " phoenix v0.0.0";
+        _ = win.print(&.{.{ .text = text, .style = style }}, .{});
     }
 }
 
