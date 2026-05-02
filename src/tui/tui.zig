@@ -30,6 +30,9 @@ pub fn run(init: std.process.Init) !void {
         chat_lines.deinit(allocator);
     }
 
+    var scroll_offset: u16 = 0;
+    var last_chat_h: u16 = 20;
+
     var paste_count: u32 = 0;
     var pasting = false;
     var paste_start_line: usize = 0;
@@ -71,6 +74,7 @@ pub fn run(init: std.process.Init) !void {
     try vx.enterAltScreen(writer);
     try vx.queryTerminal(writer, .fromSeconds(1));
     try vx.setBracketedPaste(writer, true);
+    try vx.setMouseMode(writer, true);
     try writer.flush();
 
 
@@ -159,6 +163,7 @@ pub fn run(init: std.process.Init) !void {
                             .role = .assistant,
                             .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
                         });
+                        scroll_offset = 0;
                         clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
                     } else if (full.len > 0) {
                         try chat_lines.append(allocator, .{
@@ -170,6 +175,7 @@ pub fn run(init: std.process.Init) !void {
                             .role = .assistant,
                             .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
                         });
+                        scroll_offset = 0;
                         clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
                     } else {
                         allocator.free(full);
@@ -190,13 +196,23 @@ pub fn run(init: std.process.Init) !void {
                         cursor_line += 1;
                         cursor_col = @min(cursor_col, input_lines.items[cursor_line].items.len);
                     }
+                } else if (key.codepoint == vaxis.Key.page_up) {
+                    scroll_offset +|= last_chat_h / 2;
+                } else if (key.codepoint == vaxis.Key.page_down) {
+                    scroll_offset -|= last_chat_h / 2;
                 } else if (key.matches('u', .{ .ctrl = true })) {
-                    // Clear input
                     clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
                 } else {
                     if (key.text) |text| {
                         try insertText(&input_lines, &cursor_line, &cursor_col, text, allocator);
                     }
+                }
+            },
+            .mouse => |mouse| {
+                switch (mouse.button) {
+                    .wheel_up => scroll_offset +|= 3,
+                    .wheel_down => scroll_offset -|= 3,
+                    else => {},
                 }
             },
             .winsize => |ws| try vx.resize(allocator, writer, ws),
@@ -216,9 +232,10 @@ pub fn run(init: std.process.Init) !void {
         const input_h: u16 = @min(raw_input_lines + 2, 10);
         const chat_h = h -| input_h -| status_h;
 
+        last_chat_h = chat_h;
         if (chat_h > 0) {
             const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-            drawChat(cwin, chat_lines.items, w, allocator);
+            scroll_offset = drawChat(cwin, chat_lines.items, w, scroll_offset, allocator);
         }
 
         {
@@ -234,7 +251,7 @@ pub fn run(init: std.process.Init) !void {
 
         {
             const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
-            drawStatusBar(swin, w);
+            drawStatusBar(swin, w, scroll_offset);
         }
 
         try vx.render(writer);
@@ -486,7 +503,7 @@ fn drawInput(win: vaxis.Window, lines: []const std.ArrayList(u8), cursor_line: u
     vx.screen.cursor_vis = true;
 }
 
-fn drawStatusBar(win: vaxis.Window, w: u16) void {
+fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16) void {
     const style: vaxis.Style = .{
         .fg = .{ .rgb = .{ 0, 0, 0 } },
         .bg = .{ .rgb = .{ 100, 140, 255 } },
@@ -495,10 +512,16 @@ fn drawStatusBar(win: vaxis.Window, w: u16) void {
     for (0..w) |x| {
         win.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = " " }, .style = style });
     }
-    _ = win.print(
-        &.{.{ .text = " phoenix v0.0.0 | provider: none", .style = style }},
-        .{},
-    );
+    if (scroll_offset > 0) {
+        var buf: [64]u8 = undefined;
+        const indicator = std.fmt.bufPrint(&buf, " phoenix v0.0.0 | scrolled +{d} rows", .{scroll_offset}) catch " phoenix v0.0.0";
+        _ = win.print(&.{.{ .text = indicator, .style = style }}, .{});
+    } else {
+        _ = win.print(
+            &.{.{ .text = " phoenix v0.0.0 | provider: none", .style = style }},
+            .{},
+        );
+    }
 }
 
 const bubble_padding = 2;
@@ -535,82 +558,91 @@ fn wrapLines(text: []const u8, width: usize, allocator: std.mem.Allocator) !std.
     return result;
 }
 
-fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, allocator: std.mem.Allocator) void {
-    if (lines.len == 0) return;
+fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_offset: u16, allocator: std.mem.Allocator) u16 {
+    if (lines.len == 0) return 0;
 
-    const rows: u16 = win.height;
-    if (rows == 0 or win_width < 10) return;
+    const rows: i64 = win.height;
+    if (rows == 0 or win_width < 10) return 0;
 
-    var total_rows: u16 = 0;
-    var row_counts: [512]u16 = undefined;
+    var total_rows: u32 = 0;
+    var row_counts: [512]u32 = undefined;
     const line_count = @min(lines.len, 512);
 
     for (0..line_count) |i| {
         const line = lines[i];
-        const is_system = line.role == .system;
+        const spacing: u32 = if (i > 0) 1 else 0;
 
-        if (is_system) {
-            row_counts[i] = 1;
-            total_rows +|= 1;
+        if (line.role == .system) {
+            row_counts[i] = spacing + 1;
+            total_rows += row_counts[i];
             continue;
         }
 
         const bw = bubbleWidth(line.text.len, win_width);
         const inner_w = bw -| (bubble_padding * 2);
         var wrapped = wrapLines(line.text, inner_w, allocator) catch {
-            row_counts[i] = 1;
-            total_rows +|= 1;
+            row_counts[i] = spacing + 2;
+            total_rows += row_counts[i];
             continue;
         };
         defer wrapped.deinit(allocator);
 
-        const label_row: u16 = 1;
-        const text_rows: u16 = @intCast(@min(wrapped.items.len, 100));
-        const spacing: u16 = if (i > 0) 1 else 0;
-        row_counts[i] = label_row + text_rows + spacing;
-        total_rows +|= row_counts[i];
+        row_counts[i] = spacing + 1 + @as(u32, @intCast(wrapped.items.len));
+        total_rows += row_counts[i];
     }
 
-    var start_idx: usize = 0;
-    if (total_rows > rows) {
-        var accum: u16 = 0;
-        for (0..line_count) |i| {
-            accum +|= row_counts[i];
-            if (accum >= total_rows - rows) {
-                start_idx = i;
-                break;
-            }
-        }
-    }
+    const max_scroll: u32 = if (total_rows > win.height) total_rows - win.height else 0;
+    const clamped_offset: u32 = @min(scroll_offset, max_scroll);
 
-    var y: u16 = if (total_rows < rows) rows - total_rows else 0;
+    // visible_top: virtual row at top of viewport (negative = content bottom-aligned)
+    const visible_top: i64 = @as(i64, total_rows) - rows - @as(i64, clamped_offset);
 
-    for (start_idx..line_count) |i| {
+    var vrow: i64 = 0;
+
+    for (0..line_count) |i| {
         const line = lines[i];
+        const msg_end: i64 = vrow + row_counts[i];
+
+        if (msg_end <= visible_top) {
+            vrow = msg_end;
+            continue;
+        }
+        if (vrow - visible_top >= rows) break;
+
         const is_right = line.role == .user;
         const is_system = line.role == .system;
+        var cr = vrow;
 
-        if (i > start_idx) y +|= 1;
+        if (i > 0) cr += 1;
 
         if (is_system) {
-            const sys_style: vaxis.Style = .{ .fg = .{ .index = 8 }, .italic = true };
-            const text_len: u16 = @intCast(@min(line.text.len, win_width));
-            const x_off: u16 = (win_width -| text_len) / 2;
-            if (y < rows) {
+            const sy = cr - visible_top;
+            if (sy >= 0 and sy < rows) {
+                const y: u16 = @intCast(sy);
+                const text_len: u16 = @intCast(@min(line.text.len, win_width));
+                const x_off: u16 = (win_width -| text_len) / 2;
+                const sys_style: vaxis.Style = .{ .fg = .{ .index = 8 }, .italic = true };
                 const sys_win = win.child(.{ .x_off = x_off, .y_off = y, .width = text_len, .height = 1 });
                 _ = sys_win.print(&.{.{ .text = line.text, .style = sys_style }}, .{});
             }
+            vrow = msg_end;
             continue;
         }
 
         const bw = bubbleWidth(line.text.len, win_width);
         const inner_w = bw -| (bubble_padding * 2);
-        var wrapped = wrapLines(line.text, inner_w, allocator) catch continue;
+        var wrapped = wrapLines(line.text, inner_w, allocator) catch {
+            vrow = msg_end;
+            continue;
+        };
         defer wrapped.deinit(allocator);
 
         const x_off: u16 = if (is_right) win_width -| bw -| 1 else 1;
 
-        if (y < rows) {
+        // Label
+        const label_sy = cr - visible_top;
+        if (label_sy >= 0 and label_sy < rows) {
+            const y: u16 = @intCast(label_sy);
             const label = if (is_right) "you" else "phoenix";
             const label_style: vaxis.Style = if (is_right)
                 .{ .fg = .{ .rgb = .{ 130, 220, 130 } }, .bold = true }
@@ -625,31 +657,37 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, allocato
                 .height = 1,
             });
             _ = label_win.print(&.{.{ .text = label, .style = label_style }}, .{});
-            y +|= 1;
         }
+        cr += 1;
 
+        // Bubble text
         const bubble_bg: vaxis.Style = if (is_right)
             .{ .fg = .{ .rgb = .{ 240, 240, 240 } }, .bg = .{ .rgb = .{ 40, 80, 40 } } }
         else
             .{ .fg = .{ .rgb = .{ 240, 240, 240 } }, .bg = .{ .rgb = .{ 50, 50, 70 } } };
 
         for (wrapped.items) |wline| {
-            if (y >= rows) break;
-
-            const bwin = win.child(.{ .x_off = x_off, .y_off = y, .width = bw, .height = 1 });
-            for (0..bw) |bx| {
-                bwin.writeCell(@intCast(bx), 0, .{ .char = .{ .grapheme = " " }, .style = bubble_bg });
+            const sy = cr - visible_top;
+            if (sy >= 0 and sy < rows) {
+                const y: u16 = @intCast(sy);
+                const bwin = win.child(.{ .x_off = x_off, .y_off = y, .width = bw, .height = 1 });
+                for (0..bw) |bx| {
+                    bwin.writeCell(@intCast(bx), 0, .{ .char = .{ .grapheme = " " }, .style = bubble_bg });
+                }
+                const text_win = win.child(.{
+                    .x_off = x_off + bubble_padding,
+                    .y_off = y,
+                    .width = bw -| (bubble_padding * 2),
+                    .height = 1,
+                });
+                _ = text_win.print(&.{.{ .text = wline, .style = bubble_bg }}, .{});
             }
-
-            const text_win = win.child(.{
-                .x_off = x_off + bubble_padding,
-                .y_off = y,
-                .width = bw -| (bubble_padding * 2),
-                .height = 1,
-            });
-            _ = text_win.print(&.{.{ .text = wline, .style = bubble_bg }}, .{});
-
-            y +|= 1;
+            cr += 1;
+            if (cr - visible_top >= rows) break;
         }
+
+        vrow = msg_end;
     }
+
+    return @intCast(clamped_offset);
 }
