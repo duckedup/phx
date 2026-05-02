@@ -4,7 +4,7 @@ const config_paths = @import("config_paths.zig");
 const skills_pkg = @import("skills.zig");
 
 pub const RuntimeMode = enum { tui, rpc };
-pub const ProviderKind = enum { claude, openai, ollama, llamacpp };
+pub const ProviderKind = enum { claude, openai, ollama, llamacpp, vertex, gemini };
 pub const StoreBackend = enum { memory, beans };
 
 pub const TokenBudget = union(enum) {
@@ -45,11 +45,12 @@ pub const AuthConfig = struct {
             .inline_value => |v| return try allocator.dupe(u8, v),
             .env_var => |env_name| {
                 // Use POSIX getenv; copy into allocator
-                var buf: [256]u8 = undefined;
+                var buf: [257]u8 = undefined;
                 if (env_name.len + 1 > buf.len) return error.OutOfMemory;
                 @memcpy(buf[0..env_name.len], env_name);
                 buf[env_name.len] = 0;
-                const ptr = std.c.getenv(&buf) orelse return null;
+                const sentinel_ptr: [*:0]const u8 = buf[0..env_name.len :0];
+                const ptr = std.c.getenv(sentinel_ptr) orelse return null;
                 const s = std.mem.span(ptr);
                 return try allocator.dupe(u8, s);
             },
@@ -67,6 +68,17 @@ pub const ProviderProfile = struct {
     retry_base_delay_ms: u64 = 1000,
     retry_max_delay_ms: u64 = 30_000,
     request_timeout_ms: u64 = 120_000,
+
+    // New:
+    /// OpenAI: "completions" or "responses". Ignored for other kinds.
+    api: ?[]const u8 = null,
+    /// Google Vertex AI: GCP project ID. Required for kind = .vertex.
+    project: ?[]const u8 = null,
+    /// Google Vertex AI: GCP region (e.g. "us-central1"). Default applied at
+    /// adapter level if null.
+    location: ?[]const u8 = null,
+    /// Google Vertex AI: path to service-account/ADC JSON. Optional.
+    credentials_path: ?[]const u8 = null,
 };
 
 pub const SessionProfile = struct {
@@ -510,14 +522,18 @@ fn applyProviderTable(a: std.mem.Allocator, profile: *ProviderProfile, t: *toml.
 
         if (std.mem.eql(u8, k, "kind")) {
             const s = try expectString(v, "provider.kind");
-            if (std.mem.eql(u8, s, "claude")) {
+            if (std.mem.eql(u8, s, "claude") or std.mem.eql(u8, s, "anthropic")) {
                 profile.kind = .claude;
             } else if (std.mem.eql(u8, s, "openai")) {
                 profile.kind = .openai;
             } else if (std.mem.eql(u8, s, "ollama")) {
                 profile.kind = .ollama;
-            } else if (std.mem.eql(u8, s, "llamacpp")) {
+            } else if (std.mem.eql(u8, s, "llamacpp") or std.mem.eql(u8, s, "llama.cpp")) {
                 profile.kind = .llamacpp;
+            } else if (std.mem.eql(u8, s, "vertex") or std.mem.eql(u8, s, "vertex_ai")) {
+                profile.kind = .vertex;
+            } else if (std.mem.eql(u8, s, "gemini")) {
+                profile.kind = .gemini;
             } else {
                 std.log.err("config: invalid provider.kind value: {s}", .{s});
                 return error.InvalidConfigValue;
@@ -542,9 +558,27 @@ fn applyProviderTable(a: std.mem.Allocator, profile: *ProviderProfile, t: *toml.
         } else if (std.mem.eql(u8, k, "request_timeout_ms")) {
             const i = try expectInteger(v, "provider.request_timeout_ms");
             profile.request_timeout_ms = @intCast(i);
+        } else if (std.mem.eql(u8, k, "api")) {
+            profile.api = try a.dupe(u8, try expectString(v, "provider.api"));
+        } else if (std.mem.eql(u8, k, "project")) {
+            profile.project = try a.dupe(u8, try expectString(v, "provider.project"));
+        } else if (std.mem.eql(u8, k, "location")) {
+            profile.location = try a.dupe(u8, try expectString(v, "provider.location"));
+        } else if (std.mem.eql(u8, k, "credentials_path")) {
+            profile.credentials_path = try a.dupe(u8, try expectString(v, "provider.credentials_path"));
         } else {
             std.log.warn("ignoring unknown config key: provider.<name>.{s}", .{k});
         }
+    }
+    validateProvider(profile);
+}
+
+fn validateProvider(profile: *const ProviderProfile) void {
+    if (profile.api != null and profile.kind != .openai) {
+        std.log.warn("config: provider.api is set but kind is not openai; the field will be ignored", .{});
+    }
+    if (profile.kind == .vertex and profile.project == null) {
+        std.log.warn("config: provider.kind = vertex but project is not set; send will fail at runtime", .{});
     }
 }
 
@@ -1077,6 +1111,329 @@ test "deinit cleans arena (leak hygiene)" {
         .cwd = cwd,
     });
     cfg.deinit(); // no leak expected
+}
+
+test "kind: vertex parses with project + location" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.foo]
+        \\kind = "vertex"
+        \\project = "my-project"
+        \\location = "us-central1"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    const p = cfg.providers.get("foo").?;
+    try std.testing.expect(p.kind == .vertex);
+    try std.testing.expectEqualStrings("my-project", p.project.?);
+    try std.testing.expectEqualStrings("us-central1", p.location.?);
+}
+
+test "kind: vertex without project warns but does not error" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.foo]
+        \\kind = "vertex"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    const p = cfg.providers.get("foo").?;
+    try std.testing.expect(p.kind == .vertex);
+    try std.testing.expect(p.project == null);
+}
+
+test "kind: gemini parses" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.foo]
+        \\kind = "gemini"
+        \\model = "gemini-1.5-flash"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    const p = cfg.providers.get("foo").?;
+    try std.testing.expect(p.kind == .gemini);
+    try std.testing.expectEqualStrings("gemini-1.5-flash", p.model);
+}
+
+test "kind: llamacpp and llama.cpp are accepted" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.a]
+        \\kind = "llamacpp"
+        \\
+        \\[provider.b]
+        \\kind = "llama.cpp"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    try std.testing.expect(cfg.providers.get("a").?.kind == .llamacpp);
+    try std.testing.expect(cfg.providers.get("b").?.kind == .llamacpp);
+}
+
+test "openai api field parses" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.foo]
+        \\kind = "openai"
+        \\api = "responses"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    const p = cfg.providers.get("foo").?;
+    try std.testing.expect(p.kind == .openai);
+    try std.testing.expectEqualStrings("responses", p.api.?);
+}
+
+test "openai api field warns for non-openai kinds but does not error" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.x]
+        \\kind = "claude"
+        \\api = "responses"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    const p = cfg.providers.get("x").?;
+    try std.testing.expect(p.kind == .claude);
+    try std.testing.expectEqualStrings("responses", p.api.?);
+}
+
+test "anthropic alias for claude" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.foo]
+        \\kind = "anthropic"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    try std.testing.expect(cfg.providers.get("foo").?.kind == .claude);
+}
+
+test "multiple profiles of same kind coexist" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.a]
+        \\kind = "openai"
+        \\model = "gpt-4o"
+        \\
+        \\[provider.b]
+        \\kind = "openai"
+        \\model = "gpt-4o-mini"
+        \\
+        \\[provider.c]
+        \\kind = "claude"
+        \\model = "claude-opus-4-5"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    const pa = cfg.providers.get("a").?;
+    const pb = cfg.providers.get("b").?;
+    const pc = cfg.providers.get("c").?;
+    try std.testing.expect(pa.kind == .openai);
+    try std.testing.expect(pb.kind == .openai);
+    try std.testing.expect(pc.kind == .claude);
+    try std.testing.expectEqualStrings("gpt-4o", pa.model);
+    try std.testing.expectEqualStrings("gpt-4o-mini", pb.model);
+    try std.testing.expectEqualStrings("claude-opus-4-5", pc.model);
+    // They are independent: different models
+    try std.testing.expect(!std.mem.eql(u8, pa.model, pb.model));
+    // cfg.providers has at least 4 entries (default + a + b + c)
+    try std.testing.expect(cfg.providers.count() >= 4);
+}
+
+test "two openai profiles differ on api and model" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    const cwd = try std.fs.path.join(allocator, &.{ tmp_path, "cwd" });
+    defer allocator.free(cwd);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
+    defer allocator.free(toml_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = toml_path,
+        .data =
+        \\[provider.completions_one]
+        \\kind = "openai"
+        \\model = "gpt-4o"
+        \\api = "completions"
+        \\
+        \\[provider.responses_one]
+        \\kind = "openai"
+        \\model = "gpt-4o"
+        \\api = "responses"
+        \\
+        ,
+    });
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home, .cwd = cwd });
+    defer cfg.deinit();
+    const pc = cfg.providers.get("completions_one").?;
+    const pr = cfg.providers.get("responses_one").?;
+    try std.testing.expect(pc.kind == .openai);
+    try std.testing.expect(pr.kind == .openai);
+    try std.testing.expectEqualStrings("completions", pc.api.?);
+    try std.testing.expectEqualStrings("responses", pr.api.?);
 }
 
 fn getTmpDirPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
