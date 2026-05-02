@@ -4,6 +4,7 @@ pub const provider = @import("provider.zig");
 pub const tool = @import("tool.zig");
 pub const config = @import("config.zig");
 pub const config_paths = @import("config_paths.zig");
+pub const config_writer = @import("config_writer.zig");
 pub const skills = @import("skills.zig");
 pub const store = @import("store.zig");
 

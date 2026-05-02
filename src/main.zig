@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("phoenix_core");
 const tui = @import("tui/tui.zig");
+const onboarding = @import("tui/onboarding.zig");
 const rpc = @import("rpc/rpc.zig");
 
 const usage =
@@ -63,6 +64,21 @@ pub fn main(init: std.process.Init) !void {
     const c = cmd orelse "tui";
 
     if (std.mem.eql(u8, c, "tui")) {
+        if (!cfg.defaultProviderUsable(init.gpa)) {
+            const home = resolveHome(init.gpa) orelse {
+                std.debug.print("phoenix: cannot resolve $HOME for first-time setup\n", .{});
+                std.process.exit(1);
+            };
+            defer init.gpa.free(home);
+
+            switch (try onboarding.run(init, home)) {
+                .cancelled => return,
+                .completed => {
+                    cfg.deinit();
+                    cfg = try core.Config.load(init.gpa, init.io, .{ .explicit_path = explicit_config });
+                },
+            }
+        }
         try tui.run(init, &cfg);
     } else if (std.mem.eql(u8, c, "rpc")) {
         try rpc.run(init.gpa, &cfg);
@@ -70,6 +86,13 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("unknown command: {s}\n{s}", .{ c, usage });
         std.process.exit(1);
     }
+}
+
+fn resolveHome(allocator: std.mem.Allocator) ?[]u8 {
+    const ptr = std.c.getenv("HOME") orelse return null;
+    const s = std.mem.span(ptr);
+    if (s.len == 0) return null;
+    return allocator.dupe(u8, s) catch null;
 }
 
 test {

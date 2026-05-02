@@ -183,7 +183,45 @@ pub const Config = struct {
             opts.explicit_dir,
         );
 
+        // Auto-wire well-known env vars (ANTHROPIC_API_KEY etc.) for the default
+        // provider when no auth is configured. Lets a user with `export
+        // ANTHROPIC_API_KEY=...` skip both the wizard and editing the config file.
+        try cfg.applyEnvVarFallbacks(a);
+
         return cfg;
+    }
+
+    fn applyEnvVarFallbacks(self: *Config, a: std.mem.Allocator) !void {
+        const default_provider = self.providers.getPtr("default") orelse return;
+        if (default_provider.auth != null) return;
+
+        const env_name: []const u8 = switch (default_provider.kind) {
+            .claude => "ANTHROPIC_API_KEY",
+            .openai => "OPENAI_API_KEY",
+            .gemini, .vertex => "GEMINI_API_KEY",
+            .ollama, .llamacpp => return,
+        };
+
+        var name_buf: [64]u8 = undefined;
+        if (env_name.len + 1 > name_buf.len) return;
+        @memcpy(name_buf[0..env_name.len], env_name);
+        name_buf[env_name.len] = 0;
+        const sentinel: [*:0]const u8 = name_buf[0..env_name.len :0];
+        const ptr = std.c.getenv(sentinel) orelse return;
+        const value = std.mem.span(ptr);
+        if (value.len == 0) return;
+
+        const auth_key = switch (default_provider.kind) {
+            .claude => "anthropic_api_key_env",
+            .openai => "openai_api_key_env",
+            .gemini, .vertex => "gemini_api_key_env",
+            .ollama, .llamacpp => unreachable,
+        };
+
+        const owned_key = try a.dupe(u8, auth_key);
+        const owned_value = try a.dupe(u8, env_name);
+        try self.auth.entries.put(a, owned_key, .{ .env_var = owned_value });
+        default_provider.auth = owned_key;
     }
 
     pub fn loadDefault(gpa: std.mem.Allocator, io: std.Io) !Config {
@@ -196,6 +234,24 @@ pub const Config = struct {
 
     pub fn provider(self: *const Config, name: []const u8) ?*const ProviderProfile {
         return self.providers.getPtr(name);
+    }
+
+    /// Returns true iff the default provider has a usable credential (or is a
+    /// local provider that needs none). Used by main.zig to decide whether to
+    /// run the first-time onboarding wizard.
+    pub fn defaultProviderUsable(self: *const Config, gpa: std.mem.Allocator) bool {
+        const p = self.provider("default") orelse return false;
+        switch (p.kind) {
+            .ollama, .llamacpp => return true,
+            else => {},
+        }
+        const auth_key = p.auth orelse return false;
+        const resolved = self.auth.resolve(gpa, auth_key) catch return false;
+        if (resolved) |r| {
+            defer gpa.free(r);
+            return r.len > 0;
+        }
+        return false;
     }
 
     pub fn effectiveConcurrency(self: *const Config) u32 {
