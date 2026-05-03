@@ -1,6 +1,8 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const core = @import("phoenix_core");
+const rpc = @import("rpc");
+const Picker = @import("picker.zig").Picker;
 
 const VxEvent = union(enum) {
     key_press: vaxis.Key,
@@ -18,9 +20,15 @@ const ChatLine = struct {
     text: []const u8,
 };
 
+const StatusView = struct {
+    provider_kind: []const u8,
+    model: []const u8,
+    sources_count: usize,
+};
+
 const paste_char_threshold = 80;
 
-pub fn run(init: std.process.Init, config: *const core.Config) !void {
+pub fn run(init: std.process.Init, client: *rpc.Client) !void {
     const io = init.io;
     const allocator = init.gpa;
 
@@ -54,6 +62,34 @@ pub fn run(init: std.process.Init, config: *const core.Config) !void {
     var cursor_line: usize = 0;
     var cursor_col: usize = 0;
 
+    // Fetch initial config snapshot from the server.
+    var status_view: StatusView = blk: {
+        var snap_resp = client.getConfig() catch {
+            break :blk .{
+                .provider_kind = try allocator.dupe(u8, "none"),
+                .model = try allocator.dupe(u8, ""),
+                .sources_count = 0,
+            };
+        };
+        defer snap_resp.response.deinit();
+        if (snap_resp.snap.default_provider) |dp| {
+            break :blk .{
+                .provider_kind = try allocator.dupe(u8, @tagName(dp.kind)),
+                .model = try allocator.dupe(u8, dp.model),
+                .sources_count = snap_resp.snap.sources_count,
+            };
+        }
+        break :blk .{
+            .provider_kind = try allocator.dupe(u8, "none"),
+            .model = try allocator.dupe(u8, ""),
+            .sources_count = snap_resp.snap.sources_count,
+        };
+    };
+    defer {
+        allocator.free(status_view.provider_kind);
+        allocator.free(status_view.model);
+    }
+
     try chat_lines.append(allocator, .{
         .role = .system,
         .text = try allocator.dupe(u8, "Welcome to Phoenix. Type a message below and press Enter."),
@@ -76,6 +112,9 @@ pub fn run(init: std.process.Init, config: *const core.Config) !void {
     try vx.setBracketedPaste(writer, true);
     try vx.setMouseMode(writer, true);
     try writer.flush();
+
+    var picker: ?Picker = null;
+    defer if (picker) |*p| p.deinit(allocator);
 
     while (true) {
         const event = try loop.nextEvent();
@@ -140,6 +179,53 @@ pub fn run(init: std.process.Init, config: *const core.Config) !void {
 
                 if (key.matches('c', .{ .ctrl = true })) break;
 
+                // Handle picker if active.
+                if (picker) |*p| {
+                    if (key.codepoint == vaxis.Key.escape) {
+                        p.deinit(allocator);
+                        picker = null;
+                        continue;
+                    }
+                    if (key.codepoint == vaxis.Key.up) {
+                        p.moveUp();
+                        continue;
+                    }
+                    if (key.codepoint == vaxis.Key.down) {
+                        p.moveDown();
+                        continue;
+                    }
+                    if (key.codepoint == vaxis.Key.enter or key.codepoint == vaxis.Key.kp_enter) {
+                        const choice = p.selected();
+                        var ar = client.applyModelChoice(choice) catch |err| {
+                            try chat_lines.append(allocator, .{
+                                .role = .system,
+                                .text = try std.fmt.allocPrint(allocator, "/model: {s}", .{@errorName(err)}),
+                            });
+                            p.deinit(allocator);
+                            picker = null;
+                            continue;
+                        };
+                        defer ar.response.deinit();
+
+                        try chat_lines.append(allocator, .{
+                            .role = .system,
+                            .text = try allocator.dupe(u8, ar.result.message),
+                        });
+
+                        // Update local status view with new provider info.
+                        allocator.free(status_view.provider_kind);
+                        allocator.free(status_view.model);
+                        status_view.provider_kind = try allocator.dupe(u8, @tagName(ar.result.default_provider.kind));
+                        status_view.model = try allocator.dupe(u8, ar.result.default_provider.model);
+
+                        p.deinit(allocator);
+                        picker = null;
+                        scroll_offset = 0;
+                        continue;
+                    }
+                    continue;
+                }
+
                 // Shift+Enter always inserts a newline
                 if ((key.codepoint == vaxis.Key.enter or key.codepoint == vaxis.Key.kp_enter) and key.mods.shift) {
                     try insertNewline(&input_lines, &cursor_line, &cursor_col, allocator);
@@ -150,7 +236,7 @@ pub fn run(init: std.process.Init, config: *const core.Config) !void {
                         // Expand paste labels in the input with actual content
                         const expanded = try expandPasteLabels(full, &pending_full, allocator);
                         allocator.free(full);
-                        for (pending_full.items) |p| allocator.free(p);
+                        for (pending_full.items) |p2| allocator.free(p2);
                         pending_full.clearRetainingCapacity();
 
                         try chat_lines.append(allocator, .{
@@ -165,17 +251,17 @@ pub fn run(init: std.process.Init, config: *const core.Config) !void {
                         scroll_offset = 0;
                         clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
                     } else if (full.len > 0) {
-                        try chat_lines.append(allocator, .{
-                            .role = .user,
-                            .text = full,
-                        });
-
-                        try chat_lines.append(allocator, .{
-                            .role = .assistant,
-                            .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
-                        });
-                        scroll_offset = 0;
-                        clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
+                        try handleSubmit(
+                            &chat_lines,
+                            &input_lines,
+                            &cursor_line,
+                            &cursor_col,
+                            &picker,
+                            &scroll_offset,
+                            allocator,
+                            client,
+                            full,
+                        );
                     } else {
                         allocator.free(full);
                     }
@@ -229,33 +315,127 @@ pub fn run(init: std.process.Init, config: *const core.Config) !void {
         // Input height: 1 line per input line, +2 for borders, min 3, max 10
         const raw_input_lines: u16 = @intCast(@min(input_lines.items.len, 8));
         const input_h: u16 = @min(raw_input_lines + 2, 10);
-        const chat_h = h -| input_h -| status_h;
 
-        last_chat_h = chat_h;
-        if (chat_h > 0) {
-            const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-            scroll_offset = drawChat(cwin, chat_lines.items, w, scroll_offset, allocator);
-        }
-
-        {
-            const iwin = win.child(.{
-                .x_off = 0,
-                .y_off = chat_h,
-                .width = w,
-                .height = input_h,
-                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
-            });
-            drawInput(iwin, input_lines.items, cursor_line, cursor_col, &vx);
-        }
-
-        {
-            const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
-            drawStatusBar(swin, w, scroll_offset, config);
+        if (picker) |*p| {
+            const picker_h = p.height(h);
+            const chat_h = h -| input_h -| status_h -| picker_h;
+            last_chat_h = chat_h;
+            if (chat_h > 0) {
+                const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
+                scroll_offset = drawChat(cwin, chat_lines.items, w, scroll_offset, allocator);
+            }
+            {
+                const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
+                p.draw(pwin);
+            }
+            {
+                const iwin = win.child(.{
+                    .x_off = 0,
+                    .y_off = chat_h + picker_h,
+                    .width = w,
+                    .height = input_h,
+                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+                });
+                drawInput(iwin, input_lines.items, cursor_line, cursor_col, &vx);
+            }
+            {
+                const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
+                drawStatusBar(swin, w, scroll_offset, status_view);
+            }
+        } else {
+            const chat_h = h -| input_h -| status_h;
+            last_chat_h = chat_h;
+            if (chat_h > 0) {
+                const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
+                scroll_offset = drawChat(cwin, chat_lines.items, w, scroll_offset, allocator);
+            }
+            {
+                const iwin = win.child(.{
+                    .x_off = 0,
+                    .y_off = chat_h,
+                    .width = w,
+                    .height = input_h,
+                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+                });
+                drawInput(iwin, input_lines.items, cursor_line, cursor_col, &vx);
+            }
+            {
+                const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
+                drawStatusBar(swin, w, scroll_offset, status_view);
+            }
         }
 
         try vx.render(writer);
         try writer.flush();
     }
+}
+
+fn handleSubmit(
+    chat_lines: *std.ArrayList(ChatLine),
+    input_lines: *std.ArrayList(std.ArrayList(u8)),
+    cursor_line: *usize,
+    cursor_col: *usize,
+    picker: *?Picker,
+    scroll_offset: *u16,
+    allocator: std.mem.Allocator,
+    client: *rpc.Client,
+    submitted: []u8,
+) !void {
+    var dr = client.dispatch(submitted) catch |err| {
+        try chat_lines.append(allocator, .{
+            .role = .system,
+            .text = try std.fmt.allocPrint(allocator, "rpc error: {s}", .{@errorName(err)}),
+        });
+        allocator.free(submitted);
+        scroll_offset.* = 0;
+        clearInput(input_lines, cursor_line, cursor_col, allocator);
+        return;
+    };
+    defer dr.response.deinit();
+
+    switch (dr.result) {
+        .not_a_command => {
+            try chat_lines.append(allocator, .{ .role = .user, .text = submitted });
+            try chat_lines.append(allocator, .{
+                .role = .assistant,
+                .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
+            });
+        },
+        .message => |m| {
+            allocator.free(submitted);
+            try chat_lines.append(allocator, .{ .role = .system, .text = try allocator.dupe(u8, m) });
+        },
+        .err => |m| {
+            allocator.free(submitted);
+            try chat_lines.append(allocator, .{ .role = .system, .text = try allocator.dupe(u8, m) });
+        },
+        .model_picker => |p| {
+            allocator.free(submitted);
+            // Coerce via anonymous struct literal — Picker.initModel
+            // expects commands.ModelPicker; the field types match.
+            picker.* = try Picker.initModel(allocator, .{
+                .title = p.title,
+                .choices = p.choices,
+            });
+        },
+        .inject_context => |frag| {
+            allocator.free(submitted);
+            const header = try std.fmt.allocPrint(allocator, "[{s} loaded]\n{s}", .{ frag.label, frag.body });
+            try chat_lines.append(allocator, .{ .role = .system, .text = header });
+            if (frag.user_message.len > 0) {
+                try chat_lines.append(allocator, .{
+                    .role = .user,
+                    .text = try allocator.dupe(u8, frag.user_message),
+                });
+                try chat_lines.append(allocator, .{
+                    .role = .assistant,
+                    .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
+                });
+            }
+        },
+    }
+    scroll_offset.* = 0;
+    clearInput(input_lines, cursor_line, cursor_col, allocator);
 }
 
 fn insertText(
@@ -502,7 +682,7 @@ fn drawInput(win: vaxis.Window, lines: []const std.ArrayList(u8), cursor_line: u
     vx.screen.cursor_vis = true;
 }
 
-fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, config: *const core.Config) void {
+fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, view: StatusView) void {
     const style: vaxis.Style = .{
         .fg = .{ .rgb = .{ 0, 0, 0 } },
         .bg = .{ .rgb = .{ 100, 140, 255 } },
@@ -516,14 +696,10 @@ fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, config: *const c
         const indicator = std.fmt.bufPrint(&buf, " phoenix v0.0.0 | scrolled +{d} rows", .{scroll_offset}) catch " phoenix v0.0.0";
         _ = win.print(&.{.{ .text = indicator, .style = style }}, .{});
     } else {
-        const default_provider = config.provider("default");
-        const kind_str: []const u8 = if (default_provider) |p| @tagName(p.kind) else "none";
-        const model_str: []const u8 = if (default_provider) |p| p.model else "none";
-        const n_sources = config.sources.len;
         const text = std.fmt.bufPrint(&buf, " phoenix v0.0.0 | provider: {s} | model: {s} | sources: {d}", .{
-            kind_str,
-            model_str,
-            n_sources,
+            view.provider_kind,
+            view.model,
+            view.sources_count,
         }) catch " phoenix v0.0.0";
         _ = win.print(&.{.{ .text = text, .style = style }}, .{});
     }

@@ -1,7 +1,22 @@
 const std = @import("std");
 const core = @import("phoenix_core");
 
-pub fn run(allocator: std.mem.Allocator, config: *const core.Config) !void {
-    _ = allocator;
-    std.debug.print("phoenix rpc: not yet implemented (loaded {d} config sources)\n", .{config.sources.len});
+pub const protocol = @import("protocol.zig");
+pub const server = @import("server.zig");
+pub const client = @import("client.zig");
+pub const Client = client.Client;
+
+pub fn run(gpa: std.mem.Allocator, io: std.Io, config: *core.Config, home: ?[]const u8) !void {
+    try server.run(
+        gpa,
+        io,
+        config,
+        home,
+        std.posix.STDIN_FILENO,
+        std.posix.STDOUT_FILENO,
+    );
+}
+
+test {
+    std.testing.refAllDecls(@This());
 }

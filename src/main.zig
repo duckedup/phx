@@ -2,7 +2,7 @@ const std = @import("std");
 const core = @import("phoenix_core");
 const tui = @import("tui/tui.zig");
 const onboarding = @import("tui/onboarding.zig");
-const rpc = @import("rpc/rpc.zig");
+const rpc = @import("rpc");
 
 const usage =
     \\Usage: phoenix [--config <path>] <command>
@@ -64,12 +64,14 @@ pub fn main(init: std.process.Init) !void {
     const c = cmd orelse "tui";
 
     if (std.mem.eql(u8, c, "tui")) {
+        const home_for_tui: ?[]u8 = resolveHome(init.gpa);
+        defer if (home_for_tui) |h| init.gpa.free(h);
+
         if (!cfg.defaultProviderUsable(init.gpa)) {
-            const home = resolveHome(init.gpa) orelse {
+            const home = home_for_tui orelse {
                 std.debug.print("phoenix: cannot resolve $HOME for first-time setup\n", .{});
                 std.process.exit(1);
             };
-            defer init.gpa.free(home);
 
             switch (try onboarding.run(init, home)) {
                 .cancelled => return,
@@ -79,9 +81,21 @@ pub fn main(init: std.process.Init) !void {
                 },
             }
         }
-        try tui.run(init, &cfg);
+        // cfg will be freed by the deferred deinit below; the server loads its own copy.
+        // Use argv[0] as the path to the current executable.
+        const argv0: []const u8 = if (init.minimal.args.vector.len > 0)
+            std.mem.sliceTo(init.minimal.args.vector[0], 0)
+        else
+            "phoenix";
+
+        var client = try rpc.Client.spawn(init.gpa, init.io, argv0, explicit_config);
+        defer client.deinit();
+
+        try tui.run(init, &client);
     } else if (std.mem.eql(u8, c, "rpc")) {
-        try rpc.run(init.gpa, &cfg);
+        const home_opt: ?[]u8 = resolveHome(init.gpa);
+        defer if (home_opt) |h| init.gpa.free(h);
+        try rpc.run(init.gpa, init.io, &cfg, home_opt);
     } else {
         std.debug.print("unknown command: {s}\n{s}", .{ c, usage });
         std.process.exit(1);
