@@ -300,7 +300,18 @@ fn runConversation(
     var last_err: ?[]const u8 = null;
     var event_count: u32 = 0;
 
-    while (it.next()) |ev| {
+    // Debug hack: PHOENIX_FORCE_EMPTY=1 short-circuits the provider drain so
+    // every turn surfaces the "(empty response)" path. Useful for exercising
+    // the no-token diagnostic UI without making real Anthropic calls.
+    const force_empty = blk: {
+        const v = std.c.getenv("PHOENIX_FORCE_EMPTY") orelse break :blk false;
+        const s = std.mem.span(v);
+        break :blk s.len > 0 and !std.mem.eql(u8, s, "0");
+    };
+
+    while (!force_empty) {
+        const maybe_ev = it.next();
+        const ev = maybe_ev orelse break;
         event_count += 1;
         switch (ev) {
         .token => |t| {

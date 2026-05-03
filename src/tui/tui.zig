@@ -469,7 +469,7 @@ fn onStreamContext(ctx_ptr: *anyopaque, label: []const u8, body: []const u8) voi
 
 fn onStreamErr(ctx_ptr: *anyopaque, text: []const u8) void {
     const s: *StreamCtx = @ptrCast(@alignCast(ctx_ptr));
-    const msg = std.fmt.allocPrint(s.allocator, "stream err: {s}", .{text}) catch return;
+    const msg = std.fmt.allocPrint(s.allocator, "phoenix: stream error — {s}", .{text}) catch return;
     // Insert before the assistant placeholder so the bubble (if it ends up
     // populated) still appears last.
     s.chat_lines.insert(s.allocator, s.assistant_idx, .{
@@ -546,7 +546,11 @@ fn handleSubmit(
         .on_context = onStreamContext,
         .on_err = onStreamErr,
     }) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "rpc error: {s}", .{@errorName(err)});
+        // The empty assistant bubble was reserved before the call; drop it
+        // since nothing came back.
+        allocator.free(chat_lines.items[stream_ctx.assistant_idx].text);
+        _ = chat_lines.orderedRemove(stream_ctx.assistant_idx);
+        const msg = try std.fmt.allocPrint(allocator, "phoenix: rpc error — {s}", .{@errorName(err)});
         try chat_lines.append(allocator, .{ .role = .system, .text = msg });
         return;
     };
@@ -559,21 +563,23 @@ fn handleSubmit(
 
     switch (sr.outcome) {
         .conversation => |c| {
-            if (!c.ok) {
-                const msg = try std.fmt.allocPrint(allocator, "provider error: {s}", .{c.reason});
-                try chat_lines.append(allocator, .{ .role = .system, .text = msg });
-            }
-            // If no tokens streamed and the call was nominally ok, replace the
-            // empty placeholder with a diagnostic line. stop_reason and token
-            // counts let us tell "model said nothing" (out=0, end_turn) from
-            // "parser missed events" (out>0, end_turn) at a glance.
-            if (c.ok and streaming_buf.items.len == 0) {
+            // For both error and empty-token outcomes, drop the empty assistant
+            // bubble (so the chat doesn't show a blank "you/assistant" turn)
+            // and emit a phoenix system line in its place. Diagnostics belong
+            // to the harness, not the model.
+            if (!c.ok or streaming_buf.items.len == 0) {
                 allocator.free(chat_lines.items[asst_idx].text);
-                chat_lines.items[asst_idx].text = try std.fmt.allocPrint(
-                    allocator,
-                    "(empty response — stop_reason={s}, in={d}, out={d})",
-                    .{ c.stop_reason, c.input_tokens, c.output_tokens },
-                );
+                _ = chat_lines.orderedRemove(asst_idx);
+
+                const msg = if (!c.ok)
+                    try std.fmt.allocPrint(allocator, "phoenix: provider error — {s}", .{c.reason})
+                else
+                    try std.fmt.allocPrint(
+                        allocator,
+                        "phoenix: no response (stop_reason={s}, tokens in={d} out={d}). Check /tmp/phoenix-rpc.log.",
+                        .{ c.stop_reason, c.input_tokens, c.output_tokens },
+                    );
+                try chat_lines.append(allocator, .{ .role = .system, .text = msg });
             }
         },
         .command => |cmd| {
