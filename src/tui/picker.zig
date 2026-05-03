@@ -21,7 +21,7 @@ pub const Picker = struct {
         var initial_cursor: usize = 0;
         for (p.choices, 0..) |c, i| {
             buf[i] = .{
-                .provider_name = try a.dupe(u8, c.provider_name),
+                .provider_index = c.provider_index,
                 .kind = c.kind,
                 .model = try a.dupe(u8, c.model),
                 .is_active = c.is_active,
@@ -105,8 +105,8 @@ pub const Picker = struct {
 
 test "picker height caps at total/2" {
     const choices = [_]commands.ModelChoice{
-        .{ .provider_name = "default", .kind = .claude, .model = "a", .is_active = true },
-        .{ .provider_name = "alt", .kind = .openai, .model = "b", .is_active = false },
+        .{ .provider_index = 0, .kind = .claude, .model = "a", .is_active = true },
+        .{ .provider_index = 1, .kind = .openai, .model = "b", .is_active = false },
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -122,8 +122,8 @@ test "picker height caps at total/2" {
 
 test "picker moveDown stops at end" {
     const choices = [_]commands.ModelChoice{
-        .{ .provider_name = "default", .kind = .claude, .model = "a", .is_active = true },
-        .{ .provider_name = "alt", .kind = .openai, .model = "b", .is_active = false },
+        .{ .provider_index = 0, .kind = .claude, .model = "a", .is_active = true },
+        .{ .provider_index = 1, .kind = .openai, .model = "b", .is_active = false },
     };
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

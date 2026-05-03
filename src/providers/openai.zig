@@ -35,6 +35,7 @@ const OpenAIProvider = struct {
 
 pub fn create(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     transport: ?Transport,
 ) !*Provider {
@@ -46,21 +47,14 @@ pub fn create(
         if (std.mem.eql(u8, api, "responses")) break :blk ApiMode.responses;
         return error.InvalidConfig;
     };
-    return createCompletionsImpl(allocator, cfg, transport, DEFAULT_BASE_URL, true, mode);
+    return createCompletionsImpl(allocator, io, cfg, transport, DEFAULT_BASE_URL, true, mode);
 }
 
 /// Package-internal: used by llamacpp.zig to compose the Chat Completions logic
 /// with a different default URL and optional auth.
-fn getHttpTransport(allocator: std.mem.Allocator) HttpTransport {
-    if (builtin.is_test) {
-        return HttpTransport.init(allocator, std.testing.io);
-    } else {
-        @panic("HttpTransport requires std.Io; inject a Transport");
-    }
-}
-
 pub fn createCompletionsImpl(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     injected: ?Transport,
     default_base_url: []const u8,
@@ -76,7 +70,7 @@ pub fn createCompletionsImpl(
         .allocator = allocator,
         .cfg = cfg,
         .mode = mode,
-        .transport_owned = if (injected == null) getHttpTransport(allocator) else null,
+        .transport_owned = if (injected == null) HttpTransport.init(allocator, io) else null,
         .transport = undefined,
         .default_base_url = default_base_url,
     };
@@ -86,6 +80,9 @@ pub fn createCompletionsImpl(
 
 fn deinitImpl(p: *Provider, allocator: std.mem.Allocator) void {
     const self: *OpenAIProvider = @alignCast(@fieldParentPtr("base", p));
+    if (self.cfg.resolved_credential_owned) {
+        if (self.cfg.resolved_credential) |c| allocator.free(c);
+    }
     if (self.transport_owned) |*t| t.deinit();
     allocator.destroy(self);
 }
@@ -806,7 +803,7 @@ test "openai chat: builds completions request" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "gpt-4o",
         .resolved_credential = "sk-test",
         .api = null,
@@ -847,7 +844,7 @@ test "openai chat: token streaming" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "gpt-4o",
         .resolved_credential = "sk-test",
     }, mock.transport());
@@ -896,7 +893,7 @@ test "openai chat: tool_calls accumulate across deltas" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "gpt-4o",
         .resolved_credential = "sk-test",
     }, mock.transport());
@@ -938,7 +935,7 @@ test "openai responses: builds responses request" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "gpt-4o",
         .resolved_credential = "sk-test",
         .api = "responses",
@@ -974,7 +971,7 @@ test "openai responses: text streaming via response.output_text.delta" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "gpt-4o",
         .resolved_credential = "sk-test",
         .api = "responses",
@@ -1019,7 +1016,7 @@ test "openai responses: function_call streaming" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "gpt-4o",
         .resolved_credential = "sk-test",
         .api = "responses",
@@ -1051,7 +1048,7 @@ test "openai responses: function_call streaming" {
 
 test "openai: invalid api value errors at create()" {
     const allocator = std.testing.allocator;
-    const result = create(allocator, .{
+    const result = create(allocator, std.testing.io, .{
         .model = "gpt-4o",
         .api = "bogus",
     }, null);
@@ -1062,7 +1059,7 @@ test "openai: e2e roundtrip" {
     if (std.c.getenv("PHOENIX_E2E") == null) return error.SkipZigTest;
     const key = std.mem.span(std.c.getenv("OPENAI_API_KEY") orelse return error.SkipZigTest);
 
-    var p = try create(std.testing.allocator, .{
+    var p = try create(std.testing.allocator, std.testing.io, .{
         .model = "gpt-4o-mini",
         .resolved_credential = key,
     }, null);

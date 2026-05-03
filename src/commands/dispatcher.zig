@@ -6,13 +6,14 @@ const skill_cmd = @import("skill.zig");
 
 /// One model entry shown in the picker. Owned by the Result arena.
 pub const ModelChoice = struct {
-    /// Provider name (key in config.providers, e.g. "default").
-    provider_name: []const u8,
+    /// Index into `Config.providers`. The TUI passes this back via
+    /// `applyModelChoice` so the server flips `active = true` on the right row.
+    provider_index: u32,
     /// Provider kind, for display (e.g. "claude").
     kind: core.ProviderKind,
     /// Model id (e.g. "claude-opus-4-7").
     model: []const u8,
-    /// True if this is the currently active model on `default`.
+    /// True if this entry is currently the active provider.
     is_active: bool,
 };
 
@@ -171,7 +172,7 @@ pub fn dispatch(ctx: DispatchCtx, input: []const u8) !Outcome {
     return .{ .arena = arena, .result = .not_a_command };
 }
 
-/// Apply the user's selected ModelChoice: rewrite ~/.phoenix/phoenix.toml with
+/// Apply the user's selected ModelChoice: rewrite ~/.phoenix/phoenix.json with
 /// the new model on `default`, then mutate the in-memory `config.providers`
 /// entry so the status bar updates without a reload. Returns a system message
 /// describing what happened (owned by `out_arena`).

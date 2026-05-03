@@ -8,17 +8,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const toml_dep = b.dependency("toml", .{
-        .target = target,
-        .optimize = optimize,
-    });
 
     const core_mod = b.addModule("phoenix_core", .{
         .root_source_file = b.path("src/core/core.zig"),
         .target = target,
         .optimize = optimize,
     });
-    core_mod.addImport("toml", toml_dep.module("toml"));
 
     // Shared test utilities for provider adapter tests
     const test_util_mod = b.createModule(.{
@@ -119,7 +114,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    core_test_mod.addImport("toml", toml_dep.module("toml"));
 
     // Shared test utilities for test build
     const test_test_util_mod = b.createModule(.{

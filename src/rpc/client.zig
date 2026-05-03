@@ -37,6 +37,38 @@ pub const ApplyResult = struct {
     default_provider: ConfigSnapshot.DefaultProvider,
 };
 
+/// Outcome of a session.send call. The TUI does not pre-classify input —
+/// it submits text and the server decides whether the line was a slash
+/// command (returns `.command`) or a conversational turn (returns
+/// `.conversation` after streaming token events).
+pub const SendOutcome = union(enum) {
+    conversation: ConversationResult,
+    command: DispatchResult,
+};
+
+pub const ConversationResult = struct {
+    /// True iff the provider call ended with a clean `done` event.
+    ok: bool,
+    /// Wire string from the provider event (e.g. "end_turn").
+    /// Owned by the response arena.
+    stop_reason: []const u8,
+    input_tokens: u32,
+    output_tokens: u32,
+    /// Empty when ok=true; the last err event's text when ok=false.
+    /// Owned by the response arena.
+    reason: []const u8,
+};
+
+/// Optional per-event callbacks invoked while sessionSend streams. Slices
+/// passed into a callback are valid only for the duration of that call —
+/// copy them if you need to retain past the next event.
+pub const StreamCallbacks = struct {
+    ctx: *anyopaque,
+    on_token: ?*const fn (ctx: *anyopaque, text: []const u8) void = null,
+    on_context: ?*const fn (ctx: *anyopaque, label: []const u8, body: []const u8) void = null,
+    on_err: ?*const fn (ctx: *anyopaque, text: []const u8) void = null,
+};
+
 pub const Response = struct {
     arena: std.heap.ArenaAllocator,
 
@@ -148,73 +180,14 @@ pub const Client = struct {
         const a = resp.response.arena.allocator();
 
         const result_val = resp.result orelse return error.RpcError;
-        if (result_val != .object) return error.RpcError;
-        const obj = result_val.object;
-
-        const kind_v = obj.get("kind") orelse return error.RpcError;
-        if (kind_v != .string) return error.RpcError;
-        const kind = kind_v.string;
-
-        const dr: DispatchResult = blk: {
-            if (std.mem.eql(u8, kind, "not_a_command")) {
-                break :blk .not_a_command;
-            } else if (std.mem.eql(u8, kind, "message")) {
-                const tv = obj.get("text") orelse break :blk DispatchResult{ .message = "" };
-                const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
-                break :blk DispatchResult{ .message = text };
-            } else if (std.mem.eql(u8, kind, "err")) {
-                const tv = obj.get("text") orelse break :blk DispatchResult{ .err = "" };
-                const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
-                break :blk DispatchResult{ .err = text };
-            } else if (std.mem.eql(u8, kind, "model_picker")) {
-                const title_v = obj.get("title") orelse break :blk DispatchResult{ .err = "missing title" };
-                const title = if (title_v == .string) try a.dupe(u8, title_v.string) else try a.dupe(u8, "");
-                const choices_v = obj.get("choices") orelse break :blk DispatchResult{ .model_picker = .{ .title = title, .choices = &.{} } };
-                var choices_list: std.ArrayList(commands.ModelChoice) = .empty;
-                if (choices_v == .array) {
-                    for (choices_v.array.items) |cv| {
-                        if (cv != .object) continue;
-                        const co = cv.object;
-                        const pn_v = co.get("provider_name") orelse continue;
-                        const kn_v = co.get("kind") orelse continue;
-                        const md_v = co.get("model") orelse continue;
-                        const ia_v = co.get("is_active") orelse continue;
-                        if (pn_v != .string or kn_v != .string or md_v != .string or ia_v != .bool) continue;
-                        const ck = std.meta.stringToEnum(core.ProviderKind, kn_v.string) orelse continue;
-                        try choices_list.append(a, commands.ModelChoice{
-                            .provider_name = try a.dupe(u8, pn_v.string),
-                            .kind = ck,
-                            .model = try a.dupe(u8, md_v.string),
-                            .is_active = ia_v.bool,
-                        });
-                    }
-                }
-                break :blk DispatchResult{ .model_picker = .{
-                    .title = title,
-                    .choices = try choices_list.toOwnedSlice(a),
-                } };
-            } else if (std.mem.eql(u8, kind, "inject_context")) {
-                const label_v = obj.get("label") orelse break :blk DispatchResult{ .err = "missing label" };
-                const body_v = obj.get("body") orelse break :blk DispatchResult{ .err = "missing body" };
-                const um_v = obj.get("user_message") orelse break :blk DispatchResult{ .err = "missing user_message" };
-                break :blk DispatchResult{ .inject_context = .{
-                    .label = if (label_v == .string) try a.dupe(u8, label_v.string) else try a.dupe(u8, ""),
-                    .body = if (body_v == .string) try a.dupe(u8, body_v.string) else try a.dupe(u8, ""),
-                    .user_message = if (um_v == .string) try a.dupe(u8, um_v.string) else try a.dupe(u8, ""),
-                } };
-            } else {
-                break :blk DispatchResult{ .err = try std.fmt.allocPrint(a, "unknown kind: {s}", .{kind}) };
-            }
-        };
-
+        const dr = try parseDispatchResult(a, result_val);
         return .{ .result = dr, .response = resp.response };
     }
 
     pub fn applyModelChoice(self: *Client, choice: commands.ModelChoice) !struct { result: ApplyResult, response: Response } {
         var params_buf: std.ArrayList(u8) = .empty;
         defer params_buf.deinit(self.gpa);
-        try params_buf.appendSlice(self.gpa, "{\"provider_name\":");
-        try writeJsonString(&params_buf, self.gpa, choice.provider_name);
+        try params_buf.print(self.gpa, "{{\"provider_index\":{d}", .{choice.provider_index});
         try params_buf.appendSlice(self.gpa, ",\"kind\":");
         try writeJsonString(&params_buf, self.gpa, @tagName(choice.kind));
         try params_buf.appendSlice(self.gpa, ",\"model\":");
@@ -250,6 +223,143 @@ pub const Client = struct {
             },
             .response = resp.response,
         };
+    }
+
+    /// Submit one user-typed line to the server. The server classifies it as
+    /// either a slash command (single terminal `command` outcome) or a normal
+    /// conversation turn (zero or more streamed events followed by a
+    /// `conversation` outcome). The returned response arena owns any strings
+    /// borrowed by the outcome; callbacks see arena-borrowed slices that are
+    /// only valid for the duration of the call.
+    pub fn sessionSend(
+        self: *Client,
+        text: []const u8,
+        callbacks: StreamCallbacks,
+    ) !struct { outcome: SendOutcome, response: Response } {
+        const id = self.next_id;
+        self.next_id += 1;
+
+        // Build params JSON: {"text": <escaped>}.
+        var params: std.ArrayList(u8) = .empty;
+        defer params.deinit(self.gpa);
+        try params.appendSlice(self.gpa, "{\"text\":");
+        try writeJsonString(&params, self.gpa, text);
+        try params.appendSlice(self.gpa, "}");
+
+        try self.writeRequestLine(id, "session.send", params.items);
+
+        var resp_arena = std.heap.ArenaAllocator.init(self.gpa);
+        errdefer resp_arena.deinit();
+
+        // Per-iteration arena for parsing each streamed line. Reused across
+        // events; deinit'd at the end. Token slices passed to on_token are
+        // freed before the next read.
+        var line_arena = std.heap.ArenaAllocator.init(self.gpa);
+        defer line_arena.deinit();
+
+        while (true) {
+            _ = line_arena.reset(.retain_capacity);
+            try self.readLine();
+            const line = self.line_buf.items;
+
+            const parsed = std.json.parseFromSliceLeaky(
+                std.json.Value,
+                line_arena.allocator(),
+                line,
+                .{},
+            ) catch return error.RpcError;
+            if (parsed != .object) return error.RpcError;
+            const obj = parsed.object;
+
+            if (obj.get("id")) |id_v| {
+                if (id_v == .integer and id_v.integer != id) return error.RpcError;
+            }
+
+            // error envelope = pre-stream failure.
+            if (obj.get("error") != null) return error.RpcError;
+
+            // Streaming event line.
+            if (obj.get("event")) |ev_v| {
+                if (ev_v != .object) continue;
+                const ev = ev_v.object;
+                const kind_v = ev.get("kind") orelse continue;
+                if (kind_v != .string) continue;
+
+                if (std.mem.eql(u8, kind_v.string, "token")) {
+                    const text_v = ev.get("text") orelse continue;
+                    if (text_v != .string) continue;
+                    if (callbacks.on_token) |cb| cb(callbacks.ctx, text_v.string);
+                } else if (std.mem.eql(u8, kind_v.string, "context")) {
+                    const label_v = ev.get("label") orelse continue;
+                    const body_v = ev.get("body") orelse continue;
+                    if (label_v != .string or body_v != .string) continue;
+                    if (callbacks.on_context) |cb| cb(callbacks.ctx, label_v.string, body_v.string);
+                } else if (std.mem.eql(u8, kind_v.string, "err")) {
+                    const text_v = ev.get("text") orelse continue;
+                    if (text_v != .string) continue;
+                    if (callbacks.on_err) |cb| cb(callbacks.ctx, text_v.string);
+                }
+                continue;
+            }
+
+            // Terminal result.
+            const result_v = obj.get("result") orelse return error.RpcError;
+            if (result_v != .object) return error.RpcError;
+            const result = result_v.object;
+            const rkind_v = result.get("kind") orelse return error.RpcError;
+            if (rkind_v != .string) return error.RpcError;
+            const rkind = rkind_v.string;
+
+            const a = resp_arena.allocator();
+            if (std.mem.eql(u8, rkind, "conversation")) {
+                const ok_v = result.get("ok") orelse return error.RpcError;
+                if (ok_v != .bool) return error.RpcError;
+                const stop_v = result.get("stop_reason") orelse std.json.Value{ .string = "" };
+                const stop_str: []const u8 = if (stop_v == .string) stop_v.string else "";
+                const in_v = result.get("input_tokens") orelse std.json.Value{ .integer = 0 };
+                const out_v = result.get("output_tokens") orelse std.json.Value{ .integer = 0 };
+                const reason_v = result.get("reason") orelse std.json.Value{ .string = "" };
+                const reason_str: []const u8 = if (reason_v == .string) reason_v.string else "";
+                return .{
+                    .outcome = .{ .conversation = .{
+                        .ok = ok_v.bool,
+                        .stop_reason = try a.dupe(u8, stop_str),
+                        .input_tokens = if (in_v == .integer) @intCast(in_v.integer) else 0,
+                        .output_tokens = if (out_v == .integer) @intCast(out_v.integer) else 0,
+                        .reason = try a.dupe(u8, reason_str),
+                    } },
+                    .response = .{ .arena = resp_arena },
+                };
+            } else if (std.mem.eql(u8, rkind, "command")) {
+                const cmd_v = result.get("command") orelse return error.RpcError;
+                const dr = try parseDispatchResult(a, cmd_v);
+                return .{
+                    .outcome = .{ .command = dr },
+                    .response = .{ .arena = resp_arena },
+                };
+            } else {
+                return error.RpcError;
+            }
+        }
+    }
+
+    fn writeRequestLine(
+        self: *Client,
+        id: i64,
+        method: []const u8,
+        params_json: ?[]const u8,
+    ) !void {
+        var req: std.ArrayList(u8) = .empty;
+        defer req.deinit(self.gpa);
+        try req.print(self.gpa, "{{\"id\":{d},\"method\":", .{id});
+        try writeJsonString(&req, self.gpa, method);
+        if (params_json) |pj| {
+            try req.appendSlice(self.gpa, ",\"params\":");
+            try req.appendSlice(self.gpa, pj);
+        }
+        try req.appendSlice(self.gpa, "}\n");
+        const stdin_fd = self.child.stdin.?.handle;
+        try writeAll(stdin_fd, req.items);
     }
 
     /// Internal: write one JSON-line request, read one JSON-line response,
@@ -325,6 +435,69 @@ pub const Client = struct {
         }
     }
 };
+
+/// Parse a server dispatch payload (the inside of `result` from command.dispatch
+/// or `result.command` from session.send) into a DispatchResult. Allocates
+/// borrowed strings on `a`.
+fn parseDispatchResult(a: std.mem.Allocator, result_val: std.json.Value) !DispatchResult {
+    if (result_val != .object) return error.RpcError;
+    const obj = result_val.object;
+
+    const kind_v = obj.get("kind") orelse return error.RpcError;
+    if (kind_v != .string) return error.RpcError;
+    const kind = kind_v.string;
+
+    if (std.mem.eql(u8, kind, "not_a_command")) {
+        return .not_a_command;
+    } else if (std.mem.eql(u8, kind, "message")) {
+        const tv = obj.get("text") orelse return DispatchResult{ .message = "" };
+        const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
+        return DispatchResult{ .message = text };
+    } else if (std.mem.eql(u8, kind, "err")) {
+        const tv = obj.get("text") orelse return DispatchResult{ .err = "" };
+        const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
+        return DispatchResult{ .err = text };
+    } else if (std.mem.eql(u8, kind, "model_picker")) {
+        const title_v = obj.get("title") orelse return DispatchResult{ .err = "missing title" };
+        const title = if (title_v == .string) try a.dupe(u8, title_v.string) else try a.dupe(u8, "");
+        const choices_v = obj.get("choices") orelse return DispatchResult{ .model_picker = .{ .title = title, .choices = &.{} } };
+        var choices_list: std.ArrayList(commands.ModelChoice) = .empty;
+        if (choices_v == .array) {
+            for (choices_v.array.items) |cv| {
+                if (cv != .object) continue;
+                const co = cv.object;
+                const pi_v = co.get("provider_index") orelse continue;
+                const kn_v = co.get("kind") orelse continue;
+                const md_v = co.get("model") orelse continue;
+                const ia_v = co.get("is_active") orelse continue;
+                if (pi_v != .integer or kn_v != .string or md_v != .string or ia_v != .bool) continue;
+                if (pi_v.integer < 0) continue;
+                const ck = std.meta.stringToEnum(core.ProviderKind, kn_v.string) orelse continue;
+                try choices_list.append(a, commands.ModelChoice{
+                    .provider_index = @intCast(pi_v.integer),
+                    .kind = ck,
+                    .model = try a.dupe(u8, md_v.string),
+                    .is_active = ia_v.bool,
+                });
+            }
+        }
+        return DispatchResult{ .model_picker = .{
+            .title = title,
+            .choices = try choices_list.toOwnedSlice(a),
+        } };
+    } else if (std.mem.eql(u8, kind, "inject_context")) {
+        const label_v = obj.get("label") orelse return DispatchResult{ .err = "missing label" };
+        const body_v = obj.get("body") orelse return DispatchResult{ .err = "missing body" };
+        const um_v = obj.get("user_message") orelse return DispatchResult{ .err = "missing user_message" };
+        return DispatchResult{ .inject_context = .{
+            .label = if (label_v == .string) try a.dupe(u8, label_v.string) else try a.dupe(u8, ""),
+            .body = if (body_v == .string) try a.dupe(u8, body_v.string) else try a.dupe(u8, ""),
+            .user_message = if (um_v == .string) try a.dupe(u8, um_v.string) else try a.dupe(u8, ""),
+        } };
+    } else {
+        return DispatchResult{ .err = try std.fmt.allocPrint(a, "unknown kind: {s}", .{kind}) };
+    }
+}
 
 fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
     var remaining = data;
@@ -407,7 +580,7 @@ test "client parseDispatchResponse model_picker" {
     const a = arena.allocator();
 
     const line =
-        \\{"id":1,"result":{"kind":"model_picker","title":"Pick","choices":[{"provider_name":"default","kind":"claude","model":"claude-opus-4-7","is_active":true}]}}
+        \\{"id":1,"result":{"kind":"model_picker","title":"Pick","choices":[{"provider_index":0,"kind":"claude","model":"claude-opus-4-7","is_active":true}]}}
     ;
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, line, .{});
     const result = parsed.object.get("result").?;

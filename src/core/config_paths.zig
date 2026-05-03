@@ -64,9 +64,9 @@ pub const Discovery = struct {
             paths.project_dir = try std.fs.path.join(allocator, &.{ cwd, ".phoenix" });
         }
 
-        // User config file = <user_dir>/phoenix.toml if it exists. Missing => null.
+        // User config file = <user_dir>/phoenix.json if it exists. Missing => null.
         if (paths.user_dir) |udir| {
-            const candidate = try std.fs.path.join(allocator, &.{ udir, "phoenix.toml" });
+            const candidate = try std.fs.path.join(allocator, &.{ udir, "phoenix.json" });
             if (fileExistsPosix(candidate)) {
                 paths.user = candidate;
             } else {
@@ -75,9 +75,9 @@ pub const Discovery = struct {
             }
         }
 
-        // Project config file = <project_dir>/phoenix.toml if it exists. Missing => null.
+        // Project config file = <project_dir>/phoenix.json if it exists. Missing => null.
         if (paths.project_dir) |pdir| {
-            const candidate = try std.fs.path.join(allocator, &.{ pdir, "phoenix.toml" });
+            const candidate = try std.fs.path.join(allocator, &.{ pdir, "phoenix.json" });
             if (fileExistsPosix(candidate)) {
                 paths.project = candidate;
             } else {
@@ -159,9 +159,9 @@ test "finds project config" {
     defer allocator.free(phoenix_dir);
     try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
 
-    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
-    defer allocator.free(toml_path);
-    const f = try std.Io.Dir.cwd().createFile(std.testing.io, toml_path, .{});
+    const json_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.json" });
+    defer allocator.free(json_path);
+    const f = try std.Io.Dir.cwd().createFile(std.testing.io, json_path, .{});
     f.close(std.testing.io);
 
     const d: Discovery = .{ .home = home, .cwd = cwd };
@@ -170,7 +170,7 @@ test "finds project config" {
 
     try std.testing.expect(paths.user == null);
     try std.testing.expect(paths.project != null);
-    try std.testing.expect(std.mem.endsWith(u8, paths.project.?, "phoenix.toml"));
+    try std.testing.expect(std.mem.endsWith(u8, paths.project.?, "phoenix.json"));
 }
 
 test "finds user config" {
@@ -192,9 +192,9 @@ test "finds user config" {
     defer allocator.free(phoenix_dir);
     try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
 
-    const toml_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.toml" });
-    defer allocator.free(toml_path);
-    const f = try std.Io.Dir.cwd().createFile(std.testing.io, toml_path, .{});
+    const json_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.json" });
+    defer allocator.free(json_path);
+    const f = try std.Io.Dir.cwd().createFile(std.testing.io, json_path, .{});
     f.close(std.testing.io);
 
     try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
@@ -204,7 +204,7 @@ test "finds user config" {
     defer paths.deinit(allocator);
 
     try std.testing.expect(paths.user != null);
-    try std.testing.expect(std.mem.endsWith(u8, paths.user.?, "phoenix.toml"));
+    try std.testing.expect(std.mem.endsWith(u8, paths.user.?, "phoenix.json"));
     try std.testing.expect(paths.project == null);
 }
 
@@ -224,12 +224,12 @@ test "explicit pass-through" {
     try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
     try std.Io.Dir.cwd().createDirPath(std.testing.io, cwd);
 
-    const d: Discovery = .{ .home = home, .cwd = cwd, .explicit_path = "/some/custom/path.toml" };
+    const d: Discovery = .{ .home = home, .cwd = cwd, .explicit_path = "/some/custom/path.json" };
     var paths = try d.discover(std.testing.io, allocator);
     defer paths.deinit(allocator);
 
     try std.testing.expect(paths.explicit != null);
-    try std.testing.expectEqualStrings("/some/custom/path.toml", paths.explicit.?);
+    try std.testing.expectEqualStrings("/some/custom/path.json", paths.explicit.?);
 }
 
 fn getTmpDirPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {

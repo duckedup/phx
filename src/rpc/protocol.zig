@@ -31,8 +31,19 @@ pub fn parseDispatchParams(arena: std.mem.Allocator, v: std.json.Value) !Dispatc
     return .{ .input = try arena.dupe(u8, input_v.string) };
 }
 
+pub const SessionSendParams = struct {
+    text: []const u8,
+};
+
+pub fn parseSessionSendParams(arena: std.mem.Allocator, v: std.json.Value) !SessionSendParams {
+    if (v != .object) return error.InvalidParams;
+    const text_v = v.object.get("text") orelse return error.InvalidParams;
+    if (text_v != .string) return error.InvalidParams;
+    return .{ .text = try arena.dupe(u8, text_v.string) };
+}
+
 pub const ApplyModelChoiceParams = struct {
-    provider_name: []const u8,
+    provider_index: u32,
     kind: core.ProviderKind,
     model: []const u8,
     is_active: bool,
@@ -41,14 +52,15 @@ pub const ApplyModelChoiceParams = struct {
 pub fn parseApplyModelChoiceParams(arena: std.mem.Allocator, v: std.json.Value) !ApplyModelChoiceParams {
     if (v != .object) return error.InvalidParams;
     const obj = v.object;
-    const pn = obj.get("provider_name") orelse return error.InvalidParams;
+    const pi = obj.get("provider_index") orelse return error.InvalidParams;
     const kn = obj.get("kind") orelse return error.InvalidParams;
     const md = obj.get("model") orelse return error.InvalidParams;
     const ia = obj.get("is_active") orelse return error.InvalidParams;
-    if (pn != .string or kn != .string or md != .string or ia != .bool) return error.InvalidParams;
+    if (pi != .integer or kn != .string or md != .string or ia != .bool) return error.InvalidParams;
+    if (pi.integer < 0) return error.InvalidParams;
     const kind = std.meta.stringToEnum(core.ProviderKind, kn.string) orelse return error.InvalidParams;
     return .{
-        .provider_name = try arena.dupe(u8, pn.string),
+        .provider_index = @intCast(pi.integer),
         .kind = kind,
         .model = try arena.dupe(u8, md.string),
         .is_active = ia.bool,
@@ -97,8 +109,7 @@ pub fn writeDispatchResult(
             try out.appendSlice(a, ",\"choices\":[");
             for (p.choices, 0..) |c, i| {
                 if (i > 0) try out.appendSlice(a, ",");
-                try out.appendSlice(a, "{\"provider_name\":");
-                try writeJsonString(out, a, c.provider_name);
+                try out.print(a, "{{\"provider_index\":{d}", .{c.provider_index});
                 try out.appendSlice(a, ",\"kind\":");
                 try writeJsonString(out, a, @tagName(c.kind));
                 try out.appendSlice(a, ",\"model\":");
@@ -117,6 +128,100 @@ pub fn writeDispatchResult(
             try out.appendSlice(a, "}");
         },
     }
+}
+
+/// Map a StopReason enum to the wire string used in session.send terminal results.
+fn stopReasonName(sr: core.StopReason) []const u8 {
+    return switch (sr) {
+        .end_turn => "end_turn",
+        .max_tokens => "max_tokens",
+        .tool_use => "tool_use",
+        .stop_sequence => "stop_sequence",
+        .other => "other",
+    };
+}
+
+/// Write a complete `event` line for a session.send stream:
+///   {"id":N,"event":{"kind":"token","text":"..."}}
+/// Caller appends the trailing '\n' before flushing.
+pub fn writeEventTokenLine(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    id: i64,
+    text: []const u8,
+) !void {
+    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"token\",\"text\":", .{id});
+    try writeJsonString(out, a, text);
+    try out.appendSlice(a, "}}");
+}
+
+/// Write a complete `event` line for a streamed err notice:
+///   {"id":N,"event":{"kind":"err","text":"..."}}
+/// Caller appends the trailing '\n' before flushing.
+pub fn writeEventErrLine(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    id: i64,
+    text: []const u8,
+) !void {
+    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"err\",\"text\":", .{id});
+    try writeJsonString(out, a, text);
+    try out.appendSlice(a, "}}");
+}
+
+/// Write a complete `event` line for an inject_context preamble:
+///   {"id":N,"event":{"kind":"context","label":"...","body":"..."}}
+/// Caller appends the trailing '\n' before flushing.
+pub fn writeEventContextLine(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    id: i64,
+    label: []const u8,
+    body: []const u8,
+) !void {
+    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"context\",\"label\":", .{id});
+    try writeJsonString(out, a, label);
+    try out.appendSlice(a, ",\"body\":");
+    try writeJsonString(out, a, body);
+    try out.appendSlice(a, "}}");
+}
+
+/// Write the body of a session.send terminal result for a successful conversation
+/// turn. Caller wraps with `writeSuccess` and appends '\n'.
+pub fn writeSendConversationOkBody(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    stop_reason: core.StopReason,
+    input_tokens: u32,
+    output_tokens: u32,
+) !void {
+    try out.appendSlice(a, "{\"kind\":\"conversation\",\"ok\":true,\"stop_reason\":");
+    try writeJsonString(out, a, stopReasonName(stop_reason));
+    try out.print(a, ",\"input_tokens\":{d},\"output_tokens\":{d}}}", .{ input_tokens, output_tokens });
+}
+
+/// Write the body of a session.send terminal result for a conversation that
+/// emitted at least one event but ultimately failed (e.g. provider err mid-stream).
+pub fn writeSendConversationErrBody(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    reason: []const u8,
+) !void {
+    try out.appendSlice(a, "{\"kind\":\"conversation\",\"ok\":false,\"reason\":");
+    try writeJsonString(out, a, reason);
+    try out.appendSlice(a, "}");
+}
+
+/// Write the body of a session.send terminal result for a slash-command outcome
+/// (no event lines were emitted, no AI call was made).
+pub fn writeSendCommandBody(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    r: commands.Result,
+) !void {
+    try out.appendSlice(a, "{\"kind\":\"command\",\"command\":");
+    try writeDispatchResult(out, a, r);
+    try out.appendSlice(a, "}");
 }
 
 pub fn writeApplyModelChoiceResult(
@@ -245,7 +350,7 @@ test "writeDispatchResult model_picker" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
     const choices = [_]commands.ModelChoice{.{
-        .provider_name = "default",
+        .provider_index = 0,
         .kind = .claude,
         .model = "claude-opus-4-7",
         .is_active = true,
@@ -321,11 +426,11 @@ test "parseApplyModelChoiceParams ok" {
     const v = try std.json.parseFromSliceLeaky(
         std.json.Value,
         arena.allocator(),
-        "{\"provider_name\":\"default\",\"kind\":\"claude\",\"model\":\"claude-opus-4-7\",\"is_active\":true}",
+        "{\"provider_index\":0,\"kind\":\"claude\",\"model\":\"claude-opus-4-7\",\"is_active\":true}",
         .{},
     );
     const p = try parseApplyModelChoiceParams(arena.allocator(), v);
-    try std.testing.expectEqualStrings("default", p.provider_name);
+    try std.testing.expectEqual(@as(u32, 0), p.provider_index);
     try std.testing.expectEqual(core.ProviderKind.claude, p.kind);
     try std.testing.expectEqualStrings("claude-opus-4-7", p.model);
     try std.testing.expect(p.is_active);
@@ -337,8 +442,107 @@ test "parseApplyModelChoiceParams unknown kind is InvalidParams" {
     const v = try std.json.parseFromSliceLeaky(
         std.json.Value,
         arena.allocator(),
-        "{\"provider_name\":\"default\",\"kind\":\"notreal\",\"model\":\"m\",\"is_active\":false}",
+        "{\"provider_index\":0,\"kind\":\"notreal\",\"model\":\"m\",\"is_active\":false}",
         .{},
     );
     try std.testing.expectError(error.InvalidParams, parseApplyModelChoiceParams(arena.allocator(), v));
+}
+
+test "parseSessionSendParams ok" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "{\"text\":\"hi there\"}", .{});
+    const p = try parseSessionSendParams(arena.allocator(), v);
+    try std.testing.expectEqualStrings("hi there", p.text);
+}
+
+test "parseSessionSendParams missing text is InvalidParams" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "{}", .{});
+    try std.testing.expectError(error.InvalidParams, parseSessionSendParams(arena.allocator(), v));
+}
+
+test "writeEventTokenLine escapes special chars" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeEventTokenLine(&out, a, 7, "He\"l\nlo");
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"id\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"token\"") != null);
+    // The text field must contain JSON-escaped contents.
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "He\\\"l\\nlo") != null);
+}
+
+test "writeEventErrLine round-trip" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeEventErrLine(&out, a, 3, "server overloaded");
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"id\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"err\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "server overloaded") != null);
+}
+
+test "writeEventContextLine includes label and body" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeEventContextLine(&out, a, 4, "skill:research", "do thorough research");
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"id\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"context\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "skill:research") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "do thorough research") != null);
+}
+
+test "writeSendConversationOkBody shape" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeSendConversationOkBody(&out, a, .end_turn, 12, 34);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"conversation\",\"ok\":true,\"stop_reason\":\"end_turn\",\"input_tokens\":12,\"output_tokens\":34}",
+        out.items,
+    );
+}
+
+test "writeSendConversationErrBody shape" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeSendConversationErrBody(&out, a, "MissingCredential");
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"conversation\",\"ok\":false,\"reason\":\"MissingCredential\"}",
+        out.items,
+    );
+}
+
+test "writeSendCommandBody wraps a dispatch payload" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeSendCommandBody(&out, a, .{ .message = "config dump" });
+    try std.testing.expect(std.mem.startsWith(u8, out.items, "{\"kind\":\"command\",\"command\":"));
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"message\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "config dump") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out.items, "}"));
+}
+
+test "writeSendCommandBody with model_picker" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    const choices = [_]commands.ModelChoice{.{
+        .provider_index = 0,
+        .kind = .claude,
+        .model = "claude-opus-4-7",
+        .is_active = true,
+    }};
+    try writeSendCommandBody(&out, a, .{ .model_picker = .{
+        .title = "Pick a model",
+        .choices = &choices,
+    } });
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"command\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"model_picker\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "claude-opus-4-7") != null);
 }

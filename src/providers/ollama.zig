@@ -27,16 +27,9 @@ const OllamaProvider = struct {
     transport: Transport,
 };
 
-fn getHttpTransport(allocator: std.mem.Allocator) HttpTransport {
-    if (builtin.is_test) {
-        return HttpTransport.init(allocator, std.testing.io);
-    } else {
-        @panic("HttpTransport requires std.Io; inject a Transport");
-    }
-}
-
 pub fn create(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     injected: ?Transport,
 ) !*Provider {
@@ -46,7 +39,7 @@ pub fn create(
         .base = .{ .name = "ollama", .sendFn = sendImpl, .deinitFn = deinitImpl },
         .allocator = allocator,
         .cfg = cfg,
-        .transport_owned = if (injected == null) getHttpTransport(allocator) else null,
+        .transport_owned = if (injected == null) HttpTransport.init(allocator, io) else null,
         .transport = undefined,
     };
     self.transport = if (injected) |t| t else self.transport_owned.?.transport();
@@ -55,6 +48,9 @@ pub fn create(
 
 fn deinitImpl(p: *Provider, allocator: std.mem.Allocator) void {
     const self: *OllamaProvider = @alignCast(@fieldParentPtr("base", p));
+    if (self.cfg.resolved_credential_owned) {
+        if (self.cfg.resolved_credential) |c| allocator.free(c);
+    }
     if (self.transport_owned) |*t| t.deinit();
     allocator.destroy(self);
 }
@@ -391,7 +387,7 @@ test "ollama: builds /api/chat request" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "llama3.1",
     }, mock.transport());
     defer provider.deinit(allocator);
@@ -423,7 +419,7 @@ test "ollama: NDJSON token streaming" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{ .model = "llama3.1" }, mock.transport());
+    var provider = try create(allocator, std.testing.io, .{ .model = "llama3.1" }, mock.transport());
     defer provider.deinit(allocator);
 
     const messages = [_]Message{.{ .role = .user, .content = "hi" }};
@@ -461,7 +457,7 @@ test "ollama: tool_calls yield tool_call events" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{ .model = "llama3.1" }, mock.transport());
+    var provider = try create(allocator, std.testing.io, .{ .model = "llama3.1" }, mock.transport());
     defer provider.deinit(allocator);
 
     const messages = [_]Message{.{ .role = .user, .content = "use tool" }};
@@ -499,7 +495,7 @@ test "ollama: tool_result message serializes" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{ .model = "llama3.1" }, mock.transport());
+    var provider = try create(allocator, std.testing.io, .{ .model = "llama3.1" }, mock.transport());
     defer provider.deinit(allocator);
 
     const messages = [_]Message{
@@ -541,7 +537,7 @@ test "ollama: partial line buffering" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{ .model = "llama3.1" }, mock.transport());
+    var provider = try create(allocator, std.testing.io, .{ .model = "llama3.1" }, mock.transport());
     defer provider.deinit(allocator);
 
     const messages = [_]Message{.{ .role = .user, .content = "hi" }};
@@ -569,7 +565,7 @@ test "ollama: partial line buffering" {
 test "ollama: e2e roundtrip" {
     if (std.c.getenv("PHOENIX_E2E") == null) return error.SkipZigTest;
 
-    var p = try create(std.testing.allocator, .{
+    var p = try create(std.testing.allocator, std.testing.io, .{
         .model = "llama3.2",
     }, null);
     defer p.deinit(std.testing.allocator);

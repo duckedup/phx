@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
         const home_for_tui: ?[]u8 = resolveHome(init.gpa);
         defer if (home_for_tui) |h| init.gpa.free(h);
 
-        if (!cfg.defaultProviderUsable(init.gpa)) {
+        if (!cfg.activeProviderUsable(init.gpa)) {
             const home = home_for_tui orelse {
                 std.debug.print("phoenix: cannot resolve $HOME for first-time setup\n", .{});
                 std.process.exit(1);

@@ -16,11 +16,13 @@ const DEFAULT_BASE_URL = "http://localhost:8080";
 
 pub fn create(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     transport: ?Transport,
 ) !*Provider {
     var p = try openai.createCompletionsImpl(
         allocator,
+        io,
         cfg,
         transport,
         DEFAULT_BASE_URL,
@@ -50,7 +52,7 @@ test "llamacpp: defaults to localhost:8080" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{ .model = "llama-3" }, mock.transport());
+    var provider = try create(allocator, std.testing.io, .{ .model = "llama-3" }, mock.transport());
     defer provider.deinit(allocator);
 
     const messages = [_]Message{.{ .role = .user, .content = "hi" }};
@@ -71,7 +73,7 @@ test "llamacpp: no Authorization header when no credential" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "llama-3",
         .resolved_credential = null,
     }, mock.transport());
@@ -95,7 +97,7 @@ test "llamacpp: with credential, sends Bearer auth" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "llama-3",
         .resolved_credential = "secret",
     }, mock.transport());
@@ -127,7 +129,7 @@ test "llamacpp: token streaming works (shares openai parser)" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{ .model = "llama-3" }, mock.transport());
+    var provider = try create(allocator, std.testing.io, .{ .model = "llama-3" }, mock.transport());
     defer provider.deinit(allocator);
 
     const messages = [_]Message{.{ .role = .user, .content = "hi" }};
@@ -156,7 +158,7 @@ test "llamacpp: token streaming works (shares openai parser)" {
 test "llamacpp: e2e roundtrip" {
     if (std.c.getenv("PHOENIX_E2E") == null) return error.SkipZigTest;
 
-    var p = try create(std.testing.allocator, .{ .model = "local-model" }, null);
+    var p = try create(std.testing.allocator, std.testing.io, .{ .model = "local-model" }, null);
     defer p.deinit(std.testing.allocator);
 
     const msgs = [_]Message{.{ .role = .user, .content = "Reply with the word OK and nothing else." }};

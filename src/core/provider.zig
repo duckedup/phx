@@ -123,6 +123,12 @@ pub const ProviderConfig = struct {
     /// Resolved bearer token / api key (filled in by createProvider before send).
     /// Adapters do NOT call AuthConfig.resolve themselves.
     resolved_credential: ?[]const u8 = null,
+    /// True iff `resolved_credential` was heap-allocated by `createProvider`
+    /// and must be freed by the adapter on deinit. False when the caller
+    /// (tests, mainly) supplies a string-literal or otherwise non-owned
+    /// slice. The registry sets this to true when it dupes through
+    /// `AuthConfig.resolve`.
+    resolved_credential_owned: bool = false,
 
     /// Optional system prompt; some providers take this as a separate field
     /// (Anthropic), others embed it in the messages array (OpenAI).

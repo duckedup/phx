@@ -41,6 +41,11 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
     var scroll_offset: u16 = 0;
     var last_chat_h: u16 = 20;
 
+    // Backing buffer for the status-bar text. vaxis.Window.print stores
+    // grapheme slices by reference (no copy), so this buffer must outlive
+    // each `vx.render` call — i.e. it lives for the entire run() scope.
+    var status_buf: [128]u8 = undefined;
+
     var paste_count: u32 = 0;
     var pasting = false;
     var paste_start_line: usize = 0;
@@ -232,25 +237,20 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                 } else if (key.codepoint == vaxis.Key.enter or key.codepoint == vaxis.Key.kp_enter) {
                     const full = try buildFullInput(&input_lines, allocator);
 
-                    if (pending_full.items.len > 0) {
-                        // Expand paste labels in the input with actual content
+                    // If pasted regions were captured, splice their actual content
+                    // back in before submitting.
+                    const submitted: ?[]u8 = if (pending_full.items.len > 0) blk: {
                         const expanded = try expandPasteLabels(full, &pending_full, allocator);
                         allocator.free(full);
                         for (pending_full.items) |p2| allocator.free(p2);
                         pending_full.clearRetainingCapacity();
+                        break :blk expanded;
+                    } else if (full.len > 0) full else blk: {
+                        allocator.free(full);
+                        break :blk null;
+                    };
 
-                        try chat_lines.append(allocator, .{
-                            .role = .user,
-                            .text = expanded,
-                        });
-
-                        try chat_lines.append(allocator, .{
-                            .role = .assistant,
-                            .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
-                        });
-                        scroll_offset = 0;
-                        clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
-                    } else if (full.len > 0) {
+                    if (submitted) |s| {
                         try handleSubmit(
                             &chat_lines,
                             &input_lines,
@@ -258,12 +258,15 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                             &cursor_col,
                             &picker,
                             &scroll_offset,
+                            &last_chat_h,
+                            &vx,
+                            writer,
+                            status_view,
                             allocator,
                             client,
-                            full,
+                            s,
+                            &status_buf,
                         );
-                    } else {
-                        allocator.free(full);
                     }
                 } else if (key.codepoint == vaxis.Key.backspace) {
                     deleteBeforeCursor(&input_lines, &cursor_line, &cursor_col, allocator);
@@ -304,70 +307,164 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
             else => {},
         }
 
-        const win = vx.window();
-        win.clear();
-
-        const w = win.width;
-        const h = win.height;
-        if (w == 0 or h == 0) continue;
-
-        const status_h: u16 = 1;
-        // Input height: 1 line per input line, +2 for borders, min 3, max 10
-        const raw_input_lines: u16 = @intCast(@min(input_lines.items.len, 8));
-        const input_h: u16 = @min(raw_input_lines + 2, 10);
-
-        if (picker) |*p| {
-            const picker_h = p.height(h);
-            const chat_h = h -| input_h -| status_h -| picker_h;
-            last_chat_h = chat_h;
-            if (chat_h > 0) {
-                const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-                scroll_offset = drawChat(cwin, chat_lines.items, w, scroll_offset, allocator);
-            }
-            {
-                const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
-                p.draw(pwin);
-            }
-            {
-                const iwin = win.child(.{
-                    .x_off = 0,
-                    .y_off = chat_h + picker_h,
-                    .width = w,
-                    .height = input_h,
-                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
-                });
-                drawInput(iwin, input_lines.items, cursor_line, cursor_col, &vx);
-            }
-            {
-                const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
-                drawStatusBar(swin, w, scroll_offset, status_view);
-            }
-        } else {
-            const chat_h = h -| input_h -| status_h;
-            last_chat_h = chat_h;
-            if (chat_h > 0) {
-                const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-                scroll_offset = drawChat(cwin, chat_lines.items, w, scroll_offset, allocator);
-            }
-            {
-                const iwin = win.child(.{
-                    .x_off = 0,
-                    .y_off = chat_h,
-                    .width = w,
-                    .height = input_h,
-                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
-                });
-                drawInput(iwin, input_lines.items, cursor_line, cursor_col, &vx);
-            }
-            {
-                const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
-                drawStatusBar(swin, w, scroll_offset, status_view);
-            }
-        }
-
-        try vx.render(writer);
-        try writer.flush();
+        try drawFrame(
+            &vx,
+            writer,
+            chat_lines.items,
+            input_lines.items,
+            cursor_line,
+            cursor_col,
+            if (picker) |*p| p else null,
+            status_view,
+            &scroll_offset,
+            &last_chat_h,
+            allocator,
+            &status_buf,
+        );
     }
+}
+
+fn drawFrame(
+    vx: *vaxis.Vaxis,
+    writer: *std.Io.Writer,
+    chat_lines: []const ChatLine,
+    input_lines: []const std.ArrayList(u8),
+    cursor_line: usize,
+    cursor_col: usize,
+    picker: ?*Picker,
+    status_view: StatusView,
+    scroll_offset: *u16,
+    last_chat_h: *u16,
+    allocator: std.mem.Allocator,
+    status_buf: []u8,
+) !void {
+    const win = vx.window();
+    win.clear();
+
+    const w = win.width;
+    const h = win.height;
+    if (w == 0 or h == 0) return;
+
+    const status_h: u16 = 1;
+    // Input height: 1 line per input line, +2 for borders, min 3, max 10
+    const raw_input_lines: u16 = @intCast(@min(input_lines.len, 8));
+    const input_h: u16 = @min(raw_input_lines + 2, 10);
+
+    if (picker) |p| {
+        const picker_h = p.height(h);
+        const chat_h = h -| input_h -| status_h -| picker_h;
+        last_chat_h.* = chat_h;
+        if (chat_h > 0) {
+            const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
+            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator);
+        }
+        {
+            const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
+            p.draw(pwin);
+        }
+        {
+            const iwin = win.child(.{
+                .x_off = 0,
+                .y_off = chat_h + picker_h,
+                .width = w,
+                .height = input_h,
+                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+            });
+            drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
+        }
+        {
+            const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
+            drawStatusBar(swin, w, scroll_offset.*, status_view, status_buf);
+        }
+    } else {
+        const chat_h = h -| input_h -| status_h;
+        last_chat_h.* = chat_h;
+        if (chat_h > 0) {
+            const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
+            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator);
+        }
+        {
+            const iwin = win.child(.{
+                .x_off = 0,
+                .y_off = chat_h,
+                .width = w,
+                .height = input_h,
+                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+            });
+            drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
+        }
+        {
+            const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
+            drawStatusBar(swin, w, scroll_offset.*, status_view, status_buf);
+        }
+    }
+
+    try vx.render(writer);
+    try writer.flush();
+}
+
+/// Streaming context shared with the on_token / on_context / on_err callbacks
+/// for the duration of a single `sessionSend` call. Holds enough state to
+/// re-render the screen on each token arrival so the user sees the assistant
+/// reply as it's generated.
+const StreamCtx = struct {
+    chat_lines: *std.ArrayList(ChatLine),
+    assistant_idx: usize,
+    streaming_buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    // Drawing state — same set the main loop hands to drawFrame.
+    vx: *vaxis.Vaxis,
+    writer: *std.Io.Writer,
+    input_lines: *std.ArrayList(std.ArrayList(u8)),
+    cursor_line: usize,
+    cursor_col: usize,
+    picker: *?Picker,
+    status_view: StatusView,
+    scroll_offset: *u16,
+    last_chat_h: *u16,
+    status_buf: []u8,
+};
+
+fn streamRedraw(s: *StreamCtx) void {
+    drawFrame(
+        s.vx,
+        s.writer,
+        s.chat_lines.items,
+        s.input_lines.items,
+        s.cursor_line,
+        s.cursor_col,
+        if (s.picker.*) |*p| p else null,
+        s.status_view,
+        s.scroll_offset,
+        s.last_chat_h,
+        s.allocator,
+        s.status_buf,
+    ) catch {};
+}
+
+fn onStreamToken(ctx_ptr: *anyopaque, text: []const u8) void {
+    const s: *StreamCtx = @ptrCast(@alignCast(ctx_ptr));
+    s.streaming_buf.appendSlice(s.allocator, text) catch return;
+    s.allocator.free(s.chat_lines.items[s.assistant_idx].text);
+    s.chat_lines.items[s.assistant_idx].text =
+        s.allocator.dupe(u8, s.streaming_buf.items) catch return;
+    streamRedraw(s);
+}
+
+fn onStreamContext(ctx_ptr: *anyopaque, label: []const u8, body: []const u8) void {
+    const s: *StreamCtx = @ptrCast(@alignCast(ctx_ptr));
+    const header = std.fmt.allocPrint(s.allocator, "[{s} loaded]\n{s}", .{ label, body }) catch return;
+    // Insert the system header just before the assistant placeholder so the
+    // chat order reads: user, [skill loaded], assistant.
+    s.chat_lines.insert(s.allocator, s.assistant_idx, .{
+        .role = .system,
+        .text = header,
+    }) catch {
+        s.allocator.free(header);
+        return;
+    };
+    s.assistant_idx += 1;
+    streamRedraw(s);
 }
 
 fn handleSubmit(
@@ -377,65 +474,120 @@ fn handleSubmit(
     cursor_col: *usize,
     picker: *?Picker,
     scroll_offset: *u16,
+    last_chat_h: *u16,
+    vx: *vaxis.Vaxis,
+    writer: *std.Io.Writer,
+    status_view: StatusView,
     allocator: std.mem.Allocator,
     client: *rpc.Client,
     submitted: []u8,
+    status_buf: []u8,
 ) !void {
-    var dr = client.dispatch(submitted) catch |err| {
-        try chat_lines.append(allocator, .{
-            .role = .system,
-            .text = try std.fmt.allocPrint(allocator, "rpc error: {s}", .{@errorName(err)}),
-        });
-        allocator.free(submitted);
-        scroll_offset.* = 0;
-        clearInput(input_lines, cursor_line, cursor_col, allocator);
+    // Echo the user's submission immediately. Whether the input turns out to
+    // be a command or a chat message, the user sees what they typed.
+    try chat_lines.append(allocator, .{ .role = .user, .text = submitted });
+
+    // Reserve an empty assistant bubble that will mutate as tokens arrive.
+    // Dropped later if the call resolves into a command outcome.
+    try chat_lines.append(allocator, .{
+        .role = .assistant,
+        .text = try allocator.dupe(u8, ""),
+    });
+    const assistant_idx = chat_lines.items.len - 1;
+
+    // Clear the input + reset scroll *before* the call so the redraw inside
+    // the token callback shows an empty input box.
+    scroll_offset.* = 0;
+    clearInput(input_lines, cursor_line, cursor_col, allocator);
+
+    var streaming_buf: std.ArrayList(u8) = .empty;
+    defer streaming_buf.deinit(allocator);
+
+    var stream_ctx = StreamCtx{
+        .chat_lines = chat_lines,
+        .assistant_idx = assistant_idx,
+        .streaming_buf = &streaming_buf,
+        .allocator = allocator,
+        .vx = vx,
+        .writer = writer,
+        .input_lines = input_lines,
+        .cursor_line = cursor_line.*,
+        .cursor_col = cursor_col.*,
+        .picker = picker,
+        .status_view = status_view,
+        .scroll_offset = scroll_offset,
+        .last_chat_h = last_chat_h,
+        .status_buf = status_buf,
+    };
+
+    // Render once so the user sees their bubble + empty assistant before the
+    // server starts streaming.
+    streamRedraw(&stream_ctx);
+
+    var sr = client.sessionSend(submitted, .{
+        .ctx = &stream_ctx,
+        .on_token = onStreamToken,
+        .on_context = onStreamContext,
+    }) catch |err| {
+        const msg = try std.fmt.allocPrint(allocator, "rpc error: {s}", .{@errorName(err)});
+        try chat_lines.append(allocator, .{ .role = .system, .text = msg });
         return;
     };
-    defer dr.response.deinit();
+    defer sr.response.deinit();
 
-    switch (dr.result) {
-        .not_a_command => {
-            try chat_lines.append(allocator, .{ .role = .user, .text = submitted });
-            try chat_lines.append(allocator, .{
-                .role = .assistant,
-                .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
-            });
+    // After streaming finishes the callback has already kept assistant_idx in
+    // sync if context events shifted it. Use stream_ctx.assistant_idx as the
+    // authoritative index.
+    const asst_idx = stream_ctx.assistant_idx;
+
+    switch (sr.outcome) {
+        .conversation => |c| {
+            if (!c.ok) {
+                const msg = try std.fmt.allocPrint(allocator, "provider error: {s}", .{c.reason});
+                try chat_lines.append(allocator, .{ .role = .system, .text = msg });
+            }
+            // If no tokens streamed and the call was nominally ok, replace the
+            // empty placeholder with a hint so the user isn't staring at a
+            // blank bubble.
+            if (c.ok and streaming_buf.items.len == 0) {
+                allocator.free(chat_lines.items[asst_idx].text);
+                chat_lines.items[asst_idx].text = try allocator.dupe(u8, "(empty response)");
+            }
         },
-        .message => |m| {
-            allocator.free(submitted);
-            try chat_lines.append(allocator, .{ .role = .system, .text = try allocator.dupe(u8, m) });
-        },
-        .err => |m| {
-            allocator.free(submitted);
-            try chat_lines.append(allocator, .{ .role = .system, .text = try allocator.dupe(u8, m) });
-        },
-        .model_picker => |p| {
-            allocator.free(submitted);
-            // Coerce via anonymous struct literal — Picker.initModel
-            // expects commands.ModelPicker; the field types match.
-            picker.* = try Picker.initModel(allocator, .{
-                .title = p.title,
-                .choices = p.choices,
-            });
-        },
-        .inject_context => |frag| {
-            allocator.free(submitted);
-            const header = try std.fmt.allocPrint(allocator, "[{s} loaded]\n{s}", .{ frag.label, frag.body });
-            try chat_lines.append(allocator, .{ .role = .system, .text = header });
-            if (frag.user_message.len > 0) {
-                try chat_lines.append(allocator, .{
-                    .role = .user,
-                    .text = try allocator.dupe(u8, frag.user_message),
-                });
-                try chat_lines.append(allocator, .{
-                    .role = .assistant,
-                    .text = try allocator.dupe(u8, "Provider support is coming soon -- this is the Phoenix skeleton build."),
-                });
+        .command => |cmd| {
+            // No AI tokens came through. Drop the empty assistant placeholder.
+            allocator.free(chat_lines.items[asst_idx].text);
+            _ = chat_lines.orderedRemove(asst_idx);
+
+            switch (cmd) {
+                .not_a_command => {
+                    // Server should never return this for session.send; treat
+                    // as a no-op.
+                },
+                .message => |m| try chat_lines.append(allocator, .{
+                    .role = .system,
+                    .text = try allocator.dupe(u8, m),
+                }),
+                .err => |m| try chat_lines.append(allocator, .{
+                    .role = .system,
+                    .text = try allocator.dupe(u8, m),
+                }),
+                .model_picker => |p| {
+                    picker.* = try Picker.initModel(allocator, .{
+                        .title = p.title,
+                        .choices = p.choices,
+                    });
+                },
+                .inject_context => |frag| {
+                    // Reachable when a skill is invoked with no follow-up
+                    // text. The TUI already rendered the system header via
+                    // the `context` event; nothing more to do unless the
+                    // server omitted the event (older builds).
+                    _ = frag;
+                },
             }
         },
     }
-    scroll_offset.* = 0;
-    clearInput(input_lines, cursor_line, cursor_col, allocator);
 }
 
 fn insertText(
@@ -682,7 +834,10 @@ fn drawInput(win: vaxis.Window, lines: []const std.ArrayList(u8), cursor_line: u
     vx.screen.cursor_vis = true;
 }
 
-fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, view: StatusView) void {
+/// Render the status bar. `buf` must outlive the surrounding `vx.render` call:
+/// vaxis stores grapheme slices by reference, not by copy, so a stack-local
+/// buffer here would dangle by the time render walks the cells.
+fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, view: StatusView, buf: []u8) void {
     const style: vaxis.Style = .{
         .fg = .{ .rgb = .{ 0, 0, 0 } },
         .bg = .{ .rgb = .{ 100, 140, 255 } },
@@ -691,12 +846,11 @@ fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, view: StatusView
     for (0..w) |x| {
         win.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = " " }, .style = style });
     }
-    var buf: [128]u8 = undefined;
     if (scroll_offset > 0) {
-        const indicator = std.fmt.bufPrint(&buf, " phoenix v0.0.0 | scrolled +{d} rows", .{scroll_offset}) catch " phoenix v0.0.0";
+        const indicator = std.fmt.bufPrint(buf, " phoenix v0.0.0 | scrolled +{d} rows", .{scroll_offset}) catch " phoenix v0.0.0";
         _ = win.print(&.{.{ .text = indicator, .style = style }}, .{});
     } else {
-        const text = std.fmt.bufPrint(&buf, " phoenix v0.0.0 | provider: {s} | model: {s} | sources: {d}", .{
+        const text = std.fmt.bufPrint(buf, " phoenix v0.0.0 | provider: {s} | model: {s} | sources: {d}", .{
             view.provider_kind,
             view.model,
             view.sources_count,

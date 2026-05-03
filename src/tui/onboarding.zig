@@ -324,36 +324,21 @@ fn writeChoice(
 ) !void {
     const k = kinds[kind_index];
     const local = k.needs_host_url;
-
     const model: []const u8 = if (local) local_model else k.models[model_index];
 
-    var auth_entry: ?core.config_writer.AuthEntryWrite = null;
-    var provider_auth: ?[]const u8 = null;
-    if (!local) {
-        auth_entry = .{
-            .key = k.auth_key,
-            .value = key_value,
-            .is_env_ref = false,
-        };
-        provider_auth = k.auth_key;
-    }
+    const auth: ?core.AuthEntry = if (local) null else .{ .inline_value = key_value };
+    const base_url: ?[]const u8 = if (local and host_value.len > 0) host_value else null;
 
-    var base_url_opt: ?[]const u8 = null;
-    if (local and host_value.len > 0) base_url_opt = host_value;
-
-    try core.config_writer.writeUserConfig(
-        io,
-        allocator,
-        home,
+    const profiles = [_]core.ProviderProfile{
         .{
-            .name = "default",
             .kind = k.kind,
             .model = model,
-            .auth_key = provider_auth,
-            .base_url = base_url_opt,
+            .active = true,
+            .auth = auth,
+            .base_url = base_url,
         },
-        auth_entry,
-    );
+    };
+    try core.config_writer.writeUserConfig(io, allocator, home, &profiles);
 }
 
 /// Write `text` starting at (col, row) of `win`, advancing one cell per ASCII
@@ -526,7 +511,7 @@ fn drawModel(
             writeText(inner, 1, row, prefix, style);
             writeText(inner, 4, row, m, style);
         }
-        writeText(inner, 1, @intCast(4 + k.models.len + 1), "Edit phoenix.toml to use a model not in this list.", dim_style);
+        writeText(inner, 1, @intCast(4 + k.models.len + 1), "Edit phoenix.json to use a model not in this list.", dim_style);
     }
 }
 
@@ -542,7 +527,7 @@ fn drawApiKey(
     const heading = std.fmt.allocPrint(arena, "API key for {s}:", .{k.label}) catch "API key:";
     writeText(inner, 1, 2, heading, text_style);
 
-    writeText(inner, 1, 4, "Saved inline in ~/.phoenix/phoenix.toml (chmod 0600).", dim_style);
+    writeText(inner, 1, 4, "Saved inline in ~/.phoenix/phoenix.json (chmod 0600).", dim_style);
 
     writeText(inner, 1, 6, "Key: ", text_style);
     const visible = @min(key_value.len, inner.width -| 8);
@@ -601,7 +586,7 @@ fn drawConfirm(
     row += 1;
 
     writeText(inner, 1, row, "Path:     ", dim_style);
-    writeText(inner, 11, row, "~/.phoenix/phoenix.toml", text_style);
+    writeText(inner, 11, row, "~/.phoenix/phoenix.json", text_style);
     row += 2;
 
     writeText(inner, 1, row, "Press y to write, n to go back.", text_style);

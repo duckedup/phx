@@ -1,17 +1,15 @@
 /// Provider registry: maps ProviderKind to adapter constructors.
 ///
-/// Multiple profiles of the same kind are fully supported because profiles are
-/// stored in `Config.providers` keyed by their bracket-suffix name (e.g.
-/// `[provider.gpt4o]`, `[provider.gpt4mini]`). Two profiles can both have
-/// `kind = "openai"` and differ on `model`, `api`, `auth`, etc. — they are
-/// independent rows in the map. Calling `createProvider` for each produces
-/// independent `*Provider` instances with their own resolved configs.
+/// Multiple profiles of the same kind are fully supported. Two entries in
+/// `Config.providers` can both have `kind = "openai"` and differ on `model`,
+/// `api`, `auth`, etc. — they are independent rows in the array. Calling
+/// `createProvider` for each produces independent `*Provider` instances with
+/// their own resolved configs.
 const std = @import("std");
 const config = @import("config.zig");
 const Provider = @import("provider.zig").Provider;
 const ProviderConfig = @import("provider.zig").ProviderConfig;
 const http_client = @import("http_client.zig");
-const AuthConfig = config.AuthConfig;
 const ProviderProfile = config.ProviderProfile;
 
 const claude_mod = @import("providers_claude");
@@ -20,42 +18,44 @@ const ollama_mod = @import("providers_ollama");
 const llamacpp_mod = @import("providers_llamacpp");
 const google_mod = @import("providers_google");
 
-/// Create a Provider from a ProviderProfile, resolving credentials via AuthConfig.
-/// The returned *Provider is heap-allocated; free with `destroyProvider`.
+/// Create a Provider from a ProviderProfile. The provider takes ownership of
+/// any credential it allocates (resolved via `profile.auth`).
 pub fn createProvider(
     allocator: std.mem.Allocator,
+    io: std.Io,
     profile: *const ProviderProfile,
-    auth: *const AuthConfig,
 ) !*Provider {
-    return createProviderInner(allocator, profile, auth, null);
+    return createProviderInner(allocator, io, profile, null);
 }
 
 /// Same as createProvider but injects a custom Transport (for testing).
 pub fn createProviderWithTransport(
     allocator: std.mem.Allocator,
+    io: std.Io,
     profile: *const ProviderProfile,
-    auth: *const AuthConfig,
     transport: http_client.Transport,
 ) !*Provider {
-    return createProviderInner(allocator, profile, auth, transport);
+    return createProviderInner(allocator, io, profile, transport);
 }
 
 fn createProviderInner(
     allocator: std.mem.Allocator,
+    io: std.Io,
     profile: *const ProviderProfile,
-    auth: *const AuthConfig,
     transport: ?http_client.Transport,
 ) !*Provider {
-    // Resolve credential up front so adapters don't reach back into AuthConfig.
+    // Resolve credential up front so adapters don't have to reason about
+    // AuthEntry shapes. The adapter's deinit frees the resolved string when
+    // resolved_credential_owned is true.
     var resolved: ?[]u8 = null;
-    if (profile.auth) |key| {
-        resolved = try auth.resolve(allocator, key);
+    if (profile.auth) |entry| {
+        resolved = try entry.resolve(allocator);
     }
     errdefer if (resolved) |c| allocator.free(c);
 
     const cfg = ProviderConfig{
         .model = profile.model,
-        .auth_key = profile.auth,
+        .auth_key = null,
         .base_url = profile.base_url,
         .endpoint = profile.endpoint,
         .max_retries = profile.max_retries,
@@ -65,15 +65,16 @@ fn createProviderInner(
         .location = profile.location,
         .credentials_path = profile.credentials_path,
         .resolved_credential = resolved,
+        .resolved_credential_owned = (resolved != null),
     };
 
     return switch (profile.kind) {
-        .claude => try claude_mod.create(allocator, cfg, transport),
-        .openai => try openai_mod.create(allocator, cfg, transport),
-        .ollama => try ollama_mod.create(allocator, cfg, transport),
-        .llamacpp => try llamacpp_mod.create(allocator, cfg, transport),
-        .vertex => try google_mod.createVertex(allocator, cfg, transport),
-        .gemini => try google_mod.createGemini(allocator, cfg, transport),
+        .claude => try claude_mod.create(allocator, io, cfg, transport),
+        .openai => try openai_mod.create(allocator, io, cfg, transport),
+        .ollama => try ollama_mod.create(allocator, io, cfg, transport),
+        .llamacpp => try llamacpp_mod.create(allocator, io, cfg, transport),
+        .vertex => try google_mod.createVertex(allocator, io, cfg, transport),
+        .gemini => try google_mod.createGemini(allocator, io, cfg, transport),
     };
 }
 
@@ -86,8 +87,6 @@ pub fn destroyProvider(allocator: std.mem.Allocator, p: *Provider) void {
 
 test "every kind round-trips through createProvider" {
     const allocator = std.testing.allocator;
-    // Minimal AuthConfig with no entries
-    const auth: AuthConfig = .{};
 
     const kinds = [_]struct {
         profile: ProviderProfile,
@@ -102,7 +101,7 @@ test "every kind round-trips through createProvider" {
     };
 
     for (kinds) |entry| {
-        const p = try createProvider(allocator, &entry.profile, &auth);
+        const p = try createProvider(allocator, std.testing.io, &entry.profile);
         defer destroyProvider(allocator, p);
         try std.testing.expectEqualStrings(entry.expected_name, p.name);
     }
@@ -110,19 +109,16 @@ test "every kind round-trips through createProvider" {
 
 test "multiple profiles of same kind produce independent Provider instances" {
     const allocator = std.testing.allocator;
-    const auth: AuthConfig = .{};
 
     const profile_a = ProviderProfile{ .kind = .openai, .model = "gpt-4o", .api = "completions" };
     const profile_b = ProviderProfile{ .kind = .openai, .model = "gpt-4o-mini", .api = "responses" };
 
-    const pa = try createProvider(allocator, &profile_a, &auth);
+    const pa = try createProvider(allocator, std.testing.io, &profile_a);
     defer destroyProvider(allocator, pa);
-    const pb = try createProvider(allocator, &profile_b, &auth);
+    const pb = try createProvider(allocator, std.testing.io, &profile_b);
     defer destroyProvider(allocator, pb);
 
-    // They should be distinct pointers
     try std.testing.expect(pa != pb);
-    // Both named "openai"
     try std.testing.expectEqualStrings("openai", pa.name);
     try std.testing.expectEqualStrings("openai", pb.name);
 }

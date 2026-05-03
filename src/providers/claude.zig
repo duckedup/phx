@@ -29,19 +29,9 @@ const ClaudeProvider = struct {
     transport: Transport,
 };
 
-/// Get an HttpTransport backed by the standard I/O system.
-/// In test builds uses std.testing.io; in production builds requires that
-/// callers inject a Transport (null transport in production is unsupported).
-fn getHttpTransport(allocator: std.mem.Allocator) HttpTransport {
-    if (builtin.is_test) {
-        return HttpTransport.init(allocator, std.testing.io);
-    } else {
-        @panic("HttpTransport requires std.Io; inject a Transport or use createWithIo");
-    }
-}
-
 pub fn create(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     injected: ?Transport,
 ) !*Provider {
@@ -51,7 +41,7 @@ pub fn create(
         .base = .{ .name = "claude", .sendFn = sendImpl, .deinitFn = deinitImpl },
         .allocator = allocator,
         .cfg = cfg,
-        .transport_owned = if (injected == null) getHttpTransport(allocator) else null,
+        .transport_owned = if (injected == null) HttpTransport.init(allocator, io) else null,
         .transport = undefined,
     };
     self.transport = if (injected) |t| t else self.transport_owned.?.transport();
@@ -60,6 +50,9 @@ pub fn create(
 
 fn deinitImpl(p: *Provider, allocator: std.mem.Allocator) void {
     const self: *ClaudeProvider = @alignCast(@fieldParentPtr("base", p));
+    if (self.cfg.resolved_credential_owned) {
+        if (self.cfg.resolved_credential) |c| allocator.free(c);
+    }
     if (self.transport_owned) |*t| t.deinit();
     allocator.destroy(self);
 }
@@ -555,7 +548,7 @@ test "claude: builds request body with system + tools" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "claude-opus-4-5",
         .resolved_credential = "sk-test",
     }, mock.transport());
@@ -597,7 +590,7 @@ test "claude: text streaming yields token events" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "claude-opus-4-5",
         .resolved_credential = "sk-test",
     }, mock.transport());
@@ -642,7 +635,7 @@ test "claude: tool_use streaming yields tool_call event" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "claude-opus-4-5",
         .resolved_credential = "sk-test",
     }, mock.transport());
@@ -684,7 +677,7 @@ test "claude: error event surfaces" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "claude-opus-4-5",
         .resolved_credential = "sk-test",
     }, mock.transport());
@@ -714,7 +707,7 @@ test "claude: tool_result message serializes correctly" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "claude-opus-4-5",
         .resolved_credential = "sk-test",
     }, mock.transport());
@@ -748,7 +741,7 @@ test "claude: missing credential errors" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var provider = try create(allocator, .{
+    var provider = try create(allocator, std.testing.io, .{
         .model = "claude-opus-4-5",
         .resolved_credential = null,
     }, mock.transport());
@@ -766,7 +759,7 @@ test "claude: e2e roundtrip" {
     if (std.c.getenv("PHOENIX_E2E") == null) return error.SkipZigTest;
     const key = std.mem.span(std.c.getenv("ANTHROPIC_API_KEY") orelse return error.SkipZigTest);
 
-    var p = try create(std.testing.allocator, .{
+    var p = try create(std.testing.allocator, std.testing.io, .{
         .model = "claude-haiku-4-5",
         .resolved_credential = key,
     }, null);

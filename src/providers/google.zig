@@ -38,40 +38,27 @@ const GoogleProvider = struct {
     cached_token: ?[]u8,
 };
 
-fn getNativeIo() std.Io {
-    if (builtin.is_test) {
-        return std.testing.io;
-    } else {
-        @panic("std.Io required; inject a Transport or provide io");
-    }
-}
-
-fn getHttpTransport(allocator: std.mem.Allocator) HttpTransport {
-    if (builtin.is_test) {
-        return HttpTransport.init(allocator, std.testing.io);
-    } else {
-        @panic("HttpTransport requires std.Io; inject a Transport");
-    }
-}
-
 pub fn createVertex(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     injected: ?Transport,
 ) !*Provider {
-    return makeProvider(allocator, cfg, injected, .vertex, null);
+    return makeProvider(allocator, io, cfg, injected, .vertex, null);
 }
 
 pub fn createGemini(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     injected: ?Transport,
 ) !*Provider {
-    return makeProvider(allocator, cfg, injected, .gemini, null);
+    return makeProvider(allocator, io, cfg, injected, .gemini, null);
 }
 
 fn makeProvider(
     allocator: std.mem.Allocator,
+    io: std.Io,
     cfg: ProviderConfig,
     injected: ?Transport,
     mode: Mode,
@@ -88,9 +75,9 @@ fn makeProvider(
         .allocator = allocator,
         .cfg = cfg,
         .mode = mode,
-        .transport_owned = if (injected == null) getHttpTransport(allocator) else null,
+        .transport_owned = if (injected == null) HttpTransport.init(allocator, io) else null,
         .transport = undefined,
-        .io = getNativeIo(),
+        .io = io,
         .gcloud_runner = gcloud_runner,
         .cached_token = null,
     };
@@ -100,6 +87,9 @@ fn makeProvider(
 
 fn deinitImpl(p: *Provider, allocator: std.mem.Allocator) void {
     const self: *GoogleProvider = @alignCast(@fieldParentPtr("base", p));
+    if (self.cfg.resolved_credential_owned) {
+        if (self.cfg.resolved_credential) |c| allocator.free(c);
+    }
     if (self.cached_token) |t| allocator.free(t);
     if (self.transport_owned) |*t| t.deinit();
     allocator.destroy(self);
@@ -642,7 +632,7 @@ test "vertex: missing project errors" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var p = try createVertex(allocator, .{
+    var p = try createVertex(allocator, std.testing.io, .{
         .model = "gemini-1.5-pro",
         .resolved_credential = "tok",
     }, mock.transport());
@@ -664,7 +654,7 @@ test "vertex: builds streamGenerateContent URL with project + location" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var p = try createVertex(allocator, .{
+    var p = try createVertex(allocator, std.testing.io, .{
         .model = "gemini-1.5-pro",
         .project = "my-proj",
         .location = "us-east4",
@@ -697,7 +687,7 @@ test "gemini: builds public-API URL with x-goog-api-key" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var p = try createGemini(allocator, .{
+    var p = try createGemini(allocator, std.testing.io, .{
         .model = "gemini-1.5-pro",
         .resolved_credential = "AIzatest",
     }, mock.transport());
@@ -730,7 +720,7 @@ test "google: text streaming yields tokens + done" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var p = try createGemini(allocator, .{
+    var p = try createGemini(allocator, std.testing.io, .{
         .model = "gemini-1.5-flash",
         .resolved_credential = "AIza",
     }, mock.transport());
@@ -772,7 +762,7 @@ test "google: functionCall yields tool_call event" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var p = try createGemini(allocator, .{
+    var p = try createGemini(allocator, std.testing.io, .{
         .model = "gemini-1.5-flash",
         .resolved_credential = "AIza",
     }, mock.transport());
@@ -810,7 +800,7 @@ test "google: maps system to systemInstruction" {
     var mock = MockTransport.init(allocator, &canned);
     defer mock.deinit();
 
-    var p = try createGemini(allocator, .{
+    var p = try createGemini(allocator, std.testing.io, .{
         .model = "gemini-1.5-flash",
         .resolved_credential = "AIza",
     }, mock.transport());
@@ -883,7 +873,7 @@ test "google: e2e roundtrip gemini" {
     if (std.c.getenv("PHOENIX_E2E") == null) return error.SkipZigTest;
     const key = std.mem.span(std.c.getenv("GEMINI_API_KEY") orelse return error.SkipZigTest);
 
-    var p = try createGemini(std.testing.allocator, .{
+    var p = try createGemini(std.testing.allocator, std.testing.io, .{
         .model = "gemini-1.5-flash",
         .resolved_credential = key,
     }, null);

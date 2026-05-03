@@ -13,9 +13,5 @@
             .url = "git+https://github.com/rockorager/libvaxis.git#0f46f499e1d6501922e2ef5705a80432f5831fe3",
             .hash = "vaxis-0.6.0-BWNV_M3UCQD-CLOAF_EZlKwXfWd8LuGrijzyObHu-l4X",
         },
-        .toml = .{
-            .url = "git+https://github.com/sam701/zig-toml.git#a73c9423d88ed413204b39638fab7e9bccdb83fd",
-            .hash = "toml-0.3.0-bV14Be6EAQDr0fkyURz4jYFyTAMPcwlNN0FEPVjDnXTR",
-        },
     },
 }

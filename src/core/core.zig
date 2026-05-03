@@ -31,7 +31,6 @@ pub const ToolRegistry = tool.ToolRegistry;
 pub const Config = config.Config;
 pub const Runtime = config.Runtime;
 pub const Theme = config.Theme;
-pub const AuthConfig = config.AuthConfig;
 pub const AuthEntry = config.AuthEntry;
 pub const ProviderProfile = config.ProviderProfile;
 pub const SessionProfile = config.SessionProfile;
