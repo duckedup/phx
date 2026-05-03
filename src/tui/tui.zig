@@ -467,6 +467,22 @@ fn onStreamContext(ctx_ptr: *anyopaque, label: []const u8, body: []const u8) voi
     streamRedraw(s);
 }
 
+fn onStreamErr(ctx_ptr: *anyopaque, text: []const u8) void {
+    const s: *StreamCtx = @ptrCast(@alignCast(ctx_ptr));
+    const msg = std.fmt.allocPrint(s.allocator, "stream err: {s}", .{text}) catch return;
+    // Insert before the assistant placeholder so the bubble (if it ends up
+    // populated) still appears last.
+    s.chat_lines.insert(s.allocator, s.assistant_idx, .{
+        .role = .system,
+        .text = msg,
+    }) catch {
+        s.allocator.free(msg);
+        return;
+    };
+    s.assistant_idx += 1;
+    streamRedraw(s);
+}
+
 fn handleSubmit(
     chat_lines: *std.ArrayList(ChatLine),
     input_lines: *std.ArrayList(std.ArrayList(u8)),
@@ -528,6 +544,7 @@ fn handleSubmit(
         .ctx = &stream_ctx,
         .on_token = onStreamToken,
         .on_context = onStreamContext,
+        .on_err = onStreamErr,
     }) catch |err| {
         const msg = try std.fmt.allocPrint(allocator, "rpc error: {s}", .{@errorName(err)});
         try chat_lines.append(allocator, .{ .role = .system, .text = msg });
@@ -547,11 +564,16 @@ fn handleSubmit(
                 try chat_lines.append(allocator, .{ .role = .system, .text = msg });
             }
             // If no tokens streamed and the call was nominally ok, replace the
-            // empty placeholder with a hint so the user isn't staring at a
-            // blank bubble.
+            // empty placeholder with a diagnostic line. stop_reason and token
+            // counts let us tell "model said nothing" (out=0, end_turn) from
+            // "parser missed events" (out>0, end_turn) at a glance.
             if (c.ok and streaming_buf.items.len == 0) {
                 allocator.free(chat_lines.items[asst_idx].text);
-                chat_lines.items[asst_idx].text = try allocator.dupe(u8, "(empty response)");
+                chat_lines.items[asst_idx].text = try std.fmt.allocPrint(
+                    allocator,
+                    "(empty response — stop_reason={s}, in={d}, out={d})",
+                    .{ c.stop_reason, c.input_tokens, c.output_tokens },
+                );
             }
         },
         .command => |cmd| {

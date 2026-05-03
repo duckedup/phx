@@ -298,8 +298,11 @@ fn runConversation(
     var stop_reason: core.StopReason = .other;
     var usage: core.Usage = .{};
     var last_err: ?[]const u8 = null;
+    var event_count: u32 = 0;
 
-    while (it.next()) |ev| switch (ev) {
+    while (it.next()) |ev| {
+        event_count += 1;
+        switch (ev) {
         .token => |t| {
             try assistant_buf.appendSlice(gpa, t);
             var line: std.ArrayList(u8) = .empty;
@@ -324,7 +327,19 @@ fn runConversation(
             // v0: tools are not registered, but a provider could in principle
             // emit them. Drop silently — this path goes away when tools land.
         },
-    };
+        }
+    }
+
+    if (event_count == 0) {
+        std.log.warn("session.send: provider iterator yielded zero events (HTTP body may have been empty or SSE parsed nothing)", .{});
+    } else if (assistant_buf.items.len == 0 and last_err == null) {
+        std.log.warn("session.send: {d} events but no tokens; stop_reason={s}, in={d}, out={d}", .{
+            event_count,
+            @tagName(stop_reason),
+            usage.input_tokens,
+            usage.output_tokens,
+        });
+    }
 
     if (last_err == null and assistant_buf.items.len > 0) {
         try session.addMessage(.assistant, assistant_buf.items);

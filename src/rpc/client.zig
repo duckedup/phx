@@ -87,6 +87,11 @@ pub const Client = struct {
     /// Spawn `phoenix rpc` as a child process. `argv0` is the path to the
     /// phoenix binary. `io` is the process's Io implementation (from
     /// `std.process.Init.io`).
+    ///
+    /// Child stderr is redirected to `/tmp/phoenix-rpc.log` (truncated on each
+    /// spawn). `.inherit` would route logs to the parent's TTY which the TUI
+    /// has placed in raw mode — they'd render as garbage on top of the chat.
+    /// If the log file can't be opened we fall back to `.ignore`.
     pub fn spawn(
         gpa: std.mem.Allocator,
         io: std.Io,
@@ -102,12 +107,25 @@ pub const Client = struct {
         }
         try argv.append(gpa, "rpc");
 
+        const log_path = "/tmp/phoenix-rpc.log";
+        const stderr_io: std.process.SpawnOptions.StdIo = blk: {
+            const file = std.Io.Dir.cwd().createFile(io, log_path, .{
+                .read = false,
+                .truncate = true,
+            }) catch break :blk .ignore;
+            break :blk .{ .file = file };
+        };
+
         const child = try std.process.spawn(io, .{
             .argv = argv.items,
             .stdin = .pipe,
             .stdout = .pipe,
-            .stderr = .inherit,
+            .stderr = stderr_io,
         });
+
+        // The child has its own dup of the fd; close ours so EOF behavior is
+        // correct on shutdown.
+        if (stderr_io == .file) stderr_io.file.close(io);
 
         return .{
             .gpa = gpa,

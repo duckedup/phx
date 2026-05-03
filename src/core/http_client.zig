@@ -97,9 +97,16 @@ pub const HttpTransport = struct {
             try hdrs.append(allocator, .{ .name = "Accept", .value = "text/event-stream" });
         }
 
+        // std.http defaults to advertising `accept-encoding: gzip, deflate`,
+        // and `response.reader()` does NOT decompress — so the body reader
+        // hands raw gzip bytes to the SSE parser and we get zero events.
+        // Tell the client to send `accept-encoding: identity` so Anthropic
+        // returns plain SSE text. (The proper fix later is to switch to
+        // `response.readerDecompressing` so we can keep compression on.)
         var req = try self.client.request(.POST, uri, .{
             .extra_headers = hdrs.items,
             .keep_alive = false,
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
         });
         defer req.deinit();
 
@@ -126,6 +133,15 @@ pub const HttpTransport = struct {
 
         // Read entire body
         const body_data = try body_reader_ptr.allocRemaining(a, .unlimited);
+
+        // Diagnostic: dump status + body summary to stderr so we can tell empty
+        // body vs parse miss vs unexpected content type. Trims long bodies.
+        const preview_len: usize = @min(body_data.len, 512);
+        std.log.warn("http: status={d} body_len={d} preview={s}", .{
+            status_code,
+            body_data.len,
+            body_data[0..preview_len],
+        });
 
         // Replace reader with a fixed reader over the copied body
         const fixed_reader_ptr = try a.create(std.Io.Reader);
