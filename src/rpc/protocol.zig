@@ -65,16 +65,9 @@ pub fn writeCommandListResult(
     a: std.mem.Allocator,
     items: []const commands.CommandInfo,
 ) !void {
-    try out.appendSlice(a, "{\"commands\":[");
-    for (items, 0..) |it, i| {
-        if (i > 0) try out.appendSlice(a, ",");
-        try out.appendSlice(a, "{\"name\":");
-        try writeJsonString(out, a, it.name);
-        try out.appendSlice(a, ",\"summary\":");
-        try writeJsonString(out, a, it.summary);
-        try out.print(a, ",\"is_skill\":{}}}", .{it.is_skill});
-    }
-    try out.appendSlice(a, "]}");
+    // CommandInfo's struct fields already match the wire shape, so wrapping
+    // in `{ commands = items }` and letting Stringify do the work is enough.
+    try appendValue(out, a, .{ .commands = items }, .{});
 }
 
 pub fn writeApplySessionChoiceResult(
@@ -84,18 +77,19 @@ pub fn writeApplySessionChoiceResult(
     message_count: u32,
     messages: []const core.Message,
 ) !void {
-    try out.appendSlice(a, "{\"message\":");
-    try writeJsonString(out, a, message);
-    try out.print(a, ",\"message_count\":{d},\"messages\":[", .{message_count});
-    for (messages, 0..) |m, i| {
-        if (i > 0) try out.appendSlice(a, ",");
-        try out.appendSlice(a, "{\"role\":");
-        try writeJsonString(out, a, @tagName(m.role));
-        try out.appendSlice(a, ",\"content\":");
-        try writeJsonString(out, a, m.content);
-        try out.appendSlice(a, "}");
-    }
-    try out.appendSlice(a, "]}");
+    // core.Message's tag (Role) already serializes as its tagName via
+    // Stringify, but core.Message also has fields we don't want on the wire
+    // (e.g. tool_calls). Project to a wire-only struct.
+    const MessageWire = struct { role: []const u8, content: []const u8 };
+    const wire = try a.alloc(MessageWire, messages.len);
+    defer a.free(wire);
+    for (messages, 0..) |m, i| wire[i] = .{ .role = @tagName(m.role), .content = m.content };
+
+    try appendValue(out, a, .{
+        .message = message,
+        .message_count = message_count,
+        .messages = wire,
+    }, .{});
 }
 
 pub fn parseApplyModelChoiceParams(arena: std.mem.Allocator, v: std.json.Value) !ApplyModelChoiceParams {
@@ -122,17 +116,10 @@ pub fn writeConfigGetResult(
     default_provider: ?struct { kind: core.ProviderKind, model: []const u8 },
     sources_count: usize,
 ) !void {
-    try out.appendSlice(a, "{\"default_provider\":");
-    if (default_provider) |dp| {
-        try out.appendSlice(a, "{\"kind\":");
-        try writeJsonString(out, a, @tagName(dp.kind));
-        try out.appendSlice(a, ",\"model\":");
-        try writeJsonString(out, a, dp.model);
-        try out.appendSlice(a, "}");
-    } else {
-        try out.appendSlice(a, "null");
-    }
-    try out.print(a, ",\"sources_count\":{d}}}", .{sources_count});
+    try appendValue(out, a, .{
+        .default_provider = default_provider,
+        .sources_count = sources_count,
+    }, .{});
 }
 
 pub fn writeDispatchResult(
@@ -140,90 +127,41 @@ pub fn writeDispatchResult(
     a: std.mem.Allocator,
     r: commands.Result,
 ) !void {
+    // Wire shape is a tagged object: {"kind":"<variant>", ...payload}.
+    // Each variant gets a small struct that interleaves `kind` with its
+    // payload fields; Stringify handles encoding.
     switch (r) {
-        .not_a_command => try out.appendSlice(a, "{\"kind\":\"not_a_command\"}"),
-        .message => |m| {
-            try out.appendSlice(a, "{\"kind\":\"message\",\"text\":");
-            try writeJsonString(out, a, m);
-            try out.appendSlice(a, "}");
-        },
-        .cleared => |m| {
-            try out.appendSlice(a, "{\"kind\":\"cleared\",\"text\":");
-            try writeJsonString(out, a, m);
-            try out.appendSlice(a, "}");
-        },
-        .compacted => |m| {
-            try out.appendSlice(a, "{\"kind\":\"compacted\",\"text\":");
-            try writeJsonString(out, a, m);
-            try out.appendSlice(a, "}");
-        },
-        .err => |m| {
-            try out.appendSlice(a, "{\"kind\":\"err\",\"text\":");
-            try writeJsonString(out, a, m);
-            try out.appendSlice(a, "}");
-        },
-        .model_picker => |p| {
-            try out.appendSlice(a, "{\"kind\":\"model_picker\",\"title\":");
-            try writeJsonString(out, a, p.title);
-            try out.appendSlice(a, ",\"choices\":[");
-            for (p.choices, 0..) |c, i| {
-                if (i > 0) try out.appendSlice(a, ",");
-                try out.print(a, "{{\"provider_index\":{d}", .{c.provider_index});
-                try out.appendSlice(a, ",\"kind\":");
-                try writeJsonString(out, a, @tagName(c.kind));
-                try out.appendSlice(a, ",\"model\":");
-                try writeJsonString(out, a, c.model);
-                try out.print(a, ",\"is_active\":{}}}", .{c.is_active});
-            }
-            try out.appendSlice(a, "]}");
-        },
-        .inject_context => |frag| {
-            try out.appendSlice(a, "{\"kind\":\"inject_context\",\"label\":");
-            try writeJsonString(out, a, frag.label);
-            try out.appendSlice(a, ",\"body\":");
-            try writeJsonString(out, a, frag.body);
-            try out.appendSlice(a, ",\"user_message\":");
-            try writeJsonString(out, a, frag.user_message);
-            try out.appendSlice(a, "}");
-        },
+        .not_a_command => try appendValue(out, a, .{ .kind = "not_a_command" }, .{}),
+        .message => |m| try appendValue(out, a, .{ .kind = "message", .text = m }, .{}),
+        .cleared => |m| try appendValue(out, a, .{ .kind = "cleared", .text = m }, .{}),
+        .compacted => |m| try appendValue(out, a, .{ .kind = "compacted", .text = m }, .{}),
+        .err => |m| try appendValue(out, a, .{ .kind = "err", .text = m }, .{}),
+        .model_picker => |p| try appendValue(out, a, .{
+            .kind = "model_picker",
+            .title = p.title,
+            .choices = p.choices,
+        }, .{}),
+        .inject_context => |frag| try appendValue(out, a, .{
+            .kind = "inject_context",
+            .label = frag.label,
+            .body = frag.body,
+            .user_message = frag.user_message,
+        }, .{}),
         // The server intercepts these markers before encoding, so they
         // shouldn't reach the wire in normal operation. Encode minimally for
         // diagnostic completeness — the TUI will treat the kind as unknown.
-        .clear_session => try out.appendSlice(a, "{\"kind\":\"clear_session\"}"),
-        .compact_session => try out.appendSlice(a, "{\"kind\":\"compact_session\"}"),
-        .session_picker => |p| {
-            try out.appendSlice(a, "{\"kind\":\"session_picker\",\"title\":");
-            try writeJsonString(out, a, p.title);
-            try out.appendSlice(a, ",\"choices\":[");
-            for (p.choices, 0..) |c, i| {
-                if (i > 0) try out.appendSlice(a, ",");
-                try out.appendSlice(a, "{\"id\":");
-                try writeJsonString(out, a, c.id);
-                try out.appendSlice(a, ",\"name\":");
-                try writeJsonString(out, a, c.name);
-                try out.print(a, ",\"updated_at\":{d}", .{c.updated_at});
-                try out.print(a, ",\"message_count\":{d}}}", .{c.message_count});
-            }
-            try out.appendSlice(a, "]}");
-        },
-        .models_page => |p| {
-            try out.appendSlice(a, "{\"kind\":\"models_page\",\"title\":");
-            try writeJsonString(out, a, p.title);
-            try out.appendSlice(a, ",\"entries\":[");
-            for (p.entries, 0..) |e, i| {
-                if (i > 0) try out.appendSlice(a, ",");
-                try out.print(a, "{{\"provider_index\":{d}", .{e.provider_index});
-                try out.appendSlice(a, ",\"kind\":");
-                try writeJsonString(out, a, @tagName(e.kind));
-                try out.appendSlice(a, ",\"model\":");
-                try writeJsonString(out, a, e.model);
-                try out.print(a, ",\"is_active\":{}", .{e.is_active});
-                try out.appendSlice(a, ",\"base_url\":");
-                try writeJsonString(out, a, e.base_url);
-                try out.print(a, ",\"context_window\":{d}}}", .{e.context_window});
-            }
-            try out.appendSlice(a, "]}");
-        },
+        .clear_session => try appendValue(out, a, .{ .kind = "clear_session" }, .{}),
+        .compact_session => try appendValue(out, a, .{ .kind = "compact_session" }, .{}),
+        .session_picker => |p| try appendValue(out, a, .{
+            .kind = "session_picker",
+            .title = p.title,
+            .choices = p.choices,
+        }, .{}),
+        .models_page => |p| try appendValue(out, a, .{
+            .kind = "models_page",
+            .title = p.title,
+            .entries = p.entries,
+        }, .{}),
     }
 }
 
@@ -272,22 +210,10 @@ pub fn writeAddModelResult(
     message: []const u8,
     entries: []const commands.ModelEntry,
 ) !void {
-    try out.appendSlice(a, "{\"message\":");
-    try writeJsonString(out, a, message);
-    try out.appendSlice(a, ",\"entries\":[");
-    for (entries, 0..) |e, i| {
-        if (i > 0) try out.appendSlice(a, ",");
-        try out.print(a, "{{\"provider_index\":{d}", .{e.provider_index});
-        try out.appendSlice(a, ",\"kind\":");
-        try writeJsonString(out, a, @tagName(e.kind));
-        try out.appendSlice(a, ",\"model\":");
-        try writeJsonString(out, a, e.model);
-        try out.print(a, ",\"is_active\":{}", .{e.is_active});
-        try out.appendSlice(a, ",\"base_url\":");
-        try writeJsonString(out, a, e.base_url);
-        try out.print(a, ",\"context_window\":{d}}}", .{e.context_window});
-    }
-    try out.appendSlice(a, "]}");
+    try appendValue(out, a, .{
+        .message = message,
+        .entries = entries,
+    }, .{});
 }
 
 /// Map a StopReason enum to the wire string used in session.send terminal results.
@@ -310,9 +236,10 @@ pub fn writeEventTokenLine(
     id: i64,
     text: []const u8,
 ) !void {
-    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"token\",\"text\":", .{id});
-    try writeJsonString(out, a, text);
-    try out.appendSlice(a, "}}");
+    try appendValue(out, a, .{
+        .id = id,
+        .event = .{ .kind = "token", .text = text },
+    }, .{});
 }
 
 /// Write a complete `event` line for a streamed err notice:
@@ -324,9 +251,10 @@ pub fn writeEventErrLine(
     id: i64,
     text: []const u8,
 ) !void {
-    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"err\",\"text\":", .{id});
-    try writeJsonString(out, a, text);
-    try out.appendSlice(a, "}}");
+    try appendValue(out, a, .{
+        .id = id,
+        .event = .{ .kind = "err", .text = text },
+    }, .{});
 }
 
 /// Write a complete `event` line for an assistant tool invocation:
@@ -340,13 +268,15 @@ pub fn writeEventToolCallLine(
     name: []const u8,
     args: []const u8,
 ) !void {
-    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"tool_call\",\"tool_id\":", .{id});
-    try writeJsonString(out, a, tool_id);
-    try out.appendSlice(a, ",\"name\":");
-    try writeJsonString(out, a, name);
-    try out.appendSlice(a, ",\"args\":");
-    try writeJsonString(out, a, args);
-    try out.appendSlice(a, "}}");
+    try appendValue(out, a, .{
+        .id = id,
+        .event = .{
+            .kind = "tool_call",
+            .tool_id = tool_id,
+            .name = name,
+            .args = args,
+        },
+    }, .{});
 }
 
 /// Write a complete `event` line for the harness-side result of a tool call:
@@ -360,13 +290,15 @@ pub fn writeEventToolResultLine(
     output: []const u8,
     is_error: bool,
 ) !void {
-    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"tool_result\",\"tool_id\":", .{id});
-    try writeJsonString(out, a, tool_id);
-    try out.appendSlice(a, ",\"output\":");
-    try writeJsonString(out, a, output);
-    try out.appendSlice(a, ",\"is_error\":");
-    try out.appendSlice(a, if (is_error) "true" else "false");
-    try out.appendSlice(a, "}}");
+    try appendValue(out, a, .{
+        .id = id,
+        .event = .{
+            .kind = "tool_result",
+            .tool_id = tool_id,
+            .output = output,
+            .is_error = is_error,
+        },
+    }, .{});
 }
 
 /// Write a complete `event` line for an inject_context preamble:
@@ -379,11 +311,10 @@ pub fn writeEventContextLine(
     label: []const u8,
     body: []const u8,
 ) !void {
-    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"context\",\"label\":", .{id});
-    try writeJsonString(out, a, label);
-    try out.appendSlice(a, ",\"body\":");
-    try writeJsonString(out, a, body);
-    try out.appendSlice(a, "}}");
+    try appendValue(out, a, .{
+        .id = id,
+        .event = .{ .kind = "context", .label = label, .body = body },
+    }, .{});
 }
 
 /// Write the body of a session.send terminal result for a successful conversation
@@ -395,9 +326,13 @@ pub fn writeSendConversationOkBody(
     input_tokens: u32,
     output_tokens: u32,
 ) !void {
-    try out.appendSlice(a, "{\"kind\":\"conversation\",\"ok\":true,\"stop_reason\":");
-    try writeJsonString(out, a, stopReasonName(stop_reason));
-    try out.print(a, ",\"input_tokens\":{d},\"output_tokens\":{d}}}", .{ input_tokens, output_tokens });
+    try appendValue(out, a, .{
+        .kind = "conversation",
+        .ok = true,
+        .stop_reason = stopReasonName(stop_reason),
+        .input_tokens = input_tokens,
+        .output_tokens = output_tokens,
+    }, .{});
 }
 
 /// Write the body of a session.send terminal result for a conversation that
@@ -407,9 +342,11 @@ pub fn writeSendConversationErrBody(
     a: std.mem.Allocator,
     reason: []const u8,
 ) !void {
-    try out.appendSlice(a, "{\"kind\":\"conversation\",\"ok\":false,\"reason\":");
-    try writeJsonString(out, a, reason);
-    try out.appendSlice(a, "}");
+    try appendValue(out, a, .{
+        .kind = "conversation",
+        .ok = false,
+        .reason = reason,
+    }, .{});
 }
 
 /// Write the body of a session.send terminal result for a slash-command outcome
@@ -419,9 +356,24 @@ pub fn writeSendCommandBody(
     a: std.mem.Allocator,
     r: commands.Result,
 ) !void {
-    try out.appendSlice(a, "{\"kind\":\"command\",\"command\":");
-    try writeDispatchResult(out, a, r);
-    try out.appendSlice(a, "}");
+    // Build the inner dispatch result first, then splice it as a raw field
+    // value alongside the `kind` discriminator. Two passes keeps the encoder
+    // straightforward; the inner buffer is short-lived.
+    var inner: std.ArrayList(u8) = .empty;
+    defer inner.deinit(a);
+    try writeDispatchResult(&inner, a, r);
+
+    var aw = beginAllocating(a, out);
+    defer endAllocating(out, &aw);
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try s.beginObject();
+    try s.objectField("kind");
+    try s.write("command");
+    try s.objectField("command");
+    try s.beginWriteRaw();
+    aw.writer.writeAll(inner.items) catch return error.OutOfMemory;
+    s.endWriteRaw();
+    try s.endObject();
 }
 
 pub fn writeApplyModelChoiceResult(
@@ -430,13 +382,10 @@ pub fn writeApplyModelChoiceResult(
     message: []const u8,
     default_provider: struct { kind: core.ProviderKind, model: []const u8 },
 ) !void {
-    try out.appendSlice(a, "{\"message\":");
-    try writeJsonString(out, a, message);
-    try out.appendSlice(a, ",\"default_provider\":{\"kind\":");
-    try writeJsonString(out, a, @tagName(default_provider.kind));
-    try out.appendSlice(a, ",\"model\":");
-    try writeJsonString(out, a, default_provider.model);
-    try out.appendSlice(a, "}}");
+    try appendValue(out, a, .{
+        .message = message,
+        .default_provider = default_provider,
+    }, .{});
 }
 
 pub fn writeSuccess(
@@ -445,9 +394,17 @@ pub fn writeSuccess(
     id: i64,
     result_body: []const u8,
 ) !void {
-    try out.print(a, "{{\"id\":{d},\"result\":", .{id});
-    try out.appendSlice(a, result_body);
-    try out.appendSlice(a, "}");
+    var aw = beginAllocating(a, out);
+    defer endAllocating(out, &aw);
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try s.beginObject();
+    try s.objectField("id");
+    try s.write(id);
+    try s.objectField("result");
+    try s.beginWriteRaw();
+    aw.writer.writeAll(result_body) catch return error.OutOfMemory;
+    s.endWriteRaw();
+    try s.endObject();
 }
 
 pub fn writeError(
@@ -457,9 +414,10 @@ pub fn writeError(
     code: ErrorCode,
     message: []const u8,
 ) !void {
-    try out.print(a, "{{\"id\":{d},\"error\":{{\"code\":\"{s}\",\"message\":", .{ id, code.name() });
-    try writeJsonString(out, a, message);
-    try out.appendSlice(a, "}}");
+    try appendValue(out, a, .{
+        .id = id,
+        .@"error" = .{ .code = code.name(), .message = message },
+    }, .{});
 }
 
 pub fn parseRequest(arena: std.mem.Allocator, line: []const u8) !Request {
@@ -477,10 +435,24 @@ pub fn parseRequest(arena: std.mem.Allocator, line: []const u8) !Request {
     };
 }
 
-fn writeJsonString(out: *std.ArrayList(u8), a: std.mem.Allocator, s: []const u8) !void {
-    const encoded = try std.json.Stringify.valueAlloc(a, s, .{});
-    defer a.free(encoded);
-    try out.appendSlice(a, encoded);
+/// Wrap `out` so a `std.json.Stringify` call can append directly without an
+/// intermediate buffer. Pair with `endAllocating` (deferred) to hand the
+/// memory back to the ArrayList — including any growth Stringify did.
+fn beginAllocating(a: std.mem.Allocator, out: *std.ArrayList(u8)) std.Io.Writer.Allocating {
+    return std.Io.Writer.Allocating.fromArrayList(a, out);
+}
+
+fn endAllocating(out: *std.ArrayList(u8), aw: *std.Io.Writer.Allocating) void {
+    out.* = aw.toArrayList();
+}
+
+/// Convenience: serialize `v` and append it to `out`. Replaces hand-rolled
+/// `appendSlice("{\"x\":")` + `writeJsonString` + ... patterns. Stringify
+/// handles enums (tag name), optionals, slices, and nested structs.
+fn appendValue(out: *std.ArrayList(u8), a: std.mem.Allocator, v: anytype, options: std.json.Stringify.Options) !void {
+    var aw = beginAllocating(a, out);
+    defer endAllocating(out, &aw);
+    std.json.Stringify.value(v, options, &aw.writer) catch return error.OutOfMemory;
 }
 
 test "parseRequest happy path" {

@@ -254,16 +254,14 @@ pub const Client = struct {
     }
 
     pub fn dispatch(self: *Client, input: []const u8) !struct { result: DispatchResult, response: Response } {
-        var params_buf: std.ArrayList(u8) = .empty;
-        defer params_buf.deinit(self.gpa);
-        try writeJsonString(&params_buf, self.gpa, input);
-        var params: std.ArrayList(u8) = .empty;
-        defer params.deinit(self.gpa);
-        try params.appendSlice(self.gpa, "{\"input\":");
-        try params.appendSlice(self.gpa, params_buf.items);
-        try params.appendSlice(self.gpa, "}");
+        const params = try std.json.Stringify.valueAlloc(
+            self.gpa,
+            .{ .input = input },
+            .{},
+        );
+        defer self.gpa.free(params);
 
-        var resp = try self.callParsed("command.dispatch", params.items);
+        var resp = try self.callParsed("command.dispatch", params);
         errdefer resp.response.deinit();
         const a = resp.response.arena.allocator();
 
@@ -273,13 +271,14 @@ pub const Client = struct {
     }
 
     pub fn applySessionChoice(self: *Client, id: []const u8) !struct { result: ApplySessionResult, response: Response } {
-        var params: std.ArrayList(u8) = .empty;
-        defer params.deinit(self.gpa);
-        try params.appendSlice(self.gpa, "{\"id\":");
-        try writeJsonString(&params, self.gpa, id);
-        try params.appendSlice(self.gpa, "}");
+        const params = try std.json.Stringify.valueAlloc(
+            self.gpa,
+            .{ .id = id },
+            .{},
+        );
+        defer self.gpa.free(params);
 
-        var resp = try self.callParsed("command.applySessionChoice", params.items);
+        var resp = try self.callParsed("command.applySessionChoice", params);
         errdefer resp.response.deinit();
         const a = resp.response.arena.allocator();
 
@@ -321,22 +320,17 @@ pub const Client = struct {
     }
 
     pub fn addModel(self: *Client, args: AddModelArgs) !struct { result: AddModelResult, response: Response } {
-        var params: std.ArrayList(u8) = .empty;
-        defer params.deinit(self.gpa);
-        try params.appendSlice(self.gpa, "{\"kind\":");
-        try writeJsonString(&params, self.gpa, @tagName(args.kind));
-        try params.appendSlice(self.gpa, ",\"model\":");
-        try writeJsonString(&params, self.gpa, args.model);
-        try params.appendSlice(self.gpa, ",\"api_key\":");
-        try writeJsonString(&params, self.gpa, args.api_key);
-        try params.appendSlice(self.gpa, ",\"base_url\":");
-        try writeJsonString(&params, self.gpa, args.base_url);
-        if (args.context_window) |cw| {
-            try params.print(self.gpa, ",\"context_window\":{d}", .{cw});
-        }
-        try params.appendSlice(self.gpa, "}");
+        // Stringify writes enums as their tag name and omits null optionals
+        // when emit_null_optional_fields = false, so AddModelArgs serializes
+        // straight to the wire shape the server expects.
+        const params = try std.json.Stringify.valueAlloc(
+            self.gpa,
+            args,
+            .{ .emit_null_optional_fields = false },
+        );
+        defer self.gpa.free(params);
 
-        var resp = try self.callParsed("command.addModel", params.items);
+        var resp = try self.callParsed("command.addModel", params);
         errdefer resp.response.deinit();
         const a = resp.response.arena.allocator();
 
@@ -358,16 +352,13 @@ pub const Client = struct {
     }
 
     pub fn applyModelChoice(self: *Client, choice: commands.ModelChoice) !struct { result: ApplyResult, response: Response } {
-        var params_buf: std.ArrayList(u8) = .empty;
-        defer params_buf.deinit(self.gpa);
-        try params_buf.print(self.gpa, "{{\"provider_index\":{d}", .{choice.provider_index});
-        try params_buf.appendSlice(self.gpa, ",\"kind\":");
-        try writeJsonString(&params_buf, self.gpa, @tagName(choice.kind));
-        try params_buf.appendSlice(self.gpa, ",\"model\":");
-        try writeJsonString(&params_buf, self.gpa, choice.model);
-        try params_buf.print(self.gpa, ",\"is_active\":{}}}", .{choice.is_active});
+        // commands.ModelChoice already matches the wire shape (provider_index,
+        // kind, model, is_active), so Stringify.value can serialize it
+        // directly. Stringify writes enums as their tag name.
+        const params = try std.json.Stringify.valueAlloc(self.gpa, choice, .{});
+        defer self.gpa.free(params);
 
-        var resp = try self.callParsed("command.applyModelChoice", params_buf.items);
+        var resp = try self.callParsed("command.applyModelChoice", params);
         errdefer resp.response.deinit();
         const a = resp.response.arena.allocator();
 
@@ -412,14 +403,14 @@ pub const Client = struct {
         const id = self.next_id;
         self.next_id += 1;
 
-        // Build params JSON: {"text": <escaped>}.
-        var params: std.ArrayList(u8) = .empty;
-        defer params.deinit(self.gpa);
-        try params.appendSlice(self.gpa, "{\"text\":");
-        try writeJsonString(&params, self.gpa, text);
-        try params.appendSlice(self.gpa, "}");
+        const params = try std.json.Stringify.valueAlloc(
+            self.gpa,
+            .{ .text = text },
+            .{},
+        );
+        defer self.gpa.free(params);
 
-        try self.writeRequestLine(id, "session.send", params.items);
+        try self.writeRequestLine(id, "session.send", params);
 
         var resp_arena = std.heap.ArenaAllocator.init(self.gpa);
         errdefer resp_arena.deinit();
@@ -522,17 +513,15 @@ pub const Client = struct {
         method: []const u8,
         params_json: ?[]const u8,
     ) !void {
-        var req: std.ArrayList(u8) = .empty;
-        defer req.deinit(self.gpa);
-        try req.print(self.gpa, "{{\"id\":{d},\"method\":", .{id});
-        try writeJsonString(&req, self.gpa, method);
-        if (params_json) |pj| {
-            try req.appendSlice(self.gpa, ",\"params\":");
-            try req.appendSlice(self.gpa, pj);
-        }
-        try req.appendSlice(self.gpa, "}\n");
+        const req = try buildRequestEnvelope(self.gpa, id, method, params_json);
+        defer self.gpa.free(req);
+
+        // Append the framing newline. Cheaper than asking Stringify to do it.
+        const framed = try std.fmt.allocPrint(self.gpa, "{s}\n", .{req});
+        defer self.gpa.free(framed);
+
         const stdin_fd = self.child.stdin.?.handle;
-        try writeAll(stdin_fd, req.items);
+        try writeAll(stdin_fd, framed);
     }
 
     /// Internal: write one JSON-line request, read one JSON-line response,
@@ -546,20 +535,14 @@ pub const Client = struct {
         const id = self.next_id;
         self.next_id += 1;
 
-        // Build request line.
-        var req: std.ArrayList(u8) = .empty;
-        defer req.deinit(self.gpa);
-        try req.print(self.gpa, "{{\"id\":{d},\"method\":", .{id});
-        try writeJsonString(&req, self.gpa, method);
-        if (params_json) |pj| {
-            try req.appendSlice(self.gpa, ",\"params\":");
-            try req.appendSlice(self.gpa, pj);
-        }
-        try req.appendSlice(self.gpa, "}\n");
+        const req = try buildRequestEnvelope(self.gpa, id, method, params_json);
+        defer self.gpa.free(req);
+        const framed = try std.fmt.allocPrint(self.gpa, "{s}\n", .{req});
+        defer self.gpa.free(framed);
 
         // Write to child stdin.
         const stdin_fd = self.child.stdin.?.handle;
-        try writeAll(stdin_fd, req.items);
+        try writeAll(stdin_fd, framed);
 
         // Read one line from child stdout.
         try self.readLine();
@@ -791,40 +774,51 @@ fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {
     }
 }
 
-fn writeJsonString(out: *std.ArrayList(u8), a: std.mem.Allocator, s: []const u8) !void {
-    const encoded = try std.json.Stringify.valueAlloc(a, s, .{});
-    defer a.free(encoded);
-    try out.appendSlice(a, encoded);
+/// Encode a JSON-RPC request envelope: `{"id":N,"method":"...","params":<raw>}`.
+/// `params_json` is spliced in as raw JSON (already produced by another
+/// `Stringify` pass); pass null for methods with no params. Returned slice
+/// is owned by the caller.
+fn buildRequestEnvelope(
+    gpa: std.mem.Allocator,
+    id: i64,
+    method: []const u8,
+    params_json: ?[]const u8,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    errdefer aw.deinit();
+
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try s.beginObject();
+    try s.objectField("id");
+    try s.write(id);
+    try s.objectField("method");
+    try s.write(method);
+    if (params_json) |pj| {
+        try s.objectField("params");
+        try s.beginWriteRaw();
+        aw.writer.writeAll(pj) catch return error.OutOfMemory;
+        s.endWriteRaw();
+    }
+    try s.endObject();
+
+    return aw.toOwnedSlice();
 }
 
-test "client buildRequest encoding" {
-    // Unit test: verify request encoding without spawning a child.
+test "buildRequestEnvelope: no params" {
     const a = std.testing.allocator;
-    var req: std.ArrayList(u8) = .empty;
-    defer req.deinit(a);
-
-    const id: i64 = 1;
-    try req.print(a, "{{\"id\":{d},\"method\":", .{id});
-    try writeJsonString(&req, a, "config.get");
-    try req.appendSlice(a, "}\n");
-
-    try std.testing.expectEqualStrings("{\"id\":1,\"method\":\"config.get\"}\n", req.items);
+    const req = try buildRequestEnvelope(a, 1, "config.get", null);
+    defer a.free(req);
+    try std.testing.expectEqualStrings("{\"id\":1,\"method\":\"config.get\"}", req);
 }
 
-test "client buildDispatchRequest encoding" {
+test "buildRequestEnvelope: with raw params" {
     const a = std.testing.allocator;
-    var req: std.ArrayList(u8) = .empty;
-    defer req.deinit(a);
-
-    const id: i64 = 2;
-    try req.print(a, "{{\"id\":{d},\"method\":", .{id});
-    try writeJsonString(&req, a, "command.dispatch");
-    try req.appendSlice(a, ",\"params\":{\"input\":");
-    try writeJsonString(&req, a, "/model");
-    try req.appendSlice(a, "}}\n");
-
-    try std.testing.expect(std.mem.indexOf(u8, req.items, "command.dispatch") != null);
-    try std.testing.expect(std.mem.indexOf(u8, req.items, "/model") != null);
+    const params = try std.json.Stringify.valueAlloc(a, .{ .input = "/model" }, .{});
+    defer a.free(params);
+    const req = try buildRequestEnvelope(a, 2, "command.dispatch", params);
+    defer a.free(req);
+    try std.testing.expect(std.mem.indexOf(u8, req, "command.dispatch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req, "\"input\":\"/model\"") != null);
 }
 
 test "client parseConfigGetResponse" {
