@@ -162,6 +162,7 @@ pub fn writeDispatchResult(
             .title = p.title,
             .entries = p.entries,
         }, .{}),
+        .connect_wizard => try appendValue(out, a, .{ .kind = "connect_wizard" }, .{}),
     }
 }
 

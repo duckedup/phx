@@ -73,7 +73,8 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(1);
             };
 
-            switch (try onboarding.run(init, home)) {
+            const onboarding_result = try onboarding.run(init, home);
+            switch (onboarding_result) {
                 .cancelled => return,
                 .completed => {
                     cfg.deinit();
@@ -91,7 +92,11 @@ pub fn main(init: std.process.Init) !void {
         var client = try rpc.Client.spawn(init.gpa, init.io, argv0, explicit_config);
         defer client.deinit();
 
-        try tui.run(init, &client);
+        const home = home_for_tui orelse {
+            std.debug.print("phoenix: cannot resolve $HOME\n", .{});
+            std.process.exit(1);
+        };
+        try tui.run(init, &client, home);
     } else if (std.mem.eql(u8, c, "rpc")) {
         const home_opt: ?[]u8 = resolveHome(init.gpa);
         defer if (home_opt) |h| init.gpa.free(h);

@@ -37,4 +37,11 @@ jobs:
         run: zig build
 
       - name: Test
-        run: zig build test
+        shell: bash
+        run: |
+          set -euo pipefail
+          zig build test 2>&1 | tee /tmp/zig-build-test.log
+          if grep -q "failed command:" /tmp/zig-build-test.log; then
+            echo "zig reported a failed command; failing CI"
+            exit 1
+          fi

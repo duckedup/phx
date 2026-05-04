@@ -20,18 +20,15 @@ pub fn create(
     cfg: ProviderConfig,
     transport: ?Transport,
 ) !*Provider {
-    var p = try openai.createCompletionsImpl(
+    return openai.createCompletionsImpl(
         allocator,
         io,
         cfg,
         transport,
         DEFAULT_BASE_URL,
-        false,
+        "llamacpp",
         .completions,
     );
-    // Override the name to "llamacpp" so registry tests pass.
-    p.name = "llamacpp";
-    return p;
 }
 
 // ---- Tests ----

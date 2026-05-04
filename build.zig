@@ -77,6 +77,15 @@ pub fn build(b: *std.Build) void {
     providers_google.addImport("test_util", test_util_mod);
     core_mod.addImport("providers_google", providers_google);
 
+    const providers_nvidia = b.createModule(.{
+        .root_source_file = b.path("src/providers/nvidia.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    providers_nvidia.addImport("phoenix_core", core_mod);
+    providers_nvidia.addImport("providers_openai", providers_openai);
+    core_mod.addImport("providers_nvidia", providers_nvidia);
+
     const commands_mod = b.createModule(.{
         .root_source_file = b.path("src/commands/dispatcher.zig"),
         .target = target,
@@ -195,6 +204,15 @@ pub fn build(b: *std.Build) void {
     test_providers_google.addImport("phoenix_core", core_test_mod);
     test_providers_google.addImport("test_util", test_test_util_mod);
     core_test_mod.addImport("providers_google", test_providers_google);
+
+    const test_providers_nvidia = b.createModule(.{
+        .root_source_file = b.path("src/providers/nvidia.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_providers_nvidia.addImport("phoenix_core", core_test_mod);
+    test_providers_nvidia.addImport("providers_openai", test_providers_openai);
+    core_test_mod.addImport("providers_nvidia", test_providers_nvidia);
 
     const core_tests = b.addTest(.{
         .root_module = core_test_mod,

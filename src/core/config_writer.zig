@@ -129,6 +129,7 @@ fn kindString(k: config.ProviderKind) []const u8 {
         .llamacpp => "llamacpp",
         .vertex => "vertex",
         .gemini => "gemini",
+        .nvidia => "nvidia",
     };
 }
 

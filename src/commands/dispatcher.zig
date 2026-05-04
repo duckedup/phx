@@ -4,6 +4,7 @@ const core = @import("phoenix_core");
 const model_cmd = @import("model.zig");
 const skill_cmd = @import("skill.zig");
 const session_cmd = @import("session_cmd.zig");
+const connect_cmd = @import("connect.zig");
 
 /// One model entry shown in the picker. Owned by the Result arena.
 pub const ModelChoice = struct {
@@ -126,6 +127,11 @@ pub const Result = union(enum) {
     /// Show the full-screen /models page. The TUI lists configured models
     /// and offers an "Add new" affordance. Owned by `arena`.
     models_page: ModelsPage,
+
+    /// Launch the provider setup wizard. The TUI enters a modal flow;
+    /// on completion it calls `connect.addProvider` then the server marks
+    /// the new provider as active. Owned by `arena`.
+    connect_wizard,
 };
 
 /// Returned to the TUI on every dispatch. The TUI must call `deinit` after it is
@@ -169,6 +175,7 @@ pub const Registry = struct {
 const builtin_table = [_]Registry.Builtin{
     .{ .name = "model", .summary = "Select the active model", .handler = model_cmd.handle },
     .{ .name = "models", .summary = "Manage configured models (add, switch, view)", .handler = model_cmd.handleModelsPage },
+    .{ .name = "connect", .summary = "Add a new provider", .handler = connect_cmd.handle },
     .{ .name = "clear", .summary = "Save and reset the conversation", .handler = session_cmd.handleClear },
     .{ .name = "compact", .summary = "Truncate older history to free context", .handler = session_cmd.handleCompact },
     .{ .name = "resume", .summary = "Resume a saved conversation", .handler = session_cmd.handleResume },
@@ -322,6 +329,7 @@ test {
     std.testing.refAllDecls(session_cmd);
     std.testing.refAllDecls(model_cmd);
     std.testing.refAllDecls(skill_cmd);
+    std.testing.refAllDecls(connect_cmd);
 }
 
 test "parse: /model" {

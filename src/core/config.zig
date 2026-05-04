@@ -4,7 +4,7 @@ const skills_pkg = @import("skills.zig");
 const otel_pkg = @import("otel.zig");
 
 pub const RuntimeMode = enum { tui, rpc };
-pub const ProviderKind = enum { claude, openai, ollama, llamacpp, vertex, gemini };
+pub const ProviderKind = enum { claude, openai, ollama, llamacpp, vertex, gemini, nvidia };
 pub const StoreBackend = enum { memory, beans };
 
 /// Re-exports so callers can spell config types via `core.config.*`.
@@ -220,12 +220,13 @@ pub const Config = struct {
         const ap = self.activeProviderMut() orelse return;
         if (ap.auth != null) return;
 
-        const env_name: []const u8 = switch (ap.kind) {
-            .claude => "ANTHROPIC_API_KEY",
-            .openai => "OPENAI_API_KEY",
-            .gemini, .vertex => "GEMINI_API_KEY",
-            .ollama, .llamacpp => return,
-        };
+const env_name: []const u8 = switch (ap.kind) {
+        .claude => "ANTHROPIC_API_KEY",
+        .openai => "OPENAI_API_KEY",
+        .gemini, .vertex => "GEMINI_API_KEY",
+        .ollama, .llamacpp => return,
+        .nvidia => "NVIDIA_API_KEY",
+    };
 
         var name_buf: [64]u8 = undefined;
         if (env_name.len + 1 > name_buf.len) return;
@@ -584,6 +585,7 @@ fn parseProviderKind(s: []const u8) !ProviderKind {
     if (std.mem.eql(u8, s, "llamacpp") or std.mem.eql(u8, s, "llama.cpp")) return .llamacpp;
     if (std.mem.eql(u8, s, "vertex") or std.mem.eql(u8, s, "vertex_ai")) return .vertex;
     if (std.mem.eql(u8, s, "gemini")) return .gemini;
+    if (std.mem.eql(u8, s, "nvidia")) return .nvidia;
     std.log.err("config: invalid provider.kind value: {s}", .{s});
     return error.InvalidConfigValue;
 }
@@ -733,7 +735,7 @@ fn readEnv(a: std.mem.Allocator, name: []const u8) ?[]const u8 {
 
 /// Parse the `OTEL_EXPORTER_OTLP_HEADERS` format: `key1=value1,key2=value2`.
 /// Whitespace around keys/values is trimmed. Malformed entries are skipped
-/// with a warning rather than failing config load.
+/// rather than failing config load. Outside test builds we also emit a warning.
 fn parseOtelHeaderList(a: std.mem.Allocator, raw: []const u8) ![]otel_pkg.Header {
     var out: std.ArrayList(otel_pkg.Header) = .empty;
     errdefer out.deinit(a);
@@ -742,7 +744,9 @@ fn parseOtelHeaderList(a: std.mem.Allocator, raw: []const u8) ![]otel_pkg.Header
         const trimmed = std.mem.trim(u8, entry, " \t");
         if (trimmed.len == 0) continue;
         const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse {
-            std.log.warn("OTEL_EXPORTER_OTLP_HEADERS: skipping malformed entry: {s}", .{trimmed});
+            if (!@import("builtin").is_test) {
+                std.log.warn("OTEL_EXPORTER_OTLP_HEADERS: skipping malformed entry: {s}", .{trimmed});
+            }
             continue;
         };
         const k = std.mem.trim(u8, trimmed[0..eq], " \t");

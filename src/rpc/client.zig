@@ -24,6 +24,7 @@ pub const DispatchResult = union(enum) {
     inject_context: ContextFragment,
     session_picker: SessionPicker,
     models_page: ModelsPage,
+    connect_wizard,
 
     pub const ModelPicker = struct {
         title: []const u8,
@@ -725,6 +726,8 @@ fn parseDispatchResult(a: std.mem.Allocator, result_val: std.json.Value) !Dispat
             .title = title,
             .choices = try choices_list.toOwnedSlice(a),
         } };
+    } else if (std.mem.eql(u8, kind, "connect_wizard")) {
+        return .connect_wizard;
     } else if (std.mem.eql(u8, kind, "clear_session") or std.mem.eql(u8, kind, "compact_session")) {
         // Server-internal markers that should have been transformed before
         // hitting the wire. If we see one, surface a benign message rather

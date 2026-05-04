@@ -17,6 +17,7 @@ const openai_mod = @import("providers_openai");
 const ollama_mod = @import("providers_ollama");
 const llamacpp_mod = @import("providers_llamacpp");
 const google_mod = @import("providers_google");
+const nvidia_mod = @import("providers_nvidia");
 
 /// Create a Provider from a ProviderProfile. The provider takes ownership of
 /// any credential it allocates (resolved via `profile.auth`).
@@ -75,6 +76,7 @@ fn createProviderInner(
         .llamacpp => try llamacpp_mod.create(allocator, io, cfg, transport),
         .vertex => try google_mod.createVertex(allocator, io, cfg, transport),
         .gemini => try google_mod.createGemini(allocator, io, cfg, transport),
+        .nvidia => try nvidia_mod.create(allocator, io, cfg, transport),
     };
 }
 
@@ -98,6 +100,7 @@ test "every kind round-trips through createProvider" {
         .{ .profile = .{ .kind = .llamacpp, .model = "ignored" }, .expected_name = "llamacpp" },
         .{ .profile = .{ .kind = .vertex, .model = "gemini-1.5-pro", .project = "my-proj" }, .expected_name = "vertex" },
         .{ .profile = .{ .kind = .gemini, .model = "gemini-1.5-flash" }, .expected_name = "gemini" },
+        .{ .profile = .{ .kind = .nvidia, .model = "nvidia/llama-3.1-nemotron-70b-instruct" }, .expected_name = "nvidia" },
     };
 
     for (kinds) |entry| {

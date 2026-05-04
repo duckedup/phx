@@ -47,26 +47,24 @@ pub fn create(
         if (std.mem.eql(u8, api, "responses")) break :blk ApiMode.responses;
         return error.InvalidConfig;
     };
-    return createCompletionsImpl(allocator, io, cfg, transport, DEFAULT_BASE_URL, true, mode);
+    return createCompletionsImpl(allocator, io, cfg, transport, DEFAULT_BASE_URL, "openai", mode);
 }
 
-/// Package-internal: used by llamacpp.zig to compose the Chat Completions logic
-/// with a different default URL and optional auth.
+/// Package-internal: used by llamacpp.zig and nvidia.zig to compose the Chat
+/// Completions logic with a different default URL and optional auth.
 pub fn createCompletionsImpl(
     allocator: std.mem.Allocator,
     io: std.Io,
     cfg: ProviderConfig,
     injected: ?Transport,
     default_base_url: []const u8,
-    auth_required: bool,
+    name: []const u8,
     mode: ApiMode,
 ) !*Provider {
-    _ = auth_required; // auth is optional; callers pass auth via resolved_credential
-
     const self = try allocator.create(OpenAIProvider);
     errdefer allocator.destroy(self);
     self.* = .{
-        .base = .{ .name = "openai", .sendFn = sendImpl, .deinitFn = deinitImpl },
+        .base = .{ .name = name, .sendFn = sendImpl, .deinitFn = deinitImpl },
         .allocator = allocator,
         .cfg = cfg,
         .mode = mode,

@@ -5,6 +5,7 @@ const commands = @import("commands");
 const rpc = @import("rpc");
 const Picker = @import("picker.zig").Picker;
 const ModelsPage = @import("models_page.zig").ModelsPage;
+const add_model_wizard = @import("add_model_wizard.zig");
 
 const VxEvent = union(enum) {
     key_press: vaxis.Key,
@@ -48,7 +49,7 @@ const StatusView = struct {
 
 const paste_char_threshold = 80;
 
-pub fn run(init: std.process.Init, client: *rpc.Client) !void {
+pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void {
     const io = init.io;
     const allocator = init.gpa;
 
@@ -450,11 +451,13 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                             &last_chat_h,
                             &vx,
                             writer,
-                            status_view,
+                            &status_view,
                             allocator,
                             client,
                             s,
                             &status_buf,
+                            init,
+                            home,
                         );
                     }
                 } else if (key.codepoint == vaxis.Key.backspace) {
@@ -726,12 +729,15 @@ fn handleSubmit(
     last_chat_h: *u16,
     vx: *vaxis.Vaxis,
     writer: *std.Io.Writer,
-    status_view: StatusView,
+    status_view: *StatusView,
     allocator: std.mem.Allocator,
     client: *rpc.Client,
     submitted: []u8,
     status_buf: []u8,
+    init: std.process.Init,
+    home: []const u8,
 ) !void {
+    _ = home;
     // Echo the user's submission immediately. Whether the input turns out to
     // be a command or a chat message, the user sees what they typed.
     try chat_lines.append(allocator, .{ .role = .user, .text = submitted });
@@ -764,7 +770,7 @@ fn handleSubmit(
         .cursor_col = cursor_col.*,
         .picker = picker,
         .models_page = models_page,
-        .status_view = status_view,
+        .status_view = status_view.*,
         .scroll_offset = scroll_offset,
         .last_chat_h = last_chat_h,
         .status_buf = status_buf,
@@ -871,6 +877,116 @@ fn handleSubmit(
                     // the `context` event; nothing more to do unless the
                     // server omitted the event (older builds).
                     _ = frag;
+                },
+                .connect_wizard => {
+                    allocator.free(chat_lines.items[asst_idx].text);
+                    _ = chat_lines.orderedRemove(asst_idx);
+
+                    var wizard = add_model_wizard.Wizard.init(allocator);
+                    defer wizard.deinit();
+
+                    var buffer: [4096]u8 = undefined;
+                    var tty = try vaxis.Tty.init(init.io, &buffer);
+                    defer tty.deinit();
+                    const tty_writer = tty.writer();
+
+                    var vx_wiz = try vaxis.init(init.io, allocator, init.environ_map, .{});
+                    defer vx_wiz.deinit(allocator, tty_writer);
+
+                    var loop: vaxis.Loop(VxEvent) = .init(init.io, &tty, &vx_wiz);
+                    try loop.start();
+                    defer loop.stop();
+
+                    try vx_wiz.enterAltScreen(tty_writer);
+                    try vx_wiz.queryTerminal(tty_writer, .fromSeconds(1));
+                    try tty_writer.flush();
+
+                    var wizard_arena = std.heap.ArenaAllocator.init(allocator);
+                    defer wizard_arena.deinit();
+
+                    wizard.paint(vx_wiz.window(), wizard_arena.allocator());
+                    try vx_wiz.render(tty_writer);
+                    try tty_writer.flush();
+
+                    var wizard_outcome: add_model_wizard.Outcome = .in_progress;
+                    while (wizard_outcome == .in_progress) {
+                        const event = try loop.nextEvent();
+                        switch (event) {
+                            .winsize => |ws| try vx_wiz.resize(allocator, tty_writer, ws),
+                            .focus_in, .focus_out, .paste_start, .paste_end => {},
+                            .paste => |s| try wizard.handlePaste(s),
+                            .mouse => {},  // ignore mouse events in wizard
+                            .key_press => |key| {
+                                wizard_outcome = try wizard.handleKey(key);
+                            },
+                        }
+                        _ = wizard_arena.reset(.retain_capacity);
+                        wizard.paint(vx_wiz.window(), wizard_arena.allocator());
+                        try vx_wiz.render(tty_writer);
+                        try tty_writer.flush();
+                    }
+
+                    try vx_wiz.exitAltScreen(tty_writer);
+                    try tty_writer.flush();
+
+                    if (wizard_outcome == .completed) {
+                        const result = wizard_outcome.completed;
+                        var add_result = client.addModel(.{
+                            .kind = result.kind,
+                            .model = result.model,
+                            .api_key = result.api_key,
+                            .base_url = result.base_url,
+                            .context_window = result.context_window,
+                        }) catch |err| {
+                            try chat_lines.append(allocator, .{
+                                .role = .system,
+                                .text = try std.fmt.allocPrint(allocator, "/connect: {s}", .{@errorName(err)}),
+                            });
+                            return;
+                        };
+                        defer add_result.response.deinit();
+
+                        if (add_result.result.entries.len == 0) {
+                            try chat_lines.append(allocator, .{
+                                .role = .system,
+                                .text = try allocator.dupe(u8, add_result.result.message),
+                            });
+                            scroll_offset.* = 0;
+                            return;
+                        }
+
+                        const newest = add_result.result.entries[add_result.result.entries.len - 1];
+                        var apply_result = client.applyModelChoice(.{
+                            .provider_index = newest.provider_index,
+                            .kind = newest.kind,
+                            .model = newest.model,
+                            .is_active = newest.is_active,
+                        }) catch |err| {
+                            try chat_lines.append(allocator, .{
+                                .role = .system,
+                                .text = try std.fmt.allocPrint(allocator, "/connect: added provider but failed to activate it: {s}", .{@errorName(err)}),
+                            });
+                            scroll_offset.* = 0;
+                            return;
+                        };
+                        defer apply_result.response.deinit();
+
+                        allocator.free(status_view.provider_kind);
+                        allocator.free(status_view.model);
+                        status_view.provider_kind = try allocator.dupe(u8, @tagName(apply_result.result.default_provider.kind));
+                        status_view.model = try allocator.dupe(u8, apply_result.result.default_provider.model);
+
+                        try chat_lines.append(allocator, .{
+                            .role = .system,
+                            .text = try allocator.dupe(u8, apply_result.result.message),
+                        });
+                    } else {
+                        try chat_lines.append(allocator, .{
+                            .role = .system,
+                            .text = try allocator.dupe(u8, "/connect: cancelled"),
+                        });
+                    }
+                    scroll_offset.* = 0;
                 },
             }
         },
