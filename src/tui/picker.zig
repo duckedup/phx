@@ -130,26 +130,57 @@ pub const Picker = struct {
         return p;
     }
 
-    /// Restrict the visible matches to commands whose names start with `prefix`
-    /// (case-insensitive). Resets the cursor to the top.
-    pub fn setCommandFilter(self: *Picker, prefix: []const u8) void {
+    /// Restrict the visible matches to commands whose names contain `query`
+    /// as a case-insensitive subsequence. Empty query lists all commands in
+    /// alphabetical order. Non-empty queries are scored: prefix matches sort
+    /// first, then substring matches, then loose subsequence matches.
+    pub fn setCommandFilter(self: *Picker, query: []const u8) void {
         switch (self.mode) {
             .command_complete => |*cc| {
                 const a = self.arena.allocator();
-                // Worst case is every command matches; alloc that and trim.
-                const buf = a.alloc(u32, cc.all.len) catch {
+
+                if (query.len == 0) {
+                    const buf = a.alloc(u32, cc.all.len) catch {
+                        cc.filtered = &.{};
+                        self.cursor = 0;
+                        return;
+                    };
+                    for (0..cc.all.len) |i| buf[i] = @intCast(i);
+                    cc.filtered = buf;
+                    self.cursor = 0;
+                    self.rebuildCommandLines();
+                    return;
+                }
+
+                const Scored = struct { idx: u32, score: u32 };
+                const buf = a.alloc(Scored, cc.all.len) catch {
                     cc.filtered = &.{};
                     self.cursor = 0;
                     return;
                 };
                 var n: usize = 0;
                 for (cc.all, 0..) |c, i| {
-                    if (startsWithIgnoreCase(c.name, prefix)) {
-                        buf[n] = @intCast(i);
+                    if (fuzzyScore(c.name, query)) |s| {
+                        buf[n] = .{ .idx = @intCast(i), .score = s };
                         n += 1;
                     }
                 }
-                cc.filtered = buf[0..n];
+                // Highest score first; ties keep alphabetical order
+                // (`cc.all` is already sorted by name).
+                std.mem.sort(Scored, buf[0..n], {}, struct {
+                    fn lessThan(_: void, x: Scored, y: Scored) bool {
+                        if (x.score != y.score) return x.score > y.score;
+                        return x.idx < y.idx;
+                    }
+                }.lessThan);
+
+                const out = a.alloc(u32, n) catch {
+                    cc.filtered = &.{};
+                    self.cursor = 0;
+                    return;
+                };
+                for (buf[0..n], 0..) |s, i| out[i] = s.idx;
+                cc.filtered = out;
                 self.cursor = 0;
                 self.rebuildCommandLines();
             },
@@ -218,6 +249,42 @@ pub const Picker = struct {
             if (std.ascii.toLower(s[i]) != std.ascii.toLower(p)) return false;
         }
         return true;
+    }
+
+    /// Return a match score for `query` against `name`, or null when there's
+    /// no match. Higher score = better match. The exact numbers don't matter,
+    /// only the ranking: prefix > substring > subsequence.
+    fn fuzzyScore(name: []const u8, query: []const u8) ?u32 {
+        if (query.len == 0) return 1;
+        if (startsWithIgnoreCase(name, query)) return 1_000_000;
+        if (containsIgnoreCase(name, query)) return 100_000;
+        // Subsequence: every character of query appears in name in order.
+        var qi: usize = 0;
+        for (name) |c| {
+            if (qi >= query.len) break;
+            if (std.ascii.toLower(c) == std.ascii.toLower(query[qi])) qi += 1;
+        }
+        if (qi != query.len) return null;
+        // Prefer shorter names so a 3-letter query against `clear` ranks
+        // above the same query against a 20-char skill name.
+        return 1000 -| @as(u32, @intCast(name.len));
+    }
+
+    fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len == 0) return true;
+        if (needle.len > haystack.len) return false;
+        var i: usize = 0;
+        while (i + needle.len <= haystack.len) : (i += 1) {
+            var match = true;
+            for (needle, 0..) |n, j| {
+                if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(n)) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
     }
 
     /// How tall the picker should render given the terminal height: title row +
@@ -334,6 +401,37 @@ test "command picker filters by prefix" {
     p.setCommandFilter("zzz");
     try std.testing.expectEqual(@as(usize, 0), p.count());
     try std.testing.expect(p.selectedCommand() == null);
+}
+
+test "command picker fuzzy matches subsequence" {
+    const all = [_]commands.CommandInfo{
+        .{ .name = "clear", .summary = "", .is_skill = false },
+        .{ .name = "compact", .summary = "", .is_skill = false },
+        .{ .name = "model", .summary = "", .is_skill = false },
+        .{ .name = "models", .summary = "", .is_skill = false },
+        .{ .name = "resume", .summary = "", .is_skill = false },
+    };
+    var p = try Picker.initCommand(std.testing.allocator, &all);
+    defer p.deinit(std.testing.allocator);
+
+    // Subsequence: "mdl" -> "model" (m, d? no... "model" has m,o,d,e,l)
+    p.setCommandFilter("mdl");
+    try std.testing.expect(p.count() >= 1);
+    const sel = p.selectedCommand() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("model", sel.name);
+
+    // Substring: "ode" -> "model" and "models". Prefix beats substring,
+    // but neither has the prefix; substring matches both.
+    p.setCommandFilter("ode");
+    try std.testing.expectEqual(@as(usize, 2), p.count());
+
+    // Prefix wins over substring. "co" prefixes "compact" and is a substring
+    // of nothing else here, so only one match — but importantly the prefix
+    // ranks first.
+    p.setCommandFilter("com");
+    try std.testing.expectEqual(@as(usize, 1), p.count());
+    const compact = p.selectedCommand() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("compact", compact.name);
 }
 
 test "session picker exposes count and selection" {

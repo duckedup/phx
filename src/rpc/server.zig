@@ -185,6 +185,9 @@ fn processLine(
     } else if (std.mem.eql(u8, req.method, "command.applyModelChoice")) {
         try handleApplyModelChoice(&resp, gpa, a, req.id, req.params, ctx);
         root_span.setStatusOk();
+    } else if (std.mem.eql(u8, req.method, "command.addModel")) {
+        try handleAddModel(&resp, gpa, a, req.id, req.params, ctx);
+        root_span.setStatusOk();
     } else if (std.mem.eql(u8, req.method, "command.applySessionChoice")) {
         try handleApplySessionChoice(&resp, gpa, a, req.id, req.params, active);
         root_span.setStatusOk();
@@ -380,6 +383,47 @@ fn handleApplySessionChoice(
     try protocol.writeSuccess(resp, gpa, id, body.items);
 }
 
+fn handleAddModel(
+    resp: *std.ArrayList(u8),
+    gpa: std.mem.Allocator,
+    a: std.mem.Allocator,
+    id: i64,
+    params: std.json.Value,
+    ctx: commands.DispatchCtx,
+) !void {
+    const p = protocol.parseAddModelParams(a, params) catch |err| {
+        try protocol.writeError(resp, gpa, id, .InvalidParams, @errorName(err));
+        return;
+    };
+
+    const local = p.base_url.len > 0;
+    const profile = core.ProviderProfile{
+        .kind = p.kind,
+        .model = p.model,
+        .active = false,
+        .auth = if (local) null else core.AuthEntry{ .inline_value = p.api_key },
+        .base_url = if (local) p.base_url else null,
+        .context_window = p.context_window,
+    };
+
+    var apply_arena = std.heap.ArenaAllocator.init(gpa);
+    defer apply_arena.deinit();
+    const msg = commands.addProvider(ctx, profile, apply_arena.allocator()) catch |err| {
+        try protocol.writeError(resp, gpa, id, .InternalError, @errorName(err));
+        return;
+    };
+
+    const entries = commands.listModelEntries(ctx, apply_arena.allocator()) catch |err| {
+        try protocol.writeError(resp, gpa, id, .InternalError, @errorName(err));
+        return;
+    };
+
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(a);
+    try protocol.writeAddModelResult(&body, a, msg, entries);
+    try protocol.writeSuccess(resp, gpa, id, body.items);
+}
+
 fn handleApplyModelChoice(
     resp: *std.ArrayList(u8),
     gpa: std.mem.Allocator,
@@ -490,7 +534,7 @@ fn handleSessionSend(
             const txt = try compactAction(a, ctx, active);
             try writeCommandResult(gpa, stdout_fd, id, .{ .compacted = txt });
         },
-        .message, .err, .model_picker, .session_picker, .cleared, .compacted => {
+        .message, .err, .model_picker, .session_picker, .cleared, .compacted, .models_page => {
             try writeCommandResult(gpa, stdout_fd, id, outcome.result);
         },
     }

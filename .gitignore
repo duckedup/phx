@@ -6,3 +6,6 @@ zig-pkg/
 
 # Phoenix runtime
 .phoenix/
+
+# Claude
+.claude/

@@ -23,6 +23,7 @@ pub const DispatchResult = union(enum) {
     model_picker: ModelPicker,
     inject_context: ContextFragment,
     session_picker: SessionPicker,
+    models_page: ModelsPage,
 
     pub const ModelPicker = struct {
         title: []const u8,
@@ -37,6 +38,23 @@ pub const DispatchResult = union(enum) {
         title: []const u8,
         choices: []commands.SessionChoice,
     };
+    pub const ModelsPage = struct {
+        title: []const u8,
+        entries: []commands.ModelEntry,
+    };
+};
+
+pub const AddModelArgs = struct {
+    kind: core.ProviderKind,
+    model: []const u8,
+    api_key: []const u8,
+    base_url: []const u8,
+    context_window: ?u32,
+};
+
+pub const AddModelResult = struct {
+    message: []const u8,
+    entries: []commands.ModelEntry,
 };
 
 pub const ApplySessionResult = struct {
@@ -80,11 +98,18 @@ pub const ConversationResult = struct {
 /// Optional per-event callbacks invoked while sessionSend streams. Slices
 /// passed into a callback are valid only for the duration of that call —
 /// copy them if you need to retain past the next event.
+///
+/// `on_tick` fires periodically (every `tick_interval_ms`) when no server
+/// data has arrived — used by the TUI to drive the "thinking" animation
+/// during the pre-first-token wait. It is *not* fired while data is
+/// streaming through; the per-event callbacks already drive redraws then.
 pub const StreamCallbacks = struct {
     ctx: *anyopaque,
     on_token: ?*const fn (ctx: *anyopaque, text: []const u8) void = null,
     on_context: ?*const fn (ctx: *anyopaque, label: []const u8, body: []const u8) void = null,
     on_err: ?*const fn (ctx: *anyopaque, text: []const u8) void = null,
+    on_tick: ?*const fn (ctx: *anyopaque) void = null,
+    tick_interval_ms: i32 = 150,
 };
 
 pub const Response = struct {
@@ -295,6 +320,43 @@ pub const Client = struct {
         };
     }
 
+    pub fn addModel(self: *Client, args: AddModelArgs) !struct { result: AddModelResult, response: Response } {
+        var params: std.ArrayList(u8) = .empty;
+        defer params.deinit(self.gpa);
+        try params.appendSlice(self.gpa, "{\"kind\":");
+        try writeJsonString(&params, self.gpa, @tagName(args.kind));
+        try params.appendSlice(self.gpa, ",\"model\":");
+        try writeJsonString(&params, self.gpa, args.model);
+        try params.appendSlice(self.gpa, ",\"api_key\":");
+        try writeJsonString(&params, self.gpa, args.api_key);
+        try params.appendSlice(self.gpa, ",\"base_url\":");
+        try writeJsonString(&params, self.gpa, args.base_url);
+        if (args.context_window) |cw| {
+            try params.print(self.gpa, ",\"context_window\":{d}", .{cw});
+        }
+        try params.appendSlice(self.gpa, "}");
+
+        var resp = try self.callParsed("command.addModel", params.items);
+        errdefer resp.response.deinit();
+        const a = resp.response.arena.allocator();
+
+        const result_val = resp.result orelse return error.RpcError;
+        if (result_val != .object) return error.RpcError;
+        const obj = result_val.object;
+
+        const msg_v = obj.get("message") orelse return error.RpcError;
+        const msg = if (msg_v == .string) try a.dupe(u8, msg_v.string) else try a.dupe(u8, "");
+
+        const entries: []commands.ModelEntry = if (obj.get("entries")) |ev|
+            try parseModelEntries(a, ev)
+        else
+            &.{};
+        return .{
+            .result = .{ .message = msg, .entries = entries },
+            .response = resp.response,
+        };
+    }
+
     pub fn applyModelChoice(self: *Client, choice: commands.ModelChoice) !struct { result: ApplyResult, response: Response } {
         var params_buf: std.ArrayList(u8) = .empty;
         defer params_buf.deinit(self.gpa);
@@ -370,7 +432,7 @@ pub const Client = struct {
 
         while (true) {
             _ = line_arena.reset(.retain_capacity);
-            try self.readLine();
+            try self.readLineWithTick(callbacks);
             const line = self.line_buf.items;
 
             const parsed = std.json.parseFromSliceLeaky(
@@ -545,6 +607,40 @@ pub const Client = struct {
             try self.line_buf.append(self.gpa, byte[0]);
         }
     }
+
+    /// Like `readLine`, but fires `callbacks.on_tick` every
+    /// `tick_interval_ms` while no bytes are available. Used by sessionSend
+    /// so the TUI can animate a "thinking" indicator during the pre-first-
+    /// token wait without spinning a separate timer thread (vaxis isn't
+    /// thread-safe and the rendering surface lives on the main thread).
+    fn readLineWithTick(self: *Client, callbacks: StreamCallbacks) !void {
+        self.line_buf.clearRetainingCapacity();
+        const stdout_fd = self.child.stdout.?.handle;
+        const has_tick = callbacks.on_tick != null and callbacks.tick_interval_ms > 0;
+
+        // Poll only at the start of a line / before each byte. Once data is
+        // flowing, read() returns immediately on each call and we never
+        // re-enter the timeout branch.
+        var byte: [1]u8 = undefined;
+        while (true) {
+            if (has_tick) {
+                var pfds = [_]std.posix.pollfd{.{
+                    .fd = stdout_fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                }};
+                const ready = try std.posix.poll(&pfds, callbacks.tick_interval_ms);
+                if (ready == 0) {
+                    callbacks.on_tick.?(callbacks.ctx);
+                    continue;
+                }
+            }
+            const n = try std.posix.read(stdout_fd, &byte);
+            if (n == 0) return error.ServerClosed;
+            if (byte[0] == '\n') return;
+            try self.line_buf.append(self.gpa, byte[0]);
+        }
+    }
 };
 
 /// Parse a server dispatch payload (the inside of `result` from command.dispatch
@@ -613,6 +709,12 @@ fn parseDispatchResult(a: std.mem.Allocator, result_val: std.json.Value) !Dispat
             .body = if (body_v == .string) try a.dupe(u8, body_v.string) else try a.dupe(u8, ""),
             .user_message = if (um_v == .string) try a.dupe(u8, um_v.string) else try a.dupe(u8, ""),
         } };
+    } else if (std.mem.eql(u8, kind, "models_page")) {
+        const title_v = obj.get("title") orelse return DispatchResult{ .err = "missing title" };
+        const title = if (title_v == .string) try a.dupe(u8, title_v.string) else try a.dupe(u8, "");
+        const entries_v = obj.get("entries") orelse return DispatchResult{ .models_page = .{ .title = title, .entries = &.{} } };
+        const entries = try parseModelEntries(a, entries_v);
+        return DispatchResult{ .models_page = .{ .title = title, .entries = entries } };
     } else if (std.mem.eql(u8, kind, "session_picker")) {
         const title_v = obj.get("title") orelse return DispatchResult{ .err = "missing title" };
         const title = if (title_v == .string) try a.dupe(u8, title_v.string) else try a.dupe(u8, "");
@@ -648,6 +750,36 @@ fn parseDispatchResult(a: std.mem.Allocator, result_val: std.json.Value) !Dispat
     } else {
         return DispatchResult{ .err = try std.fmt.allocPrint(a, "unknown kind: {s}", .{kind}) };
     }
+}
+
+/// Parse a JSON array of ModelEntry objects (the wire shape used by both
+/// `command.dispatch` -> models_page and `command.addModel` -> result.entries).
+fn parseModelEntries(a: std.mem.Allocator, v: std.json.Value) ![]commands.ModelEntry {
+    if (v != .array) return &.{};
+    var list: std.ArrayList(commands.ModelEntry) = .empty;
+    for (v.array.items) |ev| {
+        if (ev != .object) continue;
+        const eo = ev.object;
+        const pi_v = eo.get("provider_index") orelse continue;
+        const kn_v = eo.get("kind") orelse continue;
+        const md_v = eo.get("model") orelse continue;
+        const ia_v = eo.get("is_active") orelse continue;
+        const bu_v = eo.get("base_url") orelse continue;
+        const cw_v = eo.get("context_window") orelse continue;
+        if (pi_v != .integer or kn_v != .string or md_v != .string or ia_v != .bool) continue;
+        if (bu_v != .string or cw_v != .integer) continue;
+        if (pi_v.integer < 0 or cw_v.integer < 0) continue;
+        const knd = std.meta.stringToEnum(core.ProviderKind, kn_v.string) orelse continue;
+        try list.append(a, .{
+            .provider_index = @intCast(pi_v.integer),
+            .kind = knd,
+            .model = try a.dupe(u8, md_v.string),
+            .is_active = ia_v.bool,
+            .base_url = try a.dupe(u8, bu_v.string),
+            .context_window = @intCast(cw_v.integer),
+        });
+    }
+    return list.toOwnedSlice(a);
 }
 
 fn writeAll(fd: std.posix.fd_t, data: []const u8) !void {

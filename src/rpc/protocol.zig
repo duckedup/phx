@@ -206,7 +206,88 @@ pub fn writeDispatchResult(
             }
             try out.appendSlice(a, "]}");
         },
+        .models_page => |p| {
+            try out.appendSlice(a, "{\"kind\":\"models_page\",\"title\":");
+            try writeJsonString(out, a, p.title);
+            try out.appendSlice(a, ",\"entries\":[");
+            for (p.entries, 0..) |e, i| {
+                if (i > 0) try out.appendSlice(a, ",");
+                try out.print(a, "{{\"provider_index\":{d}", .{e.provider_index});
+                try out.appendSlice(a, ",\"kind\":");
+                try writeJsonString(out, a, @tagName(e.kind));
+                try out.appendSlice(a, ",\"model\":");
+                try writeJsonString(out, a, e.model);
+                try out.print(a, ",\"is_active\":{}", .{e.is_active});
+                try out.appendSlice(a, ",\"base_url\":");
+                try writeJsonString(out, a, e.base_url);
+                try out.print(a, ",\"context_window\":{d}}}", .{e.context_window});
+            }
+            try out.appendSlice(a, "]}");
+        },
     }
+}
+
+pub const AddModelParams = struct {
+    kind: core.ProviderKind,
+    model: []const u8,
+    /// Inline secret. Empty for local providers.
+    api_key: []const u8,
+    /// Empty for cloud providers.
+    base_url: []const u8,
+    /// Null when the model uses default context window (cloud).
+    context_window: ?u32,
+};
+
+pub fn parseAddModelParams(arena: std.mem.Allocator, v: std.json.Value) !AddModelParams {
+    if (v != .object) return error.InvalidParams;
+    const obj = v.object;
+    const kn = obj.get("kind") orelse return error.InvalidParams;
+    const md = obj.get("model") orelse return error.InvalidParams;
+    if (kn != .string or md != .string) return error.InvalidParams;
+    const kind = std.meta.stringToEnum(core.ProviderKind, kn.string) orelse return error.InvalidParams;
+
+    const ak = obj.get("api_key") orelse std.json.Value{ .string = "" };
+    const bu = obj.get("base_url") orelse std.json.Value{ .string = "" };
+    if (ak != .string or bu != .string) return error.InvalidParams;
+
+    const cw_v = obj.get("context_window") orelse std.json.Value{ .null = {} };
+    const cw: ?u32 = switch (cw_v) {
+        .integer => |i| if (i > 0) @intCast(i) else null,
+        .null => null,
+        else => return error.InvalidParams,
+    };
+
+    return .{
+        .kind = kind,
+        .model = try arena.dupe(u8, md.string),
+        .api_key = try arena.dupe(u8, ak.string),
+        .base_url = try arena.dupe(u8, bu.string),
+        .context_window = cw,
+    };
+}
+
+pub fn writeAddModelResult(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    message: []const u8,
+    entries: []const commands.ModelEntry,
+) !void {
+    try out.appendSlice(a, "{\"message\":");
+    try writeJsonString(out, a, message);
+    try out.appendSlice(a, ",\"entries\":[");
+    for (entries, 0..) |e, i| {
+        if (i > 0) try out.appendSlice(a, ",");
+        try out.print(a, "{{\"provider_index\":{d}", .{e.provider_index});
+        try out.appendSlice(a, ",\"kind\":");
+        try writeJsonString(out, a, @tagName(e.kind));
+        try out.appendSlice(a, ",\"model\":");
+        try writeJsonString(out, a, e.model);
+        try out.print(a, ",\"is_active\":{}", .{e.is_active});
+        try out.appendSlice(a, ",\"base_url\":");
+        try writeJsonString(out, a, e.base_url);
+        try out.print(a, ",\"context_window\":{d}}}", .{e.context_window});
+    }
+    try out.appendSlice(a, "]}");
 }
 
 /// Map a StopReason enum to the wire string used in session.send terminal results.

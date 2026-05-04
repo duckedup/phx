@@ -4,6 +4,7 @@ const core = @import("phoenix_core");
 const commands = @import("commands");
 const rpc = @import("rpc");
 const Picker = @import("picker.zig").Picker;
+const ModelsPage = @import("models_page.zig").ModelsPage;
 
 const VxEvent = union(enum) {
     key_press: vaxis.Key,
@@ -19,6 +20,24 @@ const VxEvent = union(enum) {
 const ChatLine = struct {
     role: core.Role,
     text: []const u8,
+};
+
+/// Fire-growing thinking animation. Cycles through ember → flame → peak. Each
+/// frame is a 3-cell glyph rendered to the right of the "phoenix" label
+/// while the assistant bubble is still empty (i.e. waiting for the first
+/// streamed token).
+const FireFrame = struct {
+    chars: []const u8, // 3 ASCII bytes
+    rgb: [3]u8,
+};
+
+const fire_frames = [_]FireFrame{
+    .{ .chars = " . ", .rgb = .{ 120, 50, 20 } },
+    .{ .chars = " , ", .rgb = .{ 180, 80, 30 } },
+    .{ .chars = ".v.", .rgb = .{ 220, 120, 40 } },
+    .{ .chars = "/v\\", .rgb = .{ 240, 160, 60 } },
+    .{ .chars = "/^\\", .rgb = .{ 255, 200, 80 } },
+    .{ .chars = "/*\\", .rgb = .{ 255, 230, 130 } },
 };
 
 const StatusView = struct {
@@ -122,6 +141,11 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
     var picker: ?Picker = null;
     defer if (picker) |*p| p.deinit(allocator);
 
+    // /models page state. When non-null the TUI is in full-screen page mode:
+    // chat input is suppressed and every key flows through the page.
+    var models_page: ?ModelsPage = null;
+    defer if (models_page) |*p| p.deinit(allocator);
+
     // Fetch the available slash commands once. The Response keeps the strings
     // alive for the life of the TUI; Picker.initCommand dupes onto its own
     // arena so we could free this earlier, but keeping it lets us re-open
@@ -145,6 +169,7 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
 
         switch (event) {
             .paste_start => {
+                if (models_page != null) continue;
                 pasting = true;
                 paste_start_line = cursor_line;
                 paste_start_col = cursor_col;
@@ -177,10 +202,75 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                 }
             },
             .paste => |text| {
-                // OSC 52 paste — insert all at once
-                try insertText(&input_lines, &cursor_line, &cursor_col, text, allocator);
+                if (models_page) |*page| {
+                    try page.handlePaste(text);
+                } else {
+                    // OSC 52 paste — insert all at once
+                    try insertText(&input_lines, &cursor_line, &cursor_col, text, allocator);
+                }
             },
             .key_press => |key| {
+                if (models_page) |*page| {
+                    const outcome = try page.handleKey(key, allocator, client);
+                    switch (outcome) {
+                        .stay => {},
+                        .close => {
+                            page.deinit(allocator);
+                            models_page = null;
+                        },
+                        .activate_choice => |choice| {
+                            var ar = client.applyModelChoice(choice) catch |err| {
+                                try chat_lines.append(allocator, .{
+                                    .role = .system,
+                                    .text = try std.fmt.allocPrint(allocator, "/model: {s}", .{@errorName(err)}),
+                                });
+                                continue;
+                            };
+                            defer ar.response.deinit();
+
+                            // Update local status view with the new active provider.
+                            allocator.free(status_view.provider_kind);
+                            allocator.free(status_view.model);
+                            status_view.provider_kind = try allocator.dupe(u8, @tagName(ar.result.default_provider.kind));
+                            status_view.model = try allocator.dupe(u8, ar.result.default_provider.model);
+
+                            // Refetch entries so the * marker updates without
+                            // the user having to leave the page.
+                            if (client.dispatch("/models")) |refreshed| {
+                                var r = refreshed;
+                                defer r.response.deinit();
+                                if (r.result == .models_page) {
+                                    page.refresh(r.result.models_page.entries, ar.result.message) catch {};
+                                }
+                            } else |_| {
+                                // Best-effort: at least flip the local flags so
+                                // the * marker renders without a refetch.
+                                for (page.entries) |*e| e.is_active = false;
+                                if (choice.provider_index < page.entries.len) {
+                                    page.entries[choice.provider_index].is_active = true;
+                                }
+                            }
+                        },
+                    }
+                    try drawFrame(
+                        &vx,
+                        writer,
+                        chat_lines.items,
+                        input_lines.items,
+                        cursor_line,
+                        cursor_col,
+                        if (picker) |*p| p else null,
+                        if (models_page) |*p| p else null,
+                        status_view,
+                        &scroll_offset,
+                        &last_chat_h,
+                        allocator,
+                        &status_buf,
+                        0,
+                    );
+                    continue;
+                }
+
                 if (pasting) {
                     // Newlines in paste arrive as Enter (0x0D), LF (0x0A),
                     // or Ctrl+J (codepoint 'j' with text=null) in Kitty protocol
@@ -238,16 +328,28 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                         p.moveDown();
                         picker_consumed_key = true;
                     } else if (autocomplete_active) {
-                        if (key.codepoint == vaxis.Key.tab) {
+                        // Tab and Enter both complete: insert the highlighted
+                        // command into the input and close the picker. A
+                        // *second* Enter (with the picker now closed) submits
+                        // the line. This matches the user-visible model
+                        // "highlight, accept, then run".
+                        const is_complete = key.codepoint == vaxis.Key.tab or
+                            key.codepoint == vaxis.Key.enter or
+                            key.codepoint == vaxis.Key.kp_enter;
+                        if (is_complete) {
                             if (p.selectedCommand()) |c| {
                                 clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
                                 try insertText(&input_lines, &cursor_line, &cursor_col, "/", allocator);
                                 try insertText(&input_lines, &cursor_line, &cursor_col, c.name, allocator);
-                                updateAutocompletePicker(&picker, cmd_list_items, &input_lines, allocator);
+                                // Close the picker so the second Enter goes
+                                // through normal submit. Skip the post-key
+                                // refresh below by guarding via the flag.
+                                p.deinit(allocator);
+                                picker = null;
                             }
                             picker_consumed_key = true;
                         }
-                        // Other keys (text, backspace, enter) fall through to
+                        // Other keys (text, backspace, etc.) fall through to
                         // the normal input handling below.
                     } else {
                         if (key.codepoint == vaxis.Key.enter or key.codepoint == vaxis.Key.kp_enter) {
@@ -343,6 +445,7 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                             &cursor_line,
                             &cursor_col,
                             &picker,
+                            &models_page,
                             &scroll_offset,
                             &last_chat_h,
                             &vx,
@@ -405,11 +508,13 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
             cursor_line,
             cursor_col,
             if (picker) |*p| p else null,
+            if (models_page) |*p| p else null,
             status_view,
             &scroll_offset,
             &last_chat_h,
             allocator,
             &status_buf,
+            0,
         );
     }
 }
@@ -422,11 +527,13 @@ fn drawFrame(
     cursor_line: usize,
     cursor_col: usize,
     picker: ?*Picker,
+    models_page: ?*ModelsPage,
     status_view: StatusView,
     scroll_offset: *u16,
     last_chat_h: *u16,
     allocator: std.mem.Allocator,
     status_buf: []u8,
+    anim_frame: u8,
 ) !void {
     const win = vx.window();
     win.clear();
@@ -434,6 +541,24 @@ fn drawFrame(
     const w = win.width;
     const h = win.height;
     if (w == 0 or h == 0) return;
+
+    // Models page is full-screen and takes precedence over the chat layout.
+    if (models_page) |page| {
+        // Force a full repaint each frame. vaxis's diff renderer otherwise
+        // leaves stale glyphs from the chat (or from a previous wizard step)
+        // visible in cells that the new frame doesn't explicitly write to.
+        // Same workaround the onboarding wizard uses.
+        vx.queueRefresh();
+        win.clear();
+        vx.screen.cursor_vis = false;
+
+        var page_arena = std.heap.ArenaAllocator.init(allocator);
+        defer page_arena.deinit();
+        page.paint(win, page_arena.allocator());
+        try vx.render(writer);
+        try writer.flush();
+        return;
+    }
 
     const status_h: u16 = 1;
     // Input height: 1 line per input line, +2 for borders, min 3, max 10
@@ -444,45 +569,27 @@ fn drawFrame(
         const picker_h = p.height(h);
         const chat_h = h -| input_h -| status_h -| picker_h;
         last_chat_h.* = chat_h;
-        // Autocomplete shows below the input (between input and status bar).
-        // Modal pickers (model/session) keep showing above the input so they
-        // visually attach to the in-progress chat outcome.
-        const picker_below = p.mode == .command_complete;
 
+        // All pickers (autocomplete, model, session) render above the input.
+        // The autocomplete picker visually expands upward as the user types
+        // `/`, so it sits between the chat scrollback and the input box.
         if (chat_h > 0) {
             const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator);
+            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator, anim_frame);
         }
-        if (picker_below) {
-            {
-                const iwin = win.child(.{
-                    .x_off = 0,
-                    .y_off = chat_h,
-                    .width = w,
-                    .height = input_h,
-                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
-                });
-                drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
-            }
-            {
-                const pwin = win.child(.{ .x_off = 0, .y_off = chat_h + input_h, .width = w, .height = picker_h });
-                p.draw(pwin);
-            }
-        } else {
-            {
-                const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
-                p.draw(pwin);
-            }
-            {
-                const iwin = win.child(.{
-                    .x_off = 0,
-                    .y_off = chat_h + picker_h,
-                    .width = w,
-                    .height = input_h,
-                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
-                });
-                drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
-            }
+        {
+            const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
+            p.draw(pwin);
+        }
+        {
+            const iwin = win.child(.{
+                .x_off = 0,
+                .y_off = chat_h + picker_h,
+                .width = w,
+                .height = input_h,
+                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+            });
+            drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
         }
         {
             const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
@@ -493,7 +600,7 @@ fn drawFrame(
         last_chat_h.* = chat_h;
         if (chat_h > 0) {
             const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator);
+            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator, anim_frame);
         }
         {
             const iwin = win.child(.{
@@ -515,15 +622,19 @@ fn drawFrame(
     try writer.flush();
 }
 
-/// Streaming context shared with the on_token / on_context / on_err callbacks
-/// for the duration of a single `sessionSend` call. Holds enough state to
-/// re-render the screen on each token arrival so the user sees the assistant
-/// reply as it's generated.
+/// Streaming context shared with the on_token / on_context / on_err / on_tick
+/// callbacks for the duration of a single `sessionSend` call. Holds enough
+/// state to re-render the screen on each token arrival (and each tick) so
+/// the user sees the assistant reply as it's generated and the thinking
+/// animation pulses while the model is silent.
 const StreamCtx = struct {
     chat_lines: *std.ArrayList(ChatLine),
     assistant_idx: usize,
     streaming_buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
+    /// Animation frame counter for the "phoenix" thinking indicator.
+    /// Bumped by on_tick; read by drawChat. Mod fire_frames.len at use.
+    anim_frame: u8 = 0,
     // Drawing state — same set the main loop hands to drawFrame.
     vx: *vaxis.Vaxis,
     writer: *std.Io.Writer,
@@ -531,6 +642,7 @@ const StreamCtx = struct {
     cursor_line: usize,
     cursor_col: usize,
     picker: *?Picker,
+    models_page: *?ModelsPage,
     status_view: StatusView,
     scroll_offset: *u16,
     last_chat_h: *u16,
@@ -546,12 +658,20 @@ fn streamRedraw(s: *StreamCtx) void {
         s.cursor_line,
         s.cursor_col,
         if (s.picker.*) |*p| p else null,
+        if (s.models_page.*) |*p| p else null,
         s.status_view,
         s.scroll_offset,
         s.last_chat_h,
         s.allocator,
         s.status_buf,
+        s.anim_frame,
     ) catch {};
+}
+
+fn onStreamTick(ctx_ptr: *anyopaque) void {
+    const s: *StreamCtx = @ptrCast(@alignCast(ctx_ptr));
+    s.anim_frame +%= 1;
+    streamRedraw(s);
 }
 
 fn onStreamToken(ctx_ptr: *anyopaque, text: []const u8) void {
@@ -601,6 +721,7 @@ fn handleSubmit(
     cursor_line: *usize,
     cursor_col: *usize,
     picker: *?Picker,
+    models_page: *?ModelsPage,
     scroll_offset: *u16,
     last_chat_h: *u16,
     vx: *vaxis.Vaxis,
@@ -642,6 +763,7 @@ fn handleSubmit(
         .cursor_line = cursor_line.*,
         .cursor_col = cursor_col.*,
         .picker = picker,
+        .models_page = models_page,
         .status_view = status_view,
         .scroll_offset = scroll_offset,
         .last_chat_h = last_chat_h,
@@ -657,6 +779,7 @@ fn handleSubmit(
         .on_token = onStreamToken,
         .on_context = onStreamContext,
         .on_err = onStreamErr,
+        .on_tick = onStreamTick,
     }) catch |err| {
         // The empty assistant bubble was reserved before the call; drop it
         // since nothing came back.
@@ -733,6 +856,13 @@ fn handleSubmit(
                     picker.* = try Picker.initSession(allocator, .{
                         .title = p.title,
                         .choices = p.choices,
+                    });
+                },
+                .models_page => |p| {
+                    if (models_page.*) |*old| old.deinit(allocator);
+                    models_page.* = try ModelsPage.init(allocator, .{
+                        .title = p.title,
+                        .entries = p.entries,
                     });
                 },
                 .inject_context => |frag| {
@@ -1094,7 +1224,7 @@ fn wrapLines(text: []const u8, width: usize, allocator: std.mem.Allocator) !std.
     return result;
 }
 
-fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_offset: u16, allocator: std.mem.Allocator) u16 {
+fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_offset: u16, allocator: std.mem.Allocator, anim_frame: u8) u16 {
     if (lines.len == 0) return 0;
 
     const rows: i64 = win.height;
@@ -1193,6 +1323,30 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
                 .height = 1,
             });
             _ = label_win.print(&.{.{ .text = label, .style = label_style }}, .{});
+
+            // Fire animation: only on assistant turn, only while the bubble
+            // is empty (i.e. waiting for tokens). Lives one space to the
+            // right of the label so it never collides with the bubble below.
+            if (!is_right and line.text.len == 0) {
+                const f = fire_frames[anim_frame % fire_frames.len];
+                const fire_x: u16 = label_x + @as(u16, @intCast(label.len)) + 1;
+                const fire_w: u16 = @intCast(f.chars.len);
+                if (fire_x + fire_w <= win_width) {
+                    const fire_style: vaxis.Style = .{ .fg = .{ .rgb = f.rgb }, .bold = true };
+                    const fwin = win.child(.{
+                        .x_off = fire_x,
+                        .y_off = y,
+                        .width = fire_w,
+                        .height = 1,
+                    });
+                    for (0..f.chars.len) |ci| {
+                        fwin.writeCell(@intCast(ci), 0, .{
+                            .char = .{ .grapheme = f.chars[ci .. ci + 1] },
+                            .style = fire_style,
+                        });
+                    }
+                }
+            }
         }
         cr += 1;
 

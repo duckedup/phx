@@ -62,6 +62,25 @@ pub const CommandInfo = struct {
     is_skill: bool,
 };
 
+/// One row in the /models page. Wider than ModelChoice because the page also
+/// surfaces local-provider config (host URL, context window).
+pub const ModelEntry = struct {
+    provider_index: u32,
+    kind: core.ProviderKind,
+    model: []const u8,
+    is_active: bool,
+    /// Empty for cloud providers.
+    base_url: []const u8,
+    /// 0 when the model uses a static-table default (cloud) or null in config.
+    context_window: u32,
+};
+
+/// Payload for the /models full-screen page.
+pub const ModelsPage = struct {
+    title: []const u8,
+    entries: []const ModelEntry,
+};
+
 pub const Result = union(enum) {
     /// Command produced a simple text result. Render as a system-role chat line.
     /// Owned by `arena`.
@@ -103,6 +122,10 @@ pub const Result = union(enum) {
     /// message still has continuity. The TUI wipes its visible chat and
     /// renders the system message confirming the action. Owned by `arena`.
     compacted: []const u8,
+
+    /// Show the full-screen /models page. The TUI lists configured models
+    /// and offers an "Add new" affordance. Owned by `arena`.
+    models_page: ModelsPage,
 };
 
 /// Returned to the TUI on every dispatch. The TUI must call `deinit` after it is
@@ -145,6 +168,7 @@ pub const Registry = struct {
 
 const builtin_table = [_]Registry.Builtin{
     .{ .name = "model", .summary = "Select the active model", .handler = model_cmd.handle },
+    .{ .name = "models", .summary = "Manage configured models (add, switch, view)", .handler = model_cmd.handleModelsPage },
     .{ .name = "clear", .summary = "Save and reset the conversation", .handler = session_cmd.handleClear },
     .{ .name = "compact", .summary = "Truncate older history to free context", .handler = session_cmd.handleCompact },
     .{ .name = "resume", .summary = "Resume a saved conversation", .handler = session_cmd.handleResume },
@@ -266,6 +290,27 @@ pub fn applyModelChoice(
     out_arena: std.mem.Allocator,
 ) ![]const u8 {
     return model_cmd.apply(ctx, choice, out_arena);
+}
+
+/// Append a new provider profile to the running config and persist
+/// ~/.phoenix/phoenix.json. The new profile is *not* automatically marked
+/// active — the user activates it from the /models page via the existing
+/// applyModelChoice path.
+pub fn addProvider(
+    ctx: DispatchCtx,
+    profile: core.ProviderProfile,
+    out_arena: std.mem.Allocator,
+) ![]const u8 {
+    return model_cmd.addProvider(ctx, profile, out_arena);
+}
+
+/// Re-list the providers after a mutation (add or activate). The TUI uses
+/// this to refresh its /models page in place rather than re-issuing /models.
+pub fn listModelEntries(
+    ctx: DispatchCtx,
+    out_arena: std.mem.Allocator,
+) ![]ModelEntry {
+    return model_cmd.listEntries(ctx, out_arena);
 }
 
 // ---- Tests ----

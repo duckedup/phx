@@ -42,6 +42,85 @@ pub fn handle(
     };
 }
 
+/// `/models` -> the full-screen models page. Always succeeds, even when only
+/// one provider is configured (the page itself surfaces the "Add new" affordance,
+/// which is precisely what the user reaches for in the single-provider case).
+pub fn handleModelsPage(
+    ctx: dispatcher.DispatchCtx,
+    args: []const u8,
+    out: std.mem.Allocator,
+) !dispatcher.Result {
+    _ = args;
+    const entries = try listEntries(ctx, out);
+    return .{
+        .models_page = .{
+            .title = try out.dupe(u8, "Models"),
+            .entries = entries,
+        },
+    };
+}
+
+/// Snapshot the current providers list as ModelEntry rows. Returned slice is
+/// owned by `out`.
+pub fn listEntries(
+    ctx: dispatcher.DispatchCtx,
+    out: std.mem.Allocator,
+) ![]dispatcher.ModelEntry {
+    var entries: std.ArrayList(dispatcher.ModelEntry) = .empty;
+    for (ctx.config.providers, 0..) |p, i| {
+        try entries.append(out, .{
+            .provider_index = @intCast(i),
+            .kind = p.kind,
+            .model = try out.dupe(u8, p.model),
+            .is_active = p.active,
+            .base_url = if (p.base_url) |b| try out.dupe(u8, b) else "",
+            .context_window = p.context_window orelse 0,
+        });
+    }
+    return entries.toOwnedSlice(out);
+}
+
+/// Append `profile` to `config.providers` and rewrite ~/.phoenix/phoenix.json.
+/// `profile.active` is preserved as-is — onboarding writes the first provider
+/// active; new providers added via /models start inactive.
+pub fn addProvider(
+    ctx: dispatcher.DispatchCtx,
+    profile: core.ProviderProfile,
+    out: std.mem.Allocator,
+) ![]const u8 {
+    const home = ctx.home orelse return error.HomeUnavailable;
+
+    const a = ctx.config.arena.allocator();
+    const old = ctx.config.providers;
+    const combined = try a.alloc(core.ProviderProfile, old.len + 1);
+    @memcpy(combined[0..old.len], old);
+    combined[old.len] = .{
+        .kind = profile.kind,
+        .model = try a.dupe(u8, profile.model),
+        .active = profile.active,
+        .auth = if (profile.auth) |auth| switch (auth) {
+            .inline_value => |v| core.AuthEntry{ .inline_value = try a.dupe(u8, v) },
+            .env_var => |v| core.AuthEntry{ .env_var = try a.dupe(u8, v) },
+        } else null,
+        .base_url = if (profile.base_url) |b| try a.dupe(u8, b) else null,
+        .endpoint = if (profile.endpoint) |e| try a.dupe(u8, e) else null,
+        .context_window = profile.context_window,
+        .api = if (profile.api) |x| try a.dupe(u8, x) else null,
+        .project = if (profile.project) |x| try a.dupe(u8, x) else null,
+        .location = if (profile.location) |x| try a.dupe(u8, x) else null,
+        .credentials_path = if (profile.credentials_path) |x| try a.dupe(u8, x) else null,
+    };
+    ctx.config.providers = combined;
+
+    try core.config_writer.writeUserConfig(ctx.io, ctx.gpa, home, ctx.config.providers);
+
+    return std.fmt.allocPrint(
+        out,
+        "Added {s} ({s}). Saved to ~/.phoenix/phoenix.json.",
+        .{ profile.model, @tagName(profile.kind) },
+    );
+}
+
 /// Persist the chosen provider as active. Mutates the in-memory config to flip
 /// the `active` flag on the chosen row (clearing it from all others), then
 /// rewrites ~/.phoenix/phoenix.json to match.
