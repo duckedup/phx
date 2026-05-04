@@ -169,6 +169,46 @@ pub fn writeEventErrLine(
     try out.appendSlice(a, "}}");
 }
 
+/// Write a complete `event` line for an assistant tool invocation:
+///   {"id":N,"event":{"kind":"tool_call","tool_id":"...","name":"...","args":"..."}}
+/// `args` is the raw JSON string the model produced. Caller appends '\n'.
+pub fn writeEventToolCallLine(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    id: i64,
+    tool_id: []const u8,
+    name: []const u8,
+    args: []const u8,
+) !void {
+    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"tool_call\",\"tool_id\":", .{id});
+    try writeJsonString(out, a, tool_id);
+    try out.appendSlice(a, ",\"name\":");
+    try writeJsonString(out, a, name);
+    try out.appendSlice(a, ",\"args\":");
+    try writeJsonString(out, a, args);
+    try out.appendSlice(a, "}}");
+}
+
+/// Write a complete `event` line for the harness-side result of a tool call:
+///   {"id":N,"event":{"kind":"tool_result","tool_id":"...","output":"...","is_error":false}}
+/// Caller appends '\n'.
+pub fn writeEventToolResultLine(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    id: i64,
+    tool_id: []const u8,
+    output: []const u8,
+    is_error: bool,
+) !void {
+    try out.print(a, "{{\"id\":{d},\"event\":{{\"kind\":\"tool_result\",\"tool_id\":", .{id});
+    try writeJsonString(out, a, tool_id);
+    try out.appendSlice(a, ",\"output\":");
+    try writeJsonString(out, a, output);
+    try out.appendSlice(a, ",\"is_error\":");
+    try out.appendSlice(a, if (is_error) "true" else "false");
+    try out.appendSlice(a, "}}");
+}
+
 /// Write a complete `event` line for an inject_context preamble:
 ///   {"id":N,"event":{"kind":"context","label":"...","body":"..."}}
 /// Caller appends the trailing '\n' before flushing.
@@ -482,6 +522,29 @@ test "writeEventErrLine round-trip" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"id\":3") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"err\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "server overloaded") != null);
+}
+
+test "writeEventToolCallLine round-trip" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeEventToolCallLine(&out, a, 9, "tu_01", "read", "{\"path\":\"/tmp/x\"}");
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"id\":9") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"tool_call\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "tu_01") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"name\":\"read\"") != null);
+}
+
+test "writeEventToolResultLine round-trip with error flag" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeEventToolResultLine(&out, a, 11, "tu_02", "boom", true);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"id\":11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"tool_result\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "tu_02") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"output\":\"boom\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"is_error\":true") != null);
 }
 
 test "writeEventContextLine includes label and body" {

@@ -77,6 +77,13 @@ pub fn build(b: *std.Build) void {
     });
     commands_mod.addImport("phoenix_core", core_mod);
 
+    const tools_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/tools.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tools_mod.addImport("phoenix_core", core_mod);
+
     const rpc_mod = b.createModule(.{
         .root_source_file = b.path("src/rpc/rpc.zig"),
         .target = target,
@@ -84,6 +91,7 @@ pub fn build(b: *std.Build) void {
     });
     rpc_mod.addImport("phoenix_core", core_mod);
     rpc_mod.addImport("commands", commands_mod);
+    rpc_mod.addImport("phoenix_tools", tools_mod);
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -182,6 +190,13 @@ pub fn build(b: *std.Build) void {
     });
     test_commands_mod.addImport("phoenix_core", core_test_mod);
 
+    const test_tools_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/tools.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_tools_mod.addImport("phoenix_core", core_test_mod);
+
     const test_rpc_mod = b.createModule(.{
         .root_source_file = b.path("src/rpc/rpc.zig"),
         .target = target,
@@ -189,6 +204,7 @@ pub fn build(b: *std.Build) void {
     });
     test_rpc_mod.addImport("phoenix_core", core_test_mod);
     test_rpc_mod.addImport("commands", test_commands_mod);
+    test_rpc_mod.addImport("phoenix_tools", test_tools_mod);
 
     const main_test_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -224,6 +240,9 @@ pub fn build(b: *std.Build) void {
     const commands_tests = b.addTest(.{ .root_module = test_commands_mod });
     const run_commands_tests = b.addRunArtifact(commands_tests);
 
+    const tools_tests = b.addTest(.{ .root_module = test_tools_mod });
+    const run_tools_tests = b.addRunArtifact(tools_tests);
+
     const rpc_tests = b.addTest(.{ .root_module = test_rpc_mod });
     const run_rpc_tests = b.addRunArtifact(rpc_tests);
 
@@ -236,5 +255,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_llamacpp_tests.step);
     test_step.dependOn(&run_google_tests.step);
     test_step.dependOn(&run_commands_tests.step);
+    test_step.dependOn(&run_tools_tests.step);
     test_step.dependOn(&run_rpc_tests.step);
 }

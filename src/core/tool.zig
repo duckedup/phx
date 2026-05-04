@@ -9,6 +9,7 @@ pub const ToolError = error{
 pub const ToolResult = struct {
     output: []const u8,
     truncated: bool = false,
+    is_error: bool = false,
 };
 
 pub const Tool = struct {
@@ -16,10 +17,10 @@ pub const Tool = struct {
     description: []const u8,
     schema: []const u8,
     max_output_bytes: usize = 512 * 1024,
-    invokeFn: *const fn (self: *const Tool, args: []const u8, allocator: std.mem.Allocator) anyerror!ToolResult,
+    invokeFn: *const fn (self: *const Tool, io: std.Io, args: []const u8, allocator: std.mem.Allocator) anyerror!ToolResult,
 
-    pub fn invoke(self: *const Tool, args: []const u8, allocator: std.mem.Allocator) !ToolResult {
-        return self.invokeFn(self, args, allocator);
+    pub fn invoke(self: *const Tool, io: std.Io, args: []const u8, allocator: std.mem.Allocator) !ToolResult {
+        return self.invokeFn(self, io, args, allocator);
     }
 };
 

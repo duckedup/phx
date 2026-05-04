@@ -847,8 +847,8 @@ test "session resolves and extends" {
         .data =
         \\{
         \\  "sessions": [
-        \\    { "name": "base", "tools": ["read_file"], "persist": true },
-        \\    { "name": "child", "extends": "base", "tools": ["run_shell"] }
+        \\    { "name": "base", "tools": ["read"], "persist": true },
+        \\    { "name": "child", "extends": "base", "tools": ["bash"] }
         \\  ]
         \\}
         ,
@@ -857,8 +857,8 @@ test "session resolves and extends" {
     defer cfg.deinit();
     const s = try cfg.resolveSession("child");
     try std.testing.expectEqual(@as(usize, 2), s.tools.len);
-    try std.testing.expectEqualStrings("read_file", s.tools[0]);
-    try std.testing.expectEqualStrings("run_shell", s.tools[1]);
+    try std.testing.expectEqualStrings("read", s.tools[0]);
+    try std.testing.expectEqualStrings("bash", s.tools[1]);
 }
 
 test "circular extends returns error" {
