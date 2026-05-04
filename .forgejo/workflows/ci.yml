@@ -1,0 +1,40 @@
+name: CI
+
+on: pull_request
+
+jobs:
+  build-and-test:
+    runs-on: phoenix
+    steps:
+      - name: Install system packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git jq xz-utils
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        run: |
+          set -eu
+          ZIG_VERSION="$(cat .zigversion)"
+          ARCH="$(uname -m)"
+          TARBALL_URL="$(curl -fsSL https://ziglang.org/download/index.json \
+            | jq -er ".\"${ZIG_VERSION}\"[\"${ARCH}-linux\"].tarball")"
+          echo "Fetching ${TARBALL_URL}"
+          curl -fsSL -o zig.tar.xz "$TARBALL_URL"
+          mkdir -p /opt/zig
+          tar -xJf zig.tar.xz -C /opt/zig --strip-components=1
+          rm zig.tar.xz
+          echo "/opt/zig" >> "$GITHUB_PATH"
+
+      - name: Zig version
+        run: zig version
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test

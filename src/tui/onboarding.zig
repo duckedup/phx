@@ -14,7 +14,7 @@ const VxEvent = union(enum) {
     paste: []const u8,
 };
 
-const Step = enum { provider_kind, host_url, model, api_key, confirm };
+const Step = enum { provider_kind, host_url, model, context_window, api_key, confirm };
 
 const KindEntry = struct {
     kind: core.ProviderKind,
@@ -29,6 +29,8 @@ const KindEntry = struct {
     default_host_url: []const u8,
     /// Default model pre-filled in the (free-form) model step for local providers.
     default_local_model: []const u8,
+    /// Default context window suggested in the context_window step (local only).
+    default_context_window: u32,
 };
 
 const kinds = [_]KindEntry{
@@ -46,6 +48,7 @@ const kinds = [_]KindEntry{
         .needs_host_url = false,
         .default_host_url = "",
         .default_local_model = "",
+        .default_context_window = 0,
     },
     .{
         .kind = .openai,
@@ -63,6 +66,7 @@ const kinds = [_]KindEntry{
         .needs_host_url = false,
         .default_host_url = "",
         .default_local_model = "",
+        .default_context_window = 0,
     },
     .{
         .kind = .gemini,
@@ -78,6 +82,7 @@ const kinds = [_]KindEntry{
         .needs_host_url = false,
         .default_host_url = "",
         .default_local_model = "",
+        .default_context_window = 0,
     },
     .{
         .kind = .ollama,
@@ -87,6 +92,7 @@ const kinds = [_]KindEntry{
         .needs_host_url = true,
         .default_host_url = "http://localhost:11434",
         .default_local_model = "llama3.3",
+        .default_context_window = 32_768,
     },
     .{
         .kind = .llamacpp,
@@ -96,6 +102,7 @@ const kinds = [_]KindEntry{
         .needs_host_url = true,
         .default_host_url = "http://localhost:8080",
         .default_local_model = "local-model",
+        .default_context_window = 8_192,
     },
 };
 
@@ -109,6 +116,8 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
     defer host_buf.deinit(allocator);
     var model_buf: std.ArrayList(u8) = .empty;
     defer model_buf.deinit(allocator);
+    var context_buf: std.ArrayList(u8) = .empty;
+    defer context_buf.deinit(allocator);
 
     // Arena for transient strings built during a paint cycle (titles, headings,
     // hints). Cells in vx.screen.buf reference these byte ranges, so they must
@@ -137,7 +146,7 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
     try vx.queryTerminal(writer, .fromSeconds(1));
     try writer.flush();
 
-    try paint(&vx, writer, &paint_arena, step, kind_index, model_index, host_buf.items, model_buf.items, key_buf.items, error_msg);
+    try paint(&vx, writer, &paint_arena, step, kind_index, model_index, host_buf.items, model_buf.items, context_buf.items, key_buf.items, error_msg);
 
     while (true) {
         const event = try loop.nextEvent();
@@ -150,6 +159,7 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
                     .api_key => try appendSanitized(&key_buf, allocator, s),
                     .host_url => try appendSanitized(&host_buf, allocator, s),
                     .model => if (kinds[kind_index].needs_host_url) try appendSanitized(&model_buf, allocator, s),
+                    .context_window => try appendDigits(&context_buf, allocator, s),
                     else => {},
                 }
             },
@@ -178,11 +188,13 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
                             // Reset downstream state when picking a new provider.
                             host_buf.clearRetainingCapacity();
                             model_buf.clearRetainingCapacity();
+                            context_buf.clearRetainingCapacity();
                             key_buf.clearRetainingCapacity();
                             model_index = 0;
                             if (k.needs_host_url) {
                                 try host_buf.appendSlice(allocator, k.default_host_url);
                                 try model_buf.appendSlice(allocator, k.default_local_model);
+                                try context_buf.print(allocator, "{d}", .{k.default_context_window});
                                 step = .host_url;
                             } else {
                                 step = .model;
@@ -209,7 +221,7 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
                                 if (model_buf.items.len == 0) {
                                     error_msg = "model name cannot be empty";
                                 } else {
-                                    step = .confirm;
+                                    step = .context_window;
                                 }
                             } else if (key.codepoint == vaxis.Key.backspace) {
                                 if (model_buf.items.len > 0) _ = model_buf.pop();
@@ -227,6 +239,19 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
                             }
                         }
                     },
+                    .context_window => {
+                        if (key.codepoint == vaxis.Key.enter) {
+                            if (parseContextWindow(context_buf.items) == null) {
+                                error_msg = "context window must be a positive integer";
+                            } else {
+                                step = .confirm;
+                            }
+                        } else if (key.codepoint == vaxis.Key.backspace) {
+                            if (context_buf.items.len > 0) _ = context_buf.pop();
+                        } else if (key.text) |t| {
+                            try appendDigits(&context_buf, allocator, t);
+                        }
+                    },
                     .api_key => {
                         if (key.codepoint == vaxis.Key.enter) {
                             if (key_buf.items.len == 0) {
@@ -242,7 +267,7 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
                     },
                     .confirm => {
                         if (key.matches('y', .{}) or key.matches('Y', .{}) or key.codepoint == vaxis.Key.enter) {
-                            try writeChoice(io, allocator, home, kind_index, model_index, host_buf.items, model_buf.items, key_buf.items);
+                            try writeChoice(io, allocator, home, kind_index, model_index, host_buf.items, model_buf.items, context_buf.items, key_buf.items);
                             return .completed;
                         } else if (key.matches('n', .{}) or key.matches('N', .{})) {
                             step = .provider_kind;
@@ -252,7 +277,7 @@ pub fn run(init: std.process.Init, home: []const u8) !Outcome {
             },
         }
 
-        try paint(&vx, writer, &paint_arena, step, kind_index, model_index, host_buf.items, model_buf.items, key_buf.items, error_msg);
+        try paint(&vx, writer, &paint_arena, step, kind_index, model_index, host_buf.items, model_buf.items, context_buf.items, key_buf.items, error_msg);
     }
 }
 
@@ -261,9 +286,31 @@ fn stepBack(step: Step, k: KindEntry) Step {
         .provider_kind => .provider_kind,
         .host_url => .provider_kind,
         .model => if (k.needs_host_url) .host_url else .provider_kind,
+        .context_window => .model,
         .api_key => .model,
-        .confirm => if (k.needs_host_url) .model else .api_key,
+        .confirm => if (k.needs_host_url) .context_window else .api_key,
     };
+}
+
+/// Drop everything that isn't a base-10 digit before appending. Used by both
+/// the keystroke and paste paths in the context_window step.
+fn appendDigits(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, s: []const u8) !void {
+    for (s) |c| {
+        if (c >= '0' and c <= '9') try buf.append(allocator, c);
+    }
+}
+
+/// Parse the context-window text field. Returns null on empty / overflow.
+fn parseContextWindow(s: []const u8) ?u32 {
+    if (s.len == 0) return null;
+    var n: u64 = 0;
+    for (s) |c| {
+        if (c < '0' or c > '9') return null;
+        n = n * 10 + (c - '0');
+        if (n > std.math.maxInt(u32)) return null;
+    }
+    if (n == 0) return null;
+    return @intCast(n);
 }
 
 fn paint(
@@ -275,6 +322,7 @@ fn paint(
     model_index: usize,
     host_value: []const u8,
     local_model: []const u8,
+    context_value: []const u8,
     key_value: []const u8,
     error_msg: ?[]const u8,
 ) !void {
@@ -294,7 +342,7 @@ fn paint(
     if (win.width < 40 or win.height < 14) {
         writeText(win, 0, 0, "Resize terminal to at least 40x14...", .{});
     } else {
-        drawWizard(win, paint_arena.allocator(), step, kind_index, model_index, host_value, local_model, key_value, error_msg);
+        drawWizard(win, paint_arena.allocator(), step, kind_index, model_index, host_value, local_model, context_value, key_value, error_msg);
     }
 
     try vx.render(writer);
@@ -320,6 +368,7 @@ fn writeChoice(
     model_index: usize,
     host_value: []const u8,
     local_model: []const u8,
+    context_value: []const u8,
     key_value: []const u8,
 ) !void {
     const k = kinds[kind_index];
@@ -328,6 +377,7 @@ fn writeChoice(
 
     const auth: ?core.AuthEntry = if (local) null else .{ .inline_value = key_value };
     const base_url: ?[]const u8 = if (local and host_value.len > 0) host_value else null;
+    const context_window: ?u32 = if (local) parseContextWindow(context_value) else null;
 
     const profiles = [_]core.ProviderProfile{
         .{
@@ -336,6 +386,7 @@ fn writeChoice(
             .active = true,
             .auth = auth,
             .base_url = base_url,
+            .context_window = context_window,
         },
     };
     try core.config_writer.writeUserConfig(io, allocator, home, &profiles);
@@ -368,6 +419,7 @@ fn drawWizard(
     model_index: usize,
     host_value: []const u8,
     local_model: []const u8,
+    context_value: []const u8,
     key_value: []const u8,
     error_msg: ?[]const u8,
 ) void {
@@ -396,8 +448,9 @@ fn drawWizard(
         .provider_kind => drawProviderKind(inner, kind_index, text_style, dim_style),
         .host_url => drawHostUrl(inner, arena, kind_index, host_value, text_style, dim_style),
         .model => drawModel(inner, arena, kind_index, model_index, local_model, text_style, dim_style),
+        .context_window => drawContextWindow(inner, arena, kind_index, context_value, text_style, dim_style),
         .api_key => drawApiKey(inner, arena, kind_index, key_value, text_style, dim_style),
-        .confirm => drawConfirm(inner, arena, kind_index, model_index, host_value, local_model, key_value, text_style, dim_style),
+        .confirm => drawConfirm(inner, arena, kind_index, model_index, host_value, local_model, context_value, key_value, text_style, dim_style),
     }
 
     const hint = stepHint(step);
@@ -411,10 +464,10 @@ fn drawWizard(
 }
 
 fn totalSteps(k: KindEntry) usize {
-    // provider_kind + (host_url?) + model + (api_key?) + confirm
+    // provider_kind + (host_url?) + model + (context_window? | api_key?) + confirm
     var n: usize = 3; // provider_kind, model, confirm
-    if (k.needs_host_url) n += 1;
-    if (!isLocal(k.kind)) n += 1;
+    if (k.needs_host_url) n += 2; // host_url + context_window
+    if (!isLocal(k.kind)) n += 1; // api_key
     return n;
 }
 
@@ -428,6 +481,10 @@ fn stepNumber(step: Step, k: KindEntry) usize {
     }
     n += 1;
     if (step == .model) return n;
+    if (k.needs_host_url) {
+        n += 1;
+        if (step == .context_window) return n;
+    }
     if (!isLocal(k.kind)) {
         n += 1;
         if (step == .api_key) return n;
@@ -441,6 +498,7 @@ fn stepHint(step: Step) []const u8 {
         .provider_kind => "up/down select   Enter next   Esc cancel",
         .host_url => "type to edit   Enter next   Left back   Esc cancel",
         .model => "select or type   Enter next   Left back   Esc cancel",
+        .context_window => "digits only   Enter next   Left back   Esc cancel",
         .api_key => "paste your API key   Enter next   Left back   Esc cancel",
         .confirm => "y confirm   n back   Left back   Esc cancel",
     };
@@ -515,6 +573,28 @@ fn drawModel(
     }
 }
 
+fn drawContextWindow(
+    inner: vaxis.Window,
+    arena: std.mem.Allocator,
+    kind_index: usize,
+    context_value: []const u8,
+    text_style: vaxis.Style,
+    dim_style: vaxis.Style,
+) void {
+    const k = kinds[kind_index];
+    const heading = std.fmt.allocPrint(arena, "Context window for {s}:", .{k.label}) catch "Context window:";
+    writeText(inner, 1, 2, heading, text_style);
+
+    writeText(inner, 1, 4, "Tokens: ", text_style);
+    writeText(inner, 9, 4, context_value, .{ .bold = true });
+
+    writeText(inner, 1, 6, "Local models don't expose this; Phoenix needs the number to know", dim_style);
+    writeText(inner, 1, 7, "when to auto-compact. Match the limit you started your server with.", dim_style);
+
+    const def = std.fmt.allocPrint(arena, "Default: {d}", .{k.default_context_window}) catch "";
+    writeText(inner, 1, 9, def, dim_style);
+}
+
 fn drawApiKey(
     inner: vaxis.Window,
     arena: std.mem.Allocator,
@@ -551,6 +631,7 @@ fn drawConfirm(
     model_index: usize,
     host_value: []const u8,
     local_model: []const u8,
+    context_value: []const u8,
     key_value: []const u8,
     text_style: vaxis.Style,
     dim_style: vaxis.Style,
@@ -575,6 +656,13 @@ fn drawConfirm(
     writeText(inner, 1, row, "Model:    ", dim_style);
     writeText(inner, 11, row, model, .{ .bold = true });
     row += 1;
+
+    if (local) {
+        writeText(inner, 1, row, "Context:  ", dim_style);
+        const ctx_summary = std.fmt.allocPrint(arena, "{s} tokens", .{context_value}) catch context_value;
+        writeText(inner, 11, row, ctx_summary, .{ .bold = true });
+        row += 1;
+    }
 
     writeText(inner, 1, row, "Auth:     ", dim_style);
     if (local) {

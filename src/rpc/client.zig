@@ -18,8 +18,11 @@ pub const DispatchResult = union(enum) {
     not_a_command,
     message: []const u8,
     err: []const u8,
+    cleared: []const u8,
+    compacted: []const u8,
     model_picker: ModelPicker,
     inject_context: ContextFragment,
+    session_picker: SessionPicker,
 
     pub const ModelPicker = struct {
         title: []const u8,
@@ -29,6 +32,21 @@ pub const DispatchResult = union(enum) {
         label: []const u8,
         body: []const u8,
         user_message: []const u8,
+    };
+    pub const SessionPicker = struct {
+        title: []const u8,
+        choices: []commands.SessionChoice,
+    };
+};
+
+pub const ApplySessionResult = struct {
+    message: []const u8,
+    message_count: u32,
+    messages: []const RestoredMessage,
+
+    pub const RestoredMessage = struct {
+        role: core.Role,
+        content: []const u8,
     };
 };
 
@@ -183,6 +201,33 @@ pub const Client = struct {
         };
     }
 
+    pub fn listCommands(self: *Client) !struct { items: []commands.CommandInfo, response: Response } {
+        var resp = try self.callParsed("command.list", null);
+        errdefer resp.response.deinit();
+        const a = resp.response.arena.allocator();
+
+        const result_val = resp.result orelse return error.RpcError;
+        if (result_val != .object) return error.RpcError;
+        const cmds_v = result_val.object.get("commands") orelse return error.RpcError;
+        if (cmds_v != .array) return error.RpcError;
+
+        var list: std.ArrayList(commands.CommandInfo) = .empty;
+        for (cmds_v.array.items) |cv| {
+            if (cv != .object) continue;
+            const co = cv.object;
+            const nv = co.get("name") orelse continue;
+            const sv = co.get("summary") orelse continue;
+            const skv = co.get("is_skill") orelse std.json.Value{ .bool = false };
+            if (nv != .string or sv != .string) continue;
+            try list.append(a, .{
+                .name = try a.dupe(u8, nv.string),
+                .summary = try a.dupe(u8, sv.string),
+                .is_skill = if (skv == .bool) skv.bool else false,
+            });
+        }
+        return .{ .items = try list.toOwnedSlice(a), .response = resp.response };
+    }
+
     pub fn dispatch(self: *Client, input: []const u8) !struct { result: DispatchResult, response: Response } {
         var params_buf: std.ArrayList(u8) = .empty;
         defer params_buf.deinit(self.gpa);
@@ -200,6 +245,54 @@ pub const Client = struct {
         const result_val = resp.result orelse return error.RpcError;
         const dr = try parseDispatchResult(a, result_val);
         return .{ .result = dr, .response = resp.response };
+    }
+
+    pub fn applySessionChoice(self: *Client, id: []const u8) !struct { result: ApplySessionResult, response: Response } {
+        var params: std.ArrayList(u8) = .empty;
+        defer params.deinit(self.gpa);
+        try params.appendSlice(self.gpa, "{\"id\":");
+        try writeJsonString(&params, self.gpa, id);
+        try params.appendSlice(self.gpa, "}");
+
+        var resp = try self.callParsed("command.applySessionChoice", params.items);
+        errdefer resp.response.deinit();
+        const a = resp.response.arena.allocator();
+
+        const result_val = resp.result orelse return error.RpcError;
+        if (result_val != .object) return error.RpcError;
+        const obj = result_val.object;
+
+        const msg_v = obj.get("message") orelse return error.RpcError;
+        const msg = if (msg_v == .string) try a.dupe(u8, msg_v.string) else try a.dupe(u8, "");
+        const cnt_v = obj.get("message_count") orelse std.json.Value{ .integer = 0 };
+        const cnt: u32 = if (cnt_v == .integer and cnt_v.integer >= 0) @intCast(cnt_v.integer) else 0;
+
+        var msgs_list: std.ArrayList(ApplySessionResult.RestoredMessage) = .empty;
+        if (obj.get("messages")) |mv| {
+            if (mv == .array) {
+                for (mv.array.items) |item| {
+                    if (item != .object) continue;
+                    const io = item.object;
+                    const rv = io.get("role") orelse continue;
+                    const cv = io.get("content") orelse continue;
+                    if (rv != .string or cv != .string) continue;
+                    const role = std.meta.stringToEnum(core.Role, rv.string) orelse continue;
+                    try msgs_list.append(a, .{
+                        .role = role,
+                        .content = try a.dupe(u8, cv.string),
+                    });
+                }
+            }
+        }
+
+        return .{
+            .result = .{
+                .message = msg,
+                .message_count = cnt,
+                .messages = try msgs_list.toOwnedSlice(a),
+            },
+            .response = resp.response,
+        };
     }
 
     pub fn applyModelChoice(self: *Client, choice: commands.ModelChoice) !struct { result: ApplyResult, response: Response } {
@@ -471,6 +564,14 @@ fn parseDispatchResult(a: std.mem.Allocator, result_val: std.json.Value) !Dispat
         const tv = obj.get("text") orelse return DispatchResult{ .message = "" };
         const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
         return DispatchResult{ .message = text };
+    } else if (std.mem.eql(u8, kind, "cleared")) {
+        const tv = obj.get("text") orelse return DispatchResult{ .cleared = "" };
+        const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
+        return DispatchResult{ .cleared = text };
+    } else if (std.mem.eql(u8, kind, "compacted")) {
+        const tv = obj.get("text") orelse return DispatchResult{ .compacted = "" };
+        const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
+        return DispatchResult{ .compacted = text };
     } else if (std.mem.eql(u8, kind, "err")) {
         const tv = obj.get("text") orelse return DispatchResult{ .err = "" };
         const text = if (tv == .string) try a.dupe(u8, tv.string) else try a.dupe(u8, "");
@@ -512,6 +613,38 @@ fn parseDispatchResult(a: std.mem.Allocator, result_val: std.json.Value) !Dispat
             .body = if (body_v == .string) try a.dupe(u8, body_v.string) else try a.dupe(u8, ""),
             .user_message = if (um_v == .string) try a.dupe(u8, um_v.string) else try a.dupe(u8, ""),
         } };
+    } else if (std.mem.eql(u8, kind, "session_picker")) {
+        const title_v = obj.get("title") orelse return DispatchResult{ .err = "missing title" };
+        const title = if (title_v == .string) try a.dupe(u8, title_v.string) else try a.dupe(u8, "");
+        const choices_v = obj.get("choices") orelse return DispatchResult{ .session_picker = .{ .title = title, .choices = &.{} } };
+        var choices_list: std.ArrayList(commands.SessionChoice) = .empty;
+        if (choices_v == .array) {
+            for (choices_v.array.items) |cv| {
+                if (cv != .object) continue;
+                const co = cv.object;
+                const id_v = co.get("id") orelse continue;
+                const name_v = co.get("name") orelse continue;
+                const upd_v = co.get("updated_at") orelse continue;
+                const cnt_v = co.get("message_count") orelse continue;
+                if (id_v != .string or name_v != .string or upd_v != .integer or cnt_v != .integer) continue;
+                if (cnt_v.integer < 0) continue;
+                try choices_list.append(a, commands.SessionChoice{
+                    .id = try a.dupe(u8, id_v.string),
+                    .name = try a.dupe(u8, name_v.string),
+                    .updated_at = upd_v.integer,
+                    .message_count = @intCast(cnt_v.integer),
+                });
+            }
+        }
+        return DispatchResult{ .session_picker = .{
+            .title = title,
+            .choices = try choices_list.toOwnedSlice(a),
+        } };
+    } else if (std.mem.eql(u8, kind, "clear_session") or std.mem.eql(u8, kind, "compact_session")) {
+        // Server-internal markers that should have been transformed before
+        // hitting the wire. If we see one, surface a benign message rather
+        // than an error so the chat continues.
+        return DispatchResult{ .message = try a.dupe(u8, "") };
     } else {
         return DispatchResult{ .err = try std.fmt.allocPrint(a, "unknown kind: {s}", .{kind}) };
     }

@@ -124,14 +124,14 @@ A **session** is the unit of agent state: message history, tool registry, alloca
 
 ### 5.1A Session persistence
 
-Sessions persist to disk at `.phoenix/sessions/{session_id}/`. The session directory contains:
+Sessions persist to disk at `~/.phoenix/sessions/{project}/{session_id}/`, where `{project}` is the basename of the working directory the harness was launched from. The session directory contains:
 
-- **`messages.jsonl`** — the conversation history, one JSON object per message. Appended after each completed turn (user message + assistant response + tool results). This is the source of truth for session resume.
-- **`state.json`** — session metadata: provider config, tool set, token accounting, creation time, last-active time.
+- **`messages.jsonl`** — the conversation history, one JSON object per message. Appended as messages are committed (after each user message, assistant turn, tool call, and tool result). This is the source of truth for session resume.
+- **`state.json`** — session metadata: derived display name, provider+model at session start, token accounting, creation/updated timestamps.
 
-**Resume.** When Phoenix starts, it scans `.phoenix/sessions/` and offers to resume existing sessions. In the TUI, each persisted session appears as a restorable tab. Over RPC, `session.list` returns all persisted sessions; `session.resume(id)` rehydrates one.
+**Resume.** `/resume` lists the persisted sessions for the current project and lets the user pick one to rehydrate. Over RPC, `session.list` returns all persisted sessions for the current project; `session.resume(id)` rehydrates one and replaces the active in-memory session.
 
-Rehydration loads the message history into memory and re-registers the tool set from `state.json`. The agent picks up where it left off — or more precisely, where the last completed turn ended. If Phoenix was killed mid-tool-call, that incomplete turn is not persisted; the agent sees the conversation as of the last clean turn boundary. The tool log in the store may contain the partial invocation for forensics.
+Rehydration loads the message history into memory. The agent picks up where the last committed message left off. Because Phoenix appends after every committed message rather than at end-of-turn, partial tool-use rounds are recoverable to the last commit point — the only data lost on a hard kill is whatever was still in the streaming token buffer when the signal arrived.
 
 **Lifecycle.** Sessions are persisted by default. `session.destroy` (RPC) or closing a tab with the destroy keybind removes the session directory. Old sessions are never auto-deleted; the user or a cleanup tool manages retention.
 
@@ -480,22 +480,15 @@ const Compactor = struct {
 
 The compactor receives the evictable history and a token budget for its output. It returns a replacement message sequence that fits within that budget. The core handles everything else — threshold detection, partitioning, splicing, logging.
 
-### 10.3 Built-in compactors
+### 10.3 Built-in compactor
 
-Two compactors ship in core:
+One compactor ships in core:
 
-- **`truncate`** — drops the evictable middle entirely, keeping only the pinned head and preserved tail. Zero cost, no API call, fully deterministic. Suitable for short tasks or cost-sensitive usage where losing old context is acceptable.
-- **`summarize`** — feeds the evictable history to the session's current provider with a summarization prompt, producing a single assistant message that captures key decisions, findings, file paths referenced, and current state. Costs one provider round-trip; the result quality depends on the model.
+- **`truncate`** — drops the evictable middle entirely, keeping only the pinned head and preserved tail. Zero cost, no API call, fully deterministic. The agent can re-read files or re-run searches from disk if it needs detail it lost.
 
 ### 10.4 Extension compactors (not in core)
 
-The `Compactor` interface is the extension point for more sophisticated strategies:
-
-- **Code-aware** — preserves file paths, function signatures, and architectural decisions; aggressively drops raw tool output (file contents, search results, shell output) since the agent can re-read those from disk.
-- **Topic-segmented** — groups related turns into topics before summarizing, so a session that worked on three separate files produces three topic summaries rather than one lossy blend.
-- **Cheaper-model** — routes the summarization call to a faster/cheaper model (e.g., Haiku) while the session itself runs on a more capable model. Reduces compaction cost for Opus-class sessions.
-
-Custom compactors are registered the same way as custom tools — as Zig modules at build time, or via `dlopen` plugins at runtime.
+The `Compactor` interface is the extension point for more sophisticated strategies. Custom compactors are registered the same way as custom tools — as Zig modules at build time, or via `dlopen` plugins at runtime.
 
 ### 10.5 Pinning
 
@@ -514,7 +507,7 @@ For orchestrator sessions, the budget applies to the **aggregate** across the or
 
 ```toml
 [session.default]
-compaction = "summarize"       # "truncate" | "summarize" | custom registered name
+compaction = "truncate"        # "truncate" | custom registered name
 compaction_threshold = 0.8     # trigger at 80% of model context
 compaction_tail_turns = 3      # always preserve last N user/assistant exchanges
 token_budget = "unlimited"     # max tokens (input + output) per session; int or "unlimited"

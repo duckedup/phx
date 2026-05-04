@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const core = @import("phoenix_core");
+const commands = @import("commands");
 const rpc = @import("rpc");
 const Picker = @import("picker.zig").Picker;
 
@@ -121,6 +122,24 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
     var picker: ?Picker = null;
     defer if (picker) |*p| p.deinit(allocator);
 
+    // Fetch the available slash commands once. The Response keeps the strings
+    // alive for the life of the TUI; Picker.initCommand dupes onto its own
+    // arena so we could free this earlier, but keeping it lets us re-open
+    // the autocomplete picker at any time without another round trip.
+    var cmd_list_items: []commands.CommandInfo = &.{};
+    var cmd_list_response: ?rpc.client.Response = null;
+    defer if (cmd_list_response) |*r| r.deinit();
+    if (client.listCommands()) |result| {
+        cmd_list_items = result.items;
+        cmd_list_response = result.response;
+    } else |_| {}
+
+    // Two-press Ctrl+C exit (DESIGN.md §13.1). The first press warns; a
+    // second within `ctrl_c_window_ns` aborts. Stored as ns from the
+    // monotonic clock to avoid repeated syscalls.
+    const ctrl_c_window_ns: u64 = 2 * std.time.ns_per_s;
+    var last_ctrl_c_ns: u64 = 0;
+
     while (true) {
         const event = try loop.nextEvent();
 
@@ -182,55 +201,122 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                     continue;
                 }
 
-                if (key.matches('c', .{ .ctrl = true })) break;
+                if (key.matches('c', .{ .ctrl = true })) {
+                    var ts: std.c.timespec = undefined;
+                    const now_ns: u64 = if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts) == 0)
+                        @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec))
+                    else
+                        0;
+                    if (last_ctrl_c_ns != 0 and now_ns -| last_ctrl_c_ns <= ctrl_c_window_ns) break;
+                    last_ctrl_c_ns = now_ns;
+                    try chat_lines.append(allocator, .{
+                        .role = .system,
+                        .text = try allocator.dupe(u8, "Press Ctrl+C again within 2s to exit (the session will be saved)."),
+                    });
+                    continue;
+                }
 
-                // Handle picker if active.
+                // Handle picker if active. The autocomplete picker is passive:
+                // typing keys still go to the input box and Enter still
+                // submits the line. Only Up/Down/Tab/Esc are intercepted.
+                const autocomplete_active = if (picker) |*p| p.mode == .command_complete else false;
+                // True when a navigation key was consumed by the picker — we
+                // still want to redraw, but the bottom-of-switch input chain
+                // must be skipped so Up/Down don't double-move and Tab
+                // doesn't insert a literal '\t'.
+                var picker_consumed_key = false;
+
                 if (picker) |*p| {
                     if (key.codepoint == vaxis.Key.escape) {
                         p.deinit(allocator);
                         picker = null;
-                        continue;
-                    }
-                    if (key.codepoint == vaxis.Key.up) {
+                        picker_consumed_key = true;
+                    } else if (key.codepoint == vaxis.Key.up) {
                         p.moveUp();
-                        continue;
-                    }
-                    if (key.codepoint == vaxis.Key.down) {
+                        picker_consumed_key = true;
+                    } else if (key.codepoint == vaxis.Key.down) {
                         p.moveDown();
-                        continue;
-                    }
-                    if (key.codepoint == vaxis.Key.enter or key.codepoint == vaxis.Key.kp_enter) {
-                        const choice = p.selected();
-                        var ar = client.applyModelChoice(choice) catch |err| {
-                            try chat_lines.append(allocator, .{
-                                .role = .system,
-                                .text = try std.fmt.allocPrint(allocator, "/model: {s}", .{@errorName(err)}),
-                            });
+                        picker_consumed_key = true;
+                    } else if (autocomplete_active) {
+                        if (key.codepoint == vaxis.Key.tab) {
+                            if (p.selectedCommand()) |c| {
+                                clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
+                                try insertText(&input_lines, &cursor_line, &cursor_col, "/", allocator);
+                                try insertText(&input_lines, &cursor_line, &cursor_col, c.name, allocator);
+                                updateAutocompletePicker(&picker, cmd_list_items, &input_lines, allocator);
+                            }
+                            picker_consumed_key = true;
+                        }
+                        // Other keys (text, backspace, enter) fall through to
+                        // the normal input handling below.
+                    } else {
+                        if (key.codepoint == vaxis.Key.enter or key.codepoint == vaxis.Key.kp_enter) {
+                            if (p.selectedModel()) |choice| {
+                                var ar = client.applyModelChoice(choice) catch |err| {
+                                    try chat_lines.append(allocator, .{
+                                        .role = .system,
+                                        .text = try std.fmt.allocPrint(allocator, "/model: {s}", .{@errorName(err)}),
+                                    });
+                                    p.deinit(allocator);
+                                    picker = null;
+                                    continue;
+                                };
+                                defer ar.response.deinit();
+
+                                try chat_lines.append(allocator, .{
+                                    .role = .system,
+                                    .text = try allocator.dupe(u8, ar.result.message),
+                                });
+
+                                // Update local status view with new provider info.
+                                allocator.free(status_view.provider_kind);
+                                allocator.free(status_view.model);
+                                status_view.provider_kind = try allocator.dupe(u8, @tagName(ar.result.default_provider.kind));
+                                status_view.model = try allocator.dupe(u8, ar.result.default_provider.model);
+                            } else if (p.selectedSession()) |choice| {
+                                var ar = client.applySessionChoice(choice.id) catch |err| {
+                                    try chat_lines.append(allocator, .{
+                                        .role = .system,
+                                        .text = try std.fmt.allocPrint(allocator, "/resume: {s}", .{@errorName(err)}),
+                                    });
+                                    p.deinit(allocator);
+                                    picker = null;
+                                    continue;
+                                };
+                                defer ar.response.deinit();
+
+                                // Replace the visible chat with the restored
+                                // session's messages so the user sees the
+                                // conversation they're resuming.
+                                for (chat_lines.items) |line| allocator.free(line.text);
+                                chat_lines.clearRetainingCapacity();
+                                scroll_offset = 0;
+                                for (ar.result.messages) |m| {
+                                    try chat_lines.append(allocator, .{
+                                        .role = m.role,
+                                        .text = try allocator.dupe(u8, m.content),
+                                    });
+                                }
+                                try chat_lines.append(allocator, .{
+                                    .role = .system,
+                                    .text = try allocator.dupe(u8, ar.result.message),
+                                });
+                            }
+
                             p.deinit(allocator);
                             picker = null;
+                            scroll_offset = 0;
                             continue;
-                        };
-                        defer ar.response.deinit();
-
-                        try chat_lines.append(allocator, .{
-                            .role = .system,
-                            .text = try allocator.dupe(u8, ar.result.message),
-                        });
-
-                        // Update local status view with new provider info.
-                        allocator.free(status_view.provider_kind);
-                        allocator.free(status_view.model);
-                        status_view.provider_kind = try allocator.dupe(u8, @tagName(ar.result.default_provider.kind));
-                        status_view.model = try allocator.dupe(u8, ar.result.default_provider.model);
-
-                        p.deinit(allocator);
-                        picker = null;
-                        scroll_offset = 0;
+                        }
+                        // Modal pickers swallow everything else.
                         continue;
                     }
-                    continue;
                 }
 
+                if (picker_consumed_key) {
+                    // Picker handled the key; skip the input chain below but
+                    // fall through to drawFrame so the change is visible.
+                } else
                 // Shift+Enter always inserts a newline
                 if ((key.codepoint == vaxis.Key.enter or key.codepoint == vaxis.Key.kp_enter) and key.mods.shift) {
                     try insertNewline(&input_lines, &cursor_line, &cursor_col, allocator);
@@ -295,6 +381,10 @@ pub fn run(init: std.process.Init, client: *rpc.Client) !void {
                         try insertText(&input_lines, &cursor_line, &cursor_col, text, allocator);
                     }
                 }
+
+                if (!picker_consumed_key) {
+                    updateAutocompletePicker(&picker, cmd_list_items, &input_lines, allocator);
+                }
             },
             .mouse => |mouse| {
                 switch (mouse.button) {
@@ -354,23 +444,45 @@ fn drawFrame(
         const picker_h = p.height(h);
         const chat_h = h -| input_h -| status_h -| picker_h;
         last_chat_h.* = chat_h;
+        // Autocomplete shows below the input (between input and status bar).
+        // Modal pickers (model/session) keep showing above the input so they
+        // visually attach to the in-progress chat outcome.
+        const picker_below = p.mode == .command_complete;
+
         if (chat_h > 0) {
             const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
             scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator);
         }
-        {
-            const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
-            p.draw(pwin);
-        }
-        {
-            const iwin = win.child(.{
-                .x_off = 0,
-                .y_off = chat_h + picker_h,
-                .width = w,
-                .height = input_h,
-                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
-            });
-            drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
+        if (picker_below) {
+            {
+                const iwin = win.child(.{
+                    .x_off = 0,
+                    .y_off = chat_h,
+                    .width = w,
+                    .height = input_h,
+                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+                });
+                drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
+            }
+            {
+                const pwin = win.child(.{ .x_off = 0, .y_off = chat_h + input_h, .width = w, .height = picker_h });
+                p.draw(pwin);
+            }
+        } else {
+            {
+                const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
+                p.draw(pwin);
+            }
+            {
+                const iwin = win.child(.{
+                    .x_off = 0,
+                    .y_off = chat_h + picker_h,
+                    .width = w,
+                    .height = input_h,
+                    .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+                });
+                drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
+            }
         }
         {
             const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
@@ -596,12 +708,29 @@ fn handleSubmit(
                     .role = .system,
                     .text = try allocator.dupe(u8, m),
                 }),
+                .cleared, .compacted => |m| {
+                    for (chat_lines.items) |line| allocator.free(line.text);
+                    chat_lines.clearRetainingCapacity();
+                    scroll_offset.* = 0;
+                    try chat_lines.append(allocator, .{
+                        .role = .system,
+                        .text = try allocator.dupe(u8, m),
+                    });
+                },
                 .err => |m| try chat_lines.append(allocator, .{
                     .role = .system,
                     .text = try allocator.dupe(u8, m),
                 }),
                 .model_picker => |p| {
+                    if (picker.*) |*old| old.deinit(allocator);
                     picker.* = try Picker.initModel(allocator, .{
+                        .title = p.title,
+                        .choices = p.choices,
+                    });
+                },
+                .session_picker => |p| {
+                    if (picker.*) |*old| old.deinit(allocator);
+                    picker.* = try Picker.initSession(allocator, .{
                         .title = p.title,
                         .choices = p.choices,
                     });
@@ -615,6 +744,50 @@ fn handleSubmit(
                 },
             }
         },
+    }
+}
+
+/// Open, update, or close the inline slash-command autocomplete picker based
+/// on the current input. Leaves non-autocomplete pickers (model/session)
+/// untouched. Allocation failures collapse silently — the picker is just a
+/// hint and shouldn't break input handling.
+fn updateAutocompletePicker(
+    picker: *?Picker,
+    cmd_list: []commands.CommandInfo,
+    input_lines: *std.ArrayList(std.ArrayList(u8)),
+    allocator: std.mem.Allocator,
+) void {
+    if (picker.*) |*p| {
+        if (p.mode != .command_complete) return;
+    }
+
+    const should_show = blk: {
+        if (cmd_list.len == 0) break :blk false;
+        if (input_lines.items.len != 1) break :blk false;
+        const line = input_lines.items[0].items;
+        if (line.len == 0 or line[0] != '/') break :blk false;
+        if (line.len >= 2 and line[1] == '/') break :blk false; // escape: `//`
+        for (line[1..]) |c| {
+            if (c == ' ' or c == '\t') break :blk false; // past the command name
+        }
+        break :blk true;
+    };
+
+    if (!should_show) {
+        if (picker.*) |*p| {
+            p.deinit(allocator);
+            picker.* = null;
+        }
+        return;
+    }
+
+    const prefix = input_lines.items[0].items[1..];
+    if (picker.*) |*p| {
+        p.setCommandFilter(prefix);
+    } else {
+        var p = Picker.initCommand(allocator, cmd_list) catch return;
+        p.setCommandFilter(prefix);
+        picker.* = p;
     }
 }
 

@@ -13,6 +13,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/core/core.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // Shared test utilities for provider adapter tests
@@ -20,6 +21,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/test_util.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_util_mod.addImport("phoenix_core", core_mod);
 
@@ -28,6 +30,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/claude.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     providers_claude.addImport("phoenix_core", core_mod);
     providers_claude.addImport("test_util", test_util_mod);
@@ -37,6 +40,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/openai.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     providers_openai.addImport("phoenix_core", core_mod);
     providers_openai.addImport("test_util", test_util_mod);
@@ -46,6 +50,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/ollama.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     providers_ollama.addImport("phoenix_core", core_mod);
     providers_ollama.addImport("test_util", test_util_mod);
@@ -55,6 +60,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/llamacpp.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     providers_llamacpp.addImport("phoenix_core", core_mod);
     providers_llamacpp.addImport("providers_openai", providers_openai);
@@ -65,6 +71,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/google.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     providers_google.addImport("phoenix_core", core_mod);
     providers_google.addImport("test_util", test_util_mod);
@@ -74,6 +81,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/commands/dispatcher.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     commands_mod.addImport("phoenix_core", core_mod);
 
@@ -81,6 +89,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tools/tools.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     tools_mod.addImport("phoenix_core", core_mod);
 
@@ -88,6 +97,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/rpc/rpc.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     rpc_mod.addImport("phoenix_core", core_mod);
     rpc_mod.addImport("commands", commands_mod);
@@ -97,6 +107,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     exe_mod.addImport("vaxis", vaxis_dep.module("vaxis"));
     exe_mod.addImport("phoenix_core", core_mod);
@@ -121,6 +132,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/core/core.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // Shared test utilities for test build
@@ -128,6 +140,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/test_util.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_test_util_mod.addImport("phoenix_core", core_test_mod);
 
@@ -136,6 +149,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/claude.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_providers_claude.addImport("phoenix_core", core_test_mod);
     test_providers_claude.addImport("test_util", test_test_util_mod);
@@ -145,6 +159,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/openai.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_providers_openai.addImport("phoenix_core", core_test_mod);
     test_providers_openai.addImport("test_util", test_test_util_mod);
@@ -154,6 +169,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/ollama.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_providers_ollama.addImport("phoenix_core", core_test_mod);
     test_providers_ollama.addImport("test_util", test_test_util_mod);
@@ -163,6 +179,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/llamacpp.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_providers_llamacpp.addImport("phoenix_core", core_test_mod);
     test_providers_llamacpp.addImport("providers_openai", test_providers_openai);
@@ -173,6 +190,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/providers/google.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_providers_google.addImport("phoenix_core", core_test_mod);
     test_providers_google.addImport("test_util", test_test_util_mod);
@@ -187,6 +205,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/commands/dispatcher.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_commands_mod.addImport("phoenix_core", core_test_mod);
 
@@ -194,6 +213,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/tools/tools.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_tools_mod.addImport("phoenix_core", core_test_mod);
 
@@ -201,6 +221,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/rpc/rpc.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     test_rpc_mod.addImport("phoenix_core", core_test_mod);
     test_rpc_mod.addImport("commands", test_commands_mod);
@@ -210,6 +231,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     main_test_mod.addImport("vaxis", vaxis_dep.module("vaxis"));
     main_test_mod.addImport("phoenix_core", core_mod);

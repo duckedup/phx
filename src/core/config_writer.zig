@@ -92,6 +92,9 @@ fn renderJsonc(
             try buf.appendSlice(a, ",\n");
             try writeKeyString(buf, a, "      ", "credentials_path", cp);
         }
+        if (p.context_window) |cw| {
+            try buf.print(a, ",\n      \"context_window\": {d}", .{cw});
+        }
         try buf.appendSlice(a, "\n    }");
         if (i + 1 < providers.len) try buf.appendSlice(a, ",");
         try buf.appendSlice(a, "\n");

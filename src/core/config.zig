@@ -1,10 +1,15 @@
 const std = @import("std");
 const config_paths = @import("config_paths.zig");
 const skills_pkg = @import("skills.zig");
+const otel_pkg = @import("otel.zig");
 
 pub const RuntimeMode = enum { tui, rpc };
 pub const ProviderKind = enum { claude, openai, ollama, llamacpp, vertex, gemini };
 pub const StoreBackend = enum { memory, beans };
+
+/// Re-exports so callers can spell config types via `core.config.*`.
+pub const OtelConfig = otel_pkg.Config;
+pub const OtelHeader = otel_pkg.Header;
 
 pub const TokenBudget = union(enum) {
     unlimited,
@@ -77,6 +82,10 @@ pub const ProviderProfile = struct {
     location: ?[]const u8 = null,
     /// Google Vertex AI: path to service-account/ADC JSON.
     credentials_path: ?[]const u8 = null,
+    /// User-set context window (tokens). When null, `model_info.lookup` falls
+    /// back to a static table for cloud models. For local providers (ollama,
+    /// llamacpp) this is the only source of truth — onboarding prompts for it.
+    context_window: ?u32 = null,
 };
 
 pub const SessionProfile = struct {
@@ -86,7 +95,7 @@ pub const SessionProfile = struct {
     system_prompt_path: ?[]const u8 = null,
     tools: []const []const u8 = &.{},
     persist: bool = true,
-    compaction: []const u8 = "summarize",
+    compaction: []const u8 = "truncate",
     compaction_threshold: f32 = 0.8,
     compaction_tail_turns: u32 = 3,
     token_budget: TokenBudget = .unlimited,
@@ -106,6 +115,7 @@ pub const Config = struct {
     providers: []ProviderProfile,
     sessions: []SessionProfile,
     store: StoreConfig,
+    otel: OtelConfig,
     skills: []skills_pkg.Skill,
     sources: []const []const u8,
 
@@ -124,6 +134,7 @@ pub const Config = struct {
             .providers = &.{},
             .sessions = &.{},
             .store = .{},
+            .otel = .{},
             .skills = &.{},
             .sources = &.{},
         };
@@ -145,7 +156,7 @@ pub const Config = struct {
         var default_sessions = try a.alloc(SessionProfile, 1);
         default_sessions[0] = .{
             .name = try a.dupe(u8, "default"),
-            .compaction = try a.dupe(u8, "summarize"),
+            .compaction = try a.dupe(u8, "truncate"),
         };
         cfg.sessions = default_sessions;
 
@@ -186,9 +197,24 @@ pub const Config = struct {
         // provider when no auth is configured. Lets a user with `export
         // ANTHROPIC_API_KEY=...` skip both the wizard and editing the config file.
         try cfg.applyEnvVarFallbacks(a);
+        try cfg.applyOtelEnvOverrides(a);
 
         return cfg;
     }
+
+    /// Pull standard OTLP env vars over whatever the config files set. Env
+    /// wins so `export OTEL_EXPORTER_OTLP_ENDPOINT=...` enables observability
+    /// without any project edits.
+    fn applyOtelEnvOverrides(self: *Config, a: std.mem.Allocator) !void {
+        if (readEnv(a, "OTEL_EXPORTER_OTLP_ENDPOINT")) |v| self.otel.endpoint = v;
+        if (readEnv(a, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")) |v| self.otel.traces_endpoint = v;
+        if (readEnv(a, "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")) |v| self.otel.logs_endpoint = v;
+        if (readEnv(a, "OTEL_SERVICE_NAME")) |v| self.otel.service_name = v;
+        if (readEnv(a, "OTEL_EXPORTER_OTLP_HEADERS")) |raw| {
+            self.otel.headers = try parseOtelHeaderList(a, raw);
+        }
+    }
+
 
     fn applyEnvVarFallbacks(self: *Config, a: std.mem.Allocator) !void {
         const ap = self.activeProviderMut() orelse return;
@@ -321,6 +347,8 @@ pub const Config = struct {
                 try self.applySessions(a, val);
             } else if (std.mem.eql(u8, key, "store")) {
                 try self.applyStore(a, val);
+            } else if (std.mem.eql(u8, key, "otel")) {
+                try self.applyOtel(a, val);
             } else {
                 std.log.warn("ignoring unknown config key: {s}", .{key});
             }
@@ -445,11 +473,39 @@ pub const Config = struct {
         for (items, 0..) |item, i| {
             out[i] = SessionProfile{
                 .name = try a.dupe(u8, "default"),
-                .compaction = try a.dupe(u8, "summarize"),
+                .compaction = try a.dupe(u8, "truncate"),
             };
             try applySessionObject(a, &out[i], item);
         }
         self.sessions = out;
+    }
+
+    fn applyOtel(self: *Config, a: std.mem.Allocator, v: std.json.Value) !void {
+        const t = try expectObject(v, "otel");
+        var it = t.iterator();
+        while (it.next()) |entry| {
+            const k = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            if (std.mem.eql(u8, k, "endpoint")) {
+                self.otel.endpoint = try a.dupe(u8, try expectString(val, "otel.endpoint"));
+            } else if (std.mem.eql(u8, k, "traces_endpoint")) {
+                self.otel.traces_endpoint = try a.dupe(u8, try expectString(val, "otel.traces_endpoint"));
+            } else if (std.mem.eql(u8, k, "logs_endpoint")) {
+                self.otel.logs_endpoint = try a.dupe(u8, try expectString(val, "otel.logs_endpoint"));
+            } else if (std.mem.eql(u8, k, "service_name")) {
+                self.otel.service_name = try a.dupe(u8, try expectString(val, "otel.service_name"));
+            } else if (std.mem.eql(u8, k, "headers")) {
+                self.otel.headers = try parseOtelHeaderObject(a, val);
+            } else if (std.mem.eql(u8, k, "flush_interval_ms")) {
+                self.otel.flush_interval_ms = @intCast(try expectInteger(val, "otel.flush_interval_ms"));
+            } else if (std.mem.eql(u8, k, "max_queue_size")) {
+                self.otel.max_queue_size = @intCast(try expectInteger(val, "otel.max_queue_size"));
+            } else if (std.mem.eql(u8, k, "request_timeout_ms")) {
+                self.otel.request_timeout_ms = @intCast(try expectInteger(val, "otel.request_timeout_ms"));
+            } else {
+                std.log.warn("ignoring unknown config key: otel.{s}", .{k});
+            }
+        }
     }
 
     fn applyStore(self: *Config, a: std.mem.Allocator, v: std.json.Value) !void {
@@ -511,6 +567,10 @@ fn applyProviderObject(a: std.mem.Allocator, profile: *ProviderProfile, v: std.j
             profile.location = try a.dupe(u8, try expectString(val, "providers[i].location"));
         } else if (std.mem.eql(u8, k, "credentials_path")) {
             profile.credentials_path = try a.dupe(u8, try expectString(val, "providers[i].credentials_path"));
+        } else if (std.mem.eql(u8, k, "context_window")) {
+            const n = try expectInteger(val, "providers[i].context_window");
+            if (n <= 0) return error.InvalidConfigValue;
+            profile.context_window = @intCast(n);
         } else {
             std.log.warn("ignoring unknown providers[].{s}", .{k});
         }
@@ -656,6 +716,60 @@ fn expectBool(v: std.json.Value, field: []const u8) !bool {
             return error.InvalidConfigValue;
         },
     };
+}
+
+/// Read a non-empty env var into the arena. Returns null when unset or empty.
+fn readEnv(a: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    var buf: [128]u8 = undefined;
+    if (name.len + 1 > buf.len) return null;
+    @memcpy(buf[0..name.len], name);
+    buf[name.len] = 0;
+    const sentinel: [*:0]const u8 = buf[0..name.len :0];
+    const ptr = std.c.getenv(sentinel) orelse return null;
+    const s = std.mem.span(ptr);
+    if (s.len == 0) return null;
+    return a.dupe(u8, s) catch null;
+}
+
+/// Parse the `OTEL_EXPORTER_OTLP_HEADERS` format: `key1=value1,key2=value2`.
+/// Whitespace around keys/values is trimmed. Malformed entries are skipped
+/// with a warning rather than failing config load.
+fn parseOtelHeaderList(a: std.mem.Allocator, raw: []const u8) ![]otel_pkg.Header {
+    var out: std.ArrayList(otel_pkg.Header) = .empty;
+    errdefer out.deinit(a);
+    var it = std.mem.splitScalar(u8, raw, ',');
+    while (it.next()) |entry| {
+        const trimmed = std.mem.trim(u8, entry, " \t");
+        if (trimmed.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse {
+            std.log.warn("OTEL_EXPORTER_OTLP_HEADERS: skipping malformed entry: {s}", .{trimmed});
+            continue;
+        };
+        const k = std.mem.trim(u8, trimmed[0..eq], " \t");
+        const v = std.mem.trim(u8, trimmed[eq + 1 ..], " \t");
+        try out.append(a, .{
+            .name = try a.dupe(u8, k),
+            .value = try a.dupe(u8, v),
+        });
+    }
+    return out.toOwnedSlice(a);
+}
+
+/// Parse the `otel.headers` JSON object: { "Key": "Value", ... }.
+fn parseOtelHeaderObject(a: std.mem.Allocator, v: std.json.Value) ![]otel_pkg.Header {
+    const obj = try expectObject(v, "otel.headers");
+    var out: std.ArrayList(otel_pkg.Header) = .empty;
+    errdefer out.deinit(a);
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        const val = try expectString(entry.value_ptr.*, "otel.headers.value");
+        try out.append(a, .{
+            .name = try a.dupe(u8, k),
+            .value = try a.dupe(u8, val),
+        });
+    }
+    return out.toOwnedSlice(a);
 }
 
 fn expectStringArray(a: std.mem.Allocator, v: std.json.Value, field: []const u8) ![]const []const u8 {
@@ -887,6 +1001,66 @@ test "circular extends returns error" {
     var cfg = try Config.load(allocator, std.testing.io, .{ .home = home });
     defer cfg.deinit();
     try std.testing.expectError(error.CircularExtends, cfg.resolveSession("a"));
+}
+
+test "otel: empty by default" {
+    const allocator = std.testing.allocator;
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = null });
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings("", cfg.otel.endpoint);
+    try std.testing.expectEqualStrings("phoenix", cfg.otel.service_name);
+}
+
+test "otel: parses block from config file" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+    const home = try std.fs.path.join(allocator, &.{ tmp_path, "home" });
+    defer allocator.free(home);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, home);
+    const phoenix_dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
+    defer allocator.free(phoenix_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, phoenix_dir);
+    const cfg_path = try std.fs.path.join(allocator, &.{ phoenix_dir, "phoenix.json" });
+    defer allocator.free(cfg_path);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+        .sub_path = cfg_path,
+        .data =
+        \\{
+        \\  "otel": {
+        \\    "endpoint": "http://localhost:4318",
+        \\    "service_name": "phoenix-rpc",
+        \\    "headers": { "x-tenant": "acme" },
+        \\    "max_queue_size": 64
+        \\  }
+        \\}
+        ,
+    });
+
+    var cfg = try Config.load(allocator, std.testing.io, .{ .home = home });
+    defer cfg.deinit();
+    try std.testing.expectEqualStrings("http://localhost:4318", cfg.otel.endpoint);
+    try std.testing.expectEqualStrings("phoenix-rpc", cfg.otel.service_name);
+    try std.testing.expectEqual(@as(usize, 64), cfg.otel.max_queue_size);
+    try std.testing.expectEqual(@as(usize, 1), cfg.otel.headers.len);
+    try std.testing.expectEqualStrings("x-tenant", cfg.otel.headers[0].name);
+    try std.testing.expectEqualStrings("acme", cfg.otel.headers[0].value);
+}
+
+test "otel: parseOtelHeaderList env-var format" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const hdrs = try parseOtelHeaderList(arena.allocator(), "k1=v1, k2 = v2 ,bare,k3=v3");
+    try std.testing.expectEqual(@as(usize, 3), hdrs.len);
+    try std.testing.expectEqualStrings("k1", hdrs[0].name);
+    try std.testing.expectEqualStrings("v1", hdrs[0].value);
+    try std.testing.expectEqualStrings("k2", hdrs[1].name);
+    try std.testing.expectEqualStrings("v2", hdrs[1].value);
+    try std.testing.expectEqualStrings("k3", hdrs[2].name);
+    try std.testing.expectEqualStrings("v3", hdrs[2].value);
 }
 
 test "anthropic alias for claude" {

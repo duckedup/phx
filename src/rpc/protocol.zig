@@ -49,6 +49,55 @@ pub const ApplyModelChoiceParams = struct {
     is_active: bool,
 };
 
+pub const ApplySessionChoiceParams = struct {
+    id: []const u8,
+};
+
+pub fn parseApplySessionChoiceParams(arena: std.mem.Allocator, v: std.json.Value) !ApplySessionChoiceParams {
+    if (v != .object) return error.InvalidParams;
+    const id_v = v.object.get("id") orelse return error.InvalidParams;
+    if (id_v != .string) return error.InvalidParams;
+    return .{ .id = try arena.dupe(u8, id_v.string) };
+}
+
+pub fn writeCommandListResult(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    items: []const commands.CommandInfo,
+) !void {
+    try out.appendSlice(a, "{\"commands\":[");
+    for (items, 0..) |it, i| {
+        if (i > 0) try out.appendSlice(a, ",");
+        try out.appendSlice(a, "{\"name\":");
+        try writeJsonString(out, a, it.name);
+        try out.appendSlice(a, ",\"summary\":");
+        try writeJsonString(out, a, it.summary);
+        try out.print(a, ",\"is_skill\":{}}}", .{it.is_skill});
+    }
+    try out.appendSlice(a, "]}");
+}
+
+pub fn writeApplySessionChoiceResult(
+    out: *std.ArrayList(u8),
+    a: std.mem.Allocator,
+    message: []const u8,
+    message_count: u32,
+    messages: []const core.Message,
+) !void {
+    try out.appendSlice(a, "{\"message\":");
+    try writeJsonString(out, a, message);
+    try out.print(a, ",\"message_count\":{d},\"messages\":[", .{message_count});
+    for (messages, 0..) |m, i| {
+        if (i > 0) try out.appendSlice(a, ",");
+        try out.appendSlice(a, "{\"role\":");
+        try writeJsonString(out, a, @tagName(m.role));
+        try out.appendSlice(a, ",\"content\":");
+        try writeJsonString(out, a, m.content);
+        try out.appendSlice(a, "}");
+    }
+    try out.appendSlice(a, "]}");
+}
+
 pub fn parseApplyModelChoiceParams(arena: std.mem.Allocator, v: std.json.Value) !ApplyModelChoiceParams {
     if (v != .object) return error.InvalidParams;
     const obj = v.object;
@@ -98,6 +147,16 @@ pub fn writeDispatchResult(
             try writeJsonString(out, a, m);
             try out.appendSlice(a, "}");
         },
+        .cleared => |m| {
+            try out.appendSlice(a, "{\"kind\":\"cleared\",\"text\":");
+            try writeJsonString(out, a, m);
+            try out.appendSlice(a, "}");
+        },
+        .compacted => |m| {
+            try out.appendSlice(a, "{\"kind\":\"compacted\",\"text\":");
+            try writeJsonString(out, a, m);
+            try out.appendSlice(a, "}");
+        },
         .err => |m| {
             try out.appendSlice(a, "{\"kind\":\"err\",\"text\":");
             try writeJsonString(out, a, m);
@@ -126,6 +185,26 @@ pub fn writeDispatchResult(
             try out.appendSlice(a, ",\"user_message\":");
             try writeJsonString(out, a, frag.user_message);
             try out.appendSlice(a, "}");
+        },
+        // The server intercepts these markers before encoding, so they
+        // shouldn't reach the wire in normal operation. Encode minimally for
+        // diagnostic completeness — the TUI will treat the kind as unknown.
+        .clear_session => try out.appendSlice(a, "{\"kind\":\"clear_session\"}"),
+        .compact_session => try out.appendSlice(a, "{\"kind\":\"compact_session\"}"),
+        .session_picker => |p| {
+            try out.appendSlice(a, "{\"kind\":\"session_picker\",\"title\":");
+            try writeJsonString(out, a, p.title);
+            try out.appendSlice(a, ",\"choices\":[");
+            for (p.choices, 0..) |c, i| {
+                if (i > 0) try out.appendSlice(a, ",");
+                try out.appendSlice(a, "{\"id\":");
+                try writeJsonString(out, a, c.id);
+                try out.appendSlice(a, ",\"name\":");
+                try writeJsonString(out, a, c.name);
+                try out.print(a, ",\"updated_at\":{d}", .{c.updated_at});
+                try out.print(a, ",\"message_count\":{d}}}", .{c.message_count});
+            }
+            try out.appendSlice(a, "]}");
         },
     }
 }

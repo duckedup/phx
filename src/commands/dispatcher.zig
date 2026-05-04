@@ -3,6 +3,7 @@ const core = @import("phoenix_core");
 
 const model_cmd = @import("model.zig");
 const skill_cmd = @import("skill.zig");
+const session_cmd = @import("session_cmd.zig");
 
 /// One model entry shown in the picker. Owned by the Result arena.
 pub const ModelChoice = struct {
@@ -37,6 +38,30 @@ pub const ContextFragment = struct {
     user_message: []const u8,
 };
 
+/// One persisted session shown in the resume picker. Owned by the Result arena.
+pub const SessionChoice = struct {
+    /// Session id (the on-disk directory name).
+    id: []const u8,
+    /// Display name derived from the first user message.
+    name: []const u8,
+    /// Unix epoch seconds. 0 if state.json was unreadable.
+    updated_at: i64,
+    message_count: u32,
+};
+
+pub const SessionPicker = struct {
+    title: []const u8, // e.g. "Resume which session?"
+    choices: []const SessionChoice,
+};
+
+/// Metadata for a single available slash command. Used by the TUI's
+/// autocomplete picker. `name` does not include the leading slash.
+pub const CommandInfo = struct {
+    name: []const u8,
+    summary: []const u8,
+    is_skill: bool,
+};
+
 pub const Result = union(enum) {
     /// Command produced a simple text result. Render as a system-role chat line.
     /// Owned by `arena`.
@@ -56,6 +81,28 @@ pub const Result = union(enum) {
     /// The input was not a slash command. The TUI should treat the original
     /// input as a normal user message.
     not_a_command,
+
+    /// Server-internal marker: persist current session, reset to a fresh one.
+    /// The server transforms this into a `.message` before the response goes
+    /// out on the wire — the TUI never observes this variant directly.
+    clear_session,
+
+    /// Server-internal marker: run the configured compactor against the
+    /// session's history. Same wire-level treatment as `clear_session`.
+    compact_session,
+
+    /// Show the inline session picker for `/resume`. Owned by `arena`.
+    session_picker: SessionPicker,
+
+    /// The session was cleared. The TUI should drop its local chat history
+    /// in addition to rendering the message text. Owned by `arena`.
+    cleared: []const u8,
+
+    /// Like `cleared`, but for `/compact` — older history was dropped from
+    /// the model's context but a tail summary remains, so the next user
+    /// message still has continuity. The TUI wipes its visible chat and
+    /// renders the system message confirming the action. Owned by `arena`.
+    compacted: []const u8,
 };
 
 /// Returned to the TUI on every dispatch. The TUI must call `deinit` after it is
@@ -98,6 +145,9 @@ pub const Registry = struct {
 
 const builtin_table = [_]Registry.Builtin{
     .{ .name = "model", .summary = "Select the active model", .handler = model_cmd.handle },
+    .{ .name = "clear", .summary = "Save and reset the conversation", .handler = session_cmd.handleClear },
+    .{ .name = "compact", .summary = "Truncate older history to free context", .handler = session_cmd.handleCompact },
+    .{ .name = "resume", .summary = "Resume a saved conversation", .handler = session_cmd.handleResume },
 };
 
 pub const DispatchCtx = struct {
@@ -105,6 +155,9 @@ pub const DispatchCtx = struct {
     gpa: std.mem.Allocator,
     home: ?[]const u8, // null if HOME unresolved; commands that need it must error
     config: *core.Config,
+    /// Project slug the session_store organizes sessions under. Null when
+    /// the harness is invoked outside a project context (tests, mostly).
+    project: ?[]const u8 = null,
 };
 
 /// Returns true iff `input` (after no leading whitespace stripping) starts with
@@ -172,6 +225,37 @@ pub fn dispatch(ctx: DispatchCtx, input: []const u8) !Outcome {
     return .{ .arena = arena, .result = .not_a_command };
 }
 
+/// Return the list of available slash commands (built-ins + configured
+/// skills), sorted alphabetically. Strings are duped onto `out_arena` so the
+/// caller can free them in one shot.
+pub fn listCommands(
+    ctx: DispatchCtx,
+    out_arena: std.mem.Allocator,
+) ![]CommandInfo {
+    const reg = Registry.init();
+    var list: std.ArrayList(CommandInfo) = .empty;
+    for (reg.builtins) |b| {
+        try list.append(out_arena, .{
+            .name = try out_arena.dupe(u8, b.name),
+            .summary = try out_arena.dupe(u8, b.summary),
+            .is_skill = false,
+        });
+    }
+    for (ctx.config.skills) |s| {
+        try list.append(out_arena, .{
+            .name = try out_arena.dupe(u8, s.name),
+            .summary = try out_arena.dupe(u8, "Skill"),
+            .is_skill = true,
+        });
+    }
+    std.mem.sort(CommandInfo, list.items, {}, struct {
+        fn lessThan(_: void, a: CommandInfo, b: CommandInfo) bool {
+            return std.mem.order(u8, a.name, b.name) == .lt;
+        }
+    }.lessThan);
+    return list.toOwnedSlice(out_arena);
+}
+
 /// Apply the user's selected ModelChoice: rewrite ~/.phoenix/phoenix.json with
 /// the new model on `default`, then mutate the in-memory `config.providers`
 /// entry so the status bar updates without a reload. Returns a system message
@@ -185,6 +269,15 @@ pub fn applyModelChoice(
 }
 
 // ---- Tests ----
+
+test {
+    // Pull in tests from sibling command modules that are referenced only
+    // through function pointers in `builtin_table` — Zig's comptime test
+    // discovery doesn't follow function-pointer references on its own.
+    std.testing.refAllDecls(session_cmd);
+    std.testing.refAllDecls(model_cmd);
+    std.testing.refAllDecls(skill_cmd);
+}
 
 test "parse: /model" {
     const p = parse("/model").?;
