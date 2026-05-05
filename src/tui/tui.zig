@@ -47,6 +47,30 @@ const StatusView = struct {
     sources_count: usize,
 };
 
+/// Screen-coordinate text selection driven by mouse click+drag. On release
+/// the selected region is pushed to the system clipboard via OSC 52 so the
+/// user's normal Cmd+C / Ctrl+Shift+C pastes it.
+const Selection = struct {
+    start_row: u16,
+    start_col: u16,
+    end_row: u16,
+    end_col: u16,
+    active: bool = false,
+
+    fn isSet(self: Selection) bool {
+        return self.start_row != self.end_row or self.start_col != self.end_col;
+    }
+
+    fn ordered(self: Selection) struct { sr: u16, sc: u16, er: u16, ec: u16 } {
+        if (self.start_row < self.end_row or
+            (self.start_row == self.end_row and self.start_col <= self.end_col))
+        {
+            return .{ .sr = self.start_row, .sc = self.start_col, .er = self.end_row, .ec = self.end_col };
+        }
+        return .{ .sr = self.end_row, .sc = self.end_col, .er = self.start_row, .ec = self.start_col };
+    }
+};
+
 const paste_char_threshold = 80;
 
 pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void {
@@ -66,6 +90,8 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
     // grapheme slices by reference (no copy), so this buffer must outlive
     // each `vx.render` call — i.e. it lives for the entire run() scope.
     var status_buf: [128]u8 = undefined;
+
+    var selection: ?Selection = null;
 
     var paste_count: u32 = 0;
     var pasting = false;
@@ -87,6 +113,18 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
     try input_lines.append(allocator, .empty);
     var cursor_line: usize = 0;
     var cursor_col: usize = 0;
+
+    // Command history (persisted to ~/.phoenix/history)
+    const max_history = readHistorySize();
+    var history: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (history.items) |h| allocator.free(h);
+        history.deinit(allocator);
+    }
+    loadHistory(&history, home, allocator, io, max_history);
+    var history_index: ?usize = null;
+    var saved_input: ?[]u8 = null;
+    defer if (saved_input) |s| allocator.free(s);
 
     // Fetch initial config snapshot from the server.
     var status_view: StatusView = blk: {
@@ -268,6 +306,7 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                         allocator,
                         &status_buf,
                         0,
+                        selection,
                     );
                     continue;
                 }
@@ -440,6 +479,13 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                     };
 
                     if (submitted) |s| {
+                        appendHistory(&history, s, home, allocator, io, max_history);
+                        history_index = null;
+                        if (saved_input) |si| {
+                            allocator.free(si);
+                            saved_input = null;
+                        }
+
                         try handleSubmit(
                             &chat_lines,
                             &input_lines,
@@ -470,9 +516,33 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                     if (cursor_line > 0) {
                         cursor_line -= 1;
                         cursor_col = @min(cursor_col, input_lines.items[cursor_line].items.len);
+                    } else if (history.items.len > 0) {
+                        if (history_index == null) {
+                            saved_input = buildFullInput(&input_lines, allocator) catch null;
+                            history_index = 0;
+                        } else if (history_index.? + 1 < history.items.len) {
+                            history_index = history_index.? + 1;
+                        } else {
+                            continue;
+                        }
+                        loadHistoryIntoInput(&input_lines, &cursor_line, &cursor_col, history.items[history.items.len - 1 - history_index.?], allocator);
                     }
                 } else if (key.codepoint == vaxis.Key.down) {
-                    if (cursor_line + 1 < input_lines.items.len) {
+                    if (history_index != null and cursor_line + 1 >= input_lines.items.len) {
+                        if (history_index.? > 0) {
+                            history_index = history_index.? - 1;
+                            loadHistoryIntoInput(&input_lines, &cursor_line, &cursor_col, history.items[history.items.len - 1 - history_index.?], allocator);
+                        } else {
+                            history_index = null;
+                            if (saved_input) |si| {
+                                loadHistoryIntoInput(&input_lines, &cursor_line, &cursor_col, si, allocator);
+                                allocator.free(si);
+                                saved_input = null;
+                            } else {
+                                clearInput(&input_lines, &cursor_line, &cursor_col, allocator);
+                            }
+                        }
+                    } else if (cursor_line + 1 < input_lines.items.len) {
                         cursor_line += 1;
                         cursor_col = @min(cursor_col, input_lines.items[cursor_line].items.len);
                     }
@@ -493,10 +563,36 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                 }
             },
             .mouse => |mouse| {
-                switch (mouse.button) {
-                    .wheel_up => scroll_offset +|= 3,
-                    .wheel_down => scroll_offset -|= 3,
-                    else => {},
+                if (mouse.button == .wheel_up) {
+                    scroll_offset +|= 3;
+                } else if (mouse.button == .wheel_down) {
+                    scroll_offset -|= 3;
+                } else if (mouse.type == .press and mouse.button == .left) {
+                    const r: u16 = if (mouse.row < 0) 0 else @intCast(mouse.row);
+                    const c: u16 = if (mouse.col < 0) 0 else @intCast(mouse.col);
+                    selection = .{
+                        .start_row = r,
+                        .start_col = c,
+                        .end_row = r,
+                        .end_col = c,
+                        .active = true,
+                    };
+                } else if (mouse.type == .drag) {
+                    if (selection) |*sel| {
+                        sel.end_row = if (mouse.row < 0) 0 else @intCast(mouse.row);
+                        sel.end_col = if (mouse.col < 0) 0 else @intCast(mouse.col);
+                    }
+                } else if (mouse.type == .release) {
+                    if (selection) |*sel| {
+                        sel.active = false;
+                        sel.end_row = if (mouse.row < 0) 0 else @intCast(mouse.row);
+                        sel.end_col = if (mouse.col < 0) 0 else @intCast(mouse.col);
+                        if (sel.isSet()) {
+                            copySelectionToClipboard(&vx, writer, sel.*, allocator);
+                        } else {
+                            selection = null;
+                        }
+                    }
                 }
             },
             .winsize => |ws| try vx.resize(allocator, writer, ws),
@@ -518,6 +614,7 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
             allocator,
             &status_buf,
             0,
+            selection,
         );
     }
 }
@@ -537,6 +634,7 @@ fn drawFrame(
     allocator: std.mem.Allocator,
     status_buf: []u8,
     anim_frame: u8,
+    sel: ?Selection,
 ) !void {
     const win = vx.window();
     win.clear();
@@ -621,8 +719,66 @@ fn drawFrame(
         }
     }
 
+    if (sel) |s| applySelectionHighlight(&vx.screen, s);
+
     try vx.render(writer);
     try writer.flush();
+}
+
+/// Walk the screen buffer and reverse-video every cell inside the selection
+/// rectangle. Called after all drawing but before vx.render() so the diff
+/// renderer picks up the style change without an extra pass.
+fn applySelectionHighlight(screen: *vaxis.Screen, s: Selection) void {
+    const o = s.ordered();
+    var row: u16 = o.sr;
+    while (row <= o.er and row < screen.height) : (row += 1) {
+        const col_start: u16 = if (row == o.sr) o.sc else 0;
+        const col_end: u16 = if (row == o.er) o.ec else screen.width;
+        var col: u16 = col_start;
+        while (col < col_end and col < screen.width) : (col += 1) {
+            const idx = @as(usize, row) * screen.width + col;
+            if (idx < screen.buf.len) {
+                screen.buf[idx].style.reverse = true;
+            }
+        }
+    }
+}
+
+/// Read back grapheme content from the screen buffer for the given selection
+/// and push it to the system clipboard via OSC 52.
+fn copySelectionToClipboard(vx: *vaxis.Vaxis, writer: *std.Io.Writer, s: Selection, allocator: std.mem.Allocator) void {
+    const text = extractSelectedText(&vx.screen, s, allocator) catch return;
+    defer allocator.free(text);
+    if (text.len == 0) return;
+    vx.copyToSystemClipboard(writer, text, allocator) catch {};
+}
+
+/// Extract visible text from the screen buffer between the selection
+/// endpoints. Trailing spaces on each row are trimmed so the result
+/// is clean for pasting into an editor.
+fn extractSelectedText(screen: *const vaxis.Screen, s: Selection, allocator: std.mem.Allocator) ![]u8 {
+    const o = s.ordered();
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    var row: u16 = o.sr;
+    while (row <= o.er and row < screen.height) : (row += 1) {
+        if (row > o.sr) try result.append(allocator, '\n');
+        const col_start: u16 = if (row == o.sr) o.sc else 0;
+        const col_end: u16 = if (row == o.er) o.ec else screen.width;
+        var col: u16 = col_start;
+        const row_text_start = result.items.len;
+        while (col < col_end and col < screen.width) : (col += 1) {
+            if (screen.readCell(col, row)) |cell| {
+                try result.appendSlice(allocator, cell.char.grapheme);
+            }
+        }
+        // Trim trailing spaces from this row.
+        while (result.items.len > row_text_start and result.items[result.items.len - 1] == ' ') {
+            _ = result.pop();
+        }
+    }
+    return result.toOwnedSlice(allocator);
 }
 
 /// Streaming context shared with the on_token / on_context / on_err / on_tick
@@ -638,6 +794,9 @@ const StreamCtx = struct {
     /// Animation frame counter for the "phoenix" thinking indicator.
     /// Bumped by on_tick; read by drawChat. Mod fire_frames.len at use.
     anim_frame: u8 = 0,
+    /// Cap on how many content lines to render per tool call / tool error.
+    /// Sourced from $PHOENIX_TOOL_OUTPUT_LINES at submit time.
+    max_tool_lines: usize,
     // Drawing state — same set the main loop hands to drawFrame.
     vx: *vaxis.Vaxis,
     writer: *std.Io.Writer,
@@ -651,6 +810,19 @@ const StreamCtx = struct {
     last_chat_h: *u16,
     status_buf: []u8,
 };
+
+const default_tool_output_lines: usize = 20;
+
+/// Read $PHOENIX_TOOL_OUTPUT_LINES, falling back to the default. Values <= 0
+/// are clamped to 1 so we always emit at least the header + one row.
+fn readToolOutputLines() usize {
+    const ptr = std.c.getenv("PHOENIX_TOOL_OUTPUT_LINES") orelse return default_tool_output_lines;
+    const s = std.mem.span(ptr);
+    if (s.len == 0) return default_tool_output_lines;
+    const parsed = std.fmt.parseInt(i64, s, 10) catch return default_tool_output_lines;
+    if (parsed <= 0) return 1;
+    return @intCast(parsed);
+}
 
 fn streamRedraw(s: *StreamCtx) void {
     drawFrame(
@@ -668,6 +840,7 @@ fn streamRedraw(s: *StreamCtx) void {
         s.allocator,
         s.status_buf,
         s.anim_frame,
+        null,
     ) catch {};
 }
 
@@ -718,6 +891,202 @@ fn onStreamErr(ctx_ptr: *anyopaque, text: []const u8) void {
     streamRedraw(s);
 }
 
+/// A tool call arrived. Finalize the current assistant bubble (drop it if
+/// empty), render the call's header + truncated content as `.tool_call`
+/// chat lines, and open a fresh assistant bubble so subsequent tokens land
+/// in a visually distinct row from the round we just closed.
+fn onStreamToolCall(ctx_ptr: *anyopaque, tool_id: []const u8, name: []const u8, args_json: []const u8) void {
+    _ = tool_id;
+    const s: *StreamCtx = @ptrCast(@alignCast(ctx_ptr));
+
+    if (s.assistant_idx < s.chat_lines.items.len and
+        s.chat_lines.items[s.assistant_idx].text.len == 0)
+    {
+        s.allocator.free(s.chat_lines.items[s.assistant_idx].text);
+        _ = s.chat_lines.orderedRemove(s.assistant_idx);
+    }
+
+    appendToolCallLines(s.chat_lines, name, args_json, s.allocator, s.max_tool_lines) catch {};
+
+    const new_text = s.allocator.dupe(u8, "") catch return;
+    s.chat_lines.append(s.allocator, .{ .role = .assistant, .text = new_text }) catch {
+        s.allocator.free(new_text);
+        return;
+    };
+    s.assistant_idx = s.chat_lines.items.len - 1;
+    s.streaming_buf.clearRetainingCapacity();
+    streamRedraw(s);
+}
+
+/// A tool finished. We only surface errors — successful results would
+/// double up with the tool_call line we already drew. Insert error lines
+/// just before the freshly-opened assistant bubble.
+fn onStreamToolResult(ctx_ptr: *anyopaque, tool_id: []const u8, output: []const u8, is_error: bool) void {
+    _ = tool_id;
+    if (!is_error) return;
+    const s: *StreamCtx = @ptrCast(@alignCast(ctx_ptr));
+
+    var buf: std.ArrayList(ChatLine) = .empty;
+    defer buf.deinit(s.allocator);
+    appendToolErrorLines(&buf, output, s.allocator, s.max_tool_lines) catch {
+        for (buf.items) |line| s.allocator.free(line.text);
+        return;
+    };
+
+    for (buf.items) |line| {
+        s.chat_lines.insert(s.allocator, s.assistant_idx, line) catch {
+            s.allocator.free(line.text);
+            continue;
+        };
+        s.assistant_idx += 1;
+    }
+    streamRedraw(s);
+}
+
+/// Render a tool call into `chat_lines` as `.tool_call` rows. `write` and
+/// `edit` get full content/diff treatment (the user wants to watch code
+/// being written); `read` and `bash` get a one-line summary; unknown tools
+/// fall back to "name + raw args".
+fn appendToolCallLines(
+    chat_lines: *std.ArrayList(ChatLine),
+    name: []const u8,
+    args_json: []const u8,
+    allocator: std.mem.Allocator,
+    max_lines: usize,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch {
+        const text = try std.fmt.allocPrint(allocator, "● {s} {s}", .{ name, args_json });
+        try chat_lines.append(allocator, .{ .role = .tool_call, .text = text });
+        return;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) {
+        const text = try std.fmt.allocPrint(allocator, "● {s} {s}", .{ name, args_json });
+        try chat_lines.append(allocator, .{ .role = .tool_call, .text = text });
+        return;
+    }
+    const obj = parsed.value.object;
+
+    if (std.mem.eql(u8, name, "write")) {
+        const path = stringField(obj, "path", "?");
+        const content = stringField(obj, "content", "");
+
+        var line_count: usize = if (content.len == 0) 0 else 1;
+        for (content) |ch| {
+            if (ch == '\n') line_count += 1;
+        }
+
+        const header = try std.fmt.allocPrint(allocator, "● write {s} ({d} lines)", .{ path, line_count });
+        try chat_lines.append(allocator, .{ .role = .tool_call, .text = header });
+
+        var emitted: usize = 0;
+        var line_no: usize = 1;
+        var iter = std.mem.splitScalar(u8, content, '\n');
+        while (iter.next()) |line| : (line_no += 1) {
+            if (emitted >= max_lines) break;
+            const formatted = try std.fmt.allocPrint(allocator, "  {d:>4}+ {s}", .{ line_no, line });
+            try chat_lines.append(allocator, .{ .role = .tool_call, .text = formatted });
+            emitted += 1;
+        }
+        if (line_count > emitted) {
+            const more = line_count - emitted;
+            const footer = try std.fmt.allocPrint(allocator, "  ... ({d} more line{s})", .{
+                more,
+                if (more == 1) "" else "s",
+            });
+            try chat_lines.append(allocator, .{ .role = .tool_call, .text = footer });
+        }
+    } else if (std.mem.eql(u8, name, "edit")) {
+        const path = stringField(obj, "path", "?");
+        const old_text = stringField(obj, "oldText", "");
+        const new_text = stringField(obj, "newText", "");
+
+        const header = try std.fmt.allocPrint(allocator, "● edit {s}", .{path});
+        try chat_lines.append(allocator, .{ .role = .tool_call, .text = header });
+
+        // Split the diff budget between old and new — half each, with the
+        // remainder going to the "+" side so additions show fully on
+        // single-line replacements.
+        const old_budget = max_lines / 2;
+        const new_budget = max_lines - old_budget;
+
+        const old_total = try emitDiffLines(chat_lines, allocator, old_text, "  - ", old_budget);
+        const new_total = try emitDiffLines(chat_lines, allocator, new_text, "  + ", new_budget);
+
+        if (old_total > old_budget) {
+            const footer = try std.fmt.allocPrint(allocator, "  ... ({d} more removed)", .{old_total - old_budget});
+            try chat_lines.append(allocator, .{ .role = .tool_call, .text = footer });
+        }
+        if (new_total > new_budget) {
+            const footer = try std.fmt.allocPrint(allocator, "  ... ({d} more added)", .{new_total - new_budget});
+            try chat_lines.append(allocator, .{ .role = .tool_call, .text = footer });
+        }
+    } else if (std.mem.eql(u8, name, "read")) {
+        const path = stringField(obj, "path", "?");
+        const text = try std.fmt.allocPrint(allocator, "○ read {s}", .{path});
+        try chat_lines.append(allocator, .{ .role = .tool_call, .text = text });
+    } else if (std.mem.eql(u8, name, "bash")) {
+        const cmd = stringField(obj, "command", "");
+        const text = try std.fmt.allocPrint(allocator, "$ {s}", .{cmd});
+        try chat_lines.append(allocator, .{ .role = .tool_call, .text = text });
+    } else {
+        const text = try std.fmt.allocPrint(allocator, "● {s} {s}", .{ name, args_json });
+        try chat_lines.append(allocator, .{ .role = .tool_call, .text = text });
+    }
+}
+
+/// Emit up to `budget` lines of `text` prefixed with `prefix`. Returns the
+/// total number of lines `text` contains (so the caller can render a
+/// "... N more" footer when truncated).
+fn emitDiffLines(
+    chat_lines: *std.ArrayList(ChatLine),
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    prefix: []const u8,
+    budget: usize,
+) !usize {
+    if (text.len == 0) return 0;
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    var emitted: usize = 0;
+    var total: usize = 0;
+    while (iter.next()) |line| {
+        total += 1;
+        if (emitted < budget) {
+            const formatted = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, line });
+            try chat_lines.append(allocator, .{ .role = .tool_call, .text = formatted });
+            emitted += 1;
+        }
+    }
+    return total;
+}
+
+fn appendToolErrorLines(
+    chat_lines: *std.ArrayList(ChatLine),
+    output: []const u8,
+    allocator: std.mem.Allocator,
+    max_lines: usize,
+) !void {
+    var iter = std.mem.splitScalar(u8, output, '\n');
+    var emitted: usize = 0;
+    while (iter.next()) |line| {
+        if (emitted >= max_lines) {
+            const footer = try allocator.dupe(u8, "  ... (output truncated)");
+            try chat_lines.append(allocator, .{ .role = .tool_result, .text = footer });
+            break;
+        }
+        const formatted = try std.fmt.allocPrint(allocator, "  ✗ {s}", .{line});
+        try chat_lines.append(allocator, .{ .role = .tool_result, .text = formatted });
+        emitted += 1;
+    }
+}
+
+fn stringField(obj: std.json.ObjectMap, key: []const u8, fallback: []const u8) []const u8 {
+    const v = obj.get(key) orelse return fallback;
+    if (v != .string) return fallback;
+    return v.string;
+}
+
 fn handleSubmit(
     chat_lines: *std.ArrayList(ChatLine),
     input_lines: *std.ArrayList(std.ArrayList(u8)),
@@ -763,6 +1132,7 @@ fn handleSubmit(
         .assistant_idx = assistant_idx,
         .streaming_buf = &streaming_buf,
         .allocator = allocator,
+        .max_tool_lines = readToolOutputLines(),
         .vx = vx,
         .writer = writer,
         .input_lines = input_lines,
@@ -785,6 +1155,8 @@ fn handleSubmit(
         .on_token = onStreamToken,
         .on_context = onStreamContext,
         .on_err = onStreamErr,
+        .on_tool_call = onStreamToolCall,
+        .on_tool_result = onStreamToolResult,
         .on_tick = onStreamTick,
     }) catch |err| {
         // The empty assistant bubble was reserved before the call; drop it
@@ -1165,6 +1537,156 @@ fn expandPasteLabels(
     return try result.toOwnedSlice(allocator);
 }
 
+const default_history_size: usize = 50;
+
+fn readHistorySize() usize {
+    const ptr = std.c.getenv("PHOENIX_HISTORY_SIZE") orelse return default_history_size;
+    const s = std.mem.span(ptr);
+    if (s.len == 0) return default_history_size;
+    const parsed = std.fmt.parseInt(i64, s, 10) catch return default_history_size;
+    if (parsed <= 0) return 0;
+    return @intCast(parsed);
+}
+
+fn loadHistory(
+    history: *std.ArrayList([]const u8),
+    home: []const u8,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    max_entries: usize,
+) void {
+    if (max_entries == 0) return;
+    const path = std.fs.path.join(allocator, &.{ home, ".phoenix", "history" }) catch return;
+    defer allocator.free(path);
+
+    const content = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(10 * 1024 * 1024)) catch return;
+    defer allocator.free(content);
+
+    var iter = std.mem.splitScalar(u8, content, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        const unescaped = unescapeHistoryLine(line, allocator) catch continue;
+        history.append(allocator, unescaped) catch {
+            allocator.free(unescaped);
+            continue;
+        };
+    }
+
+    while (history.items.len > max_entries) {
+        allocator.free(history.items[0]);
+        _ = history.orderedRemove(0);
+    }
+}
+
+fn appendHistory(
+    history: *std.ArrayList([]const u8),
+    text: []const u8,
+    home: []const u8,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    max_entries: usize,
+) void {
+    if (max_entries == 0) return;
+    if (text.len == 0) return;
+
+    const duped = allocator.dupe(u8, text) catch return;
+    history.append(allocator, duped) catch {
+        allocator.free(duped);
+        return;
+    };
+
+    while (history.items.len > max_entries) {
+        allocator.free(history.items[0]);
+        _ = history.orderedRemove(0);
+    }
+
+    saveHistoryFile(history, home, allocator, io);
+}
+
+fn saveHistoryFile(
+    history: *std.ArrayList([]const u8),
+    home: []const u8,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) void {
+    const dir_path = std.fs.path.join(allocator, &.{ home, ".phoenix" }) catch return;
+    defer allocator.free(dir_path);
+    std.Io.Dir.cwd().createDirPath(io, dir_path) catch {};
+
+    const path = std.fs.path.join(allocator, &.{ home, ".phoenix", "history" }) catch return;
+    defer allocator.free(path);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    for (history.items) |entry| {
+        escapeHistoryLine(&buf, entry, allocator);
+        buf.append(allocator, '\n') catch {};
+    }
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = buf.items }) catch {};
+}
+
+fn escapeHistoryLine(buf: *std.ArrayList(u8), text: []const u8, allocator: std.mem.Allocator) void {
+    for (text) |ch| {
+        if (ch == '\n') {
+            buf.appendSlice(allocator, "\\n") catch {};
+        } else if (ch == '\\') {
+            buf.appendSlice(allocator, "\\\\") catch {};
+        } else {
+            buf.append(allocator, ch) catch {};
+        }
+    }
+}
+
+fn unescapeHistoryLine(line: []const u8, allocator: std.mem.Allocator) ![]u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    var i: usize = 0;
+    while (i < line.len) {
+        if (line[i] == '\\' and i + 1 < line.len) {
+            if (line[i + 1] == 'n') {
+                try result.append(allocator, '\n');
+                i += 2;
+            } else if (line[i + 1] == '\\') {
+                try result.append(allocator, '\\');
+                i += 2;
+            } else {
+                try result.append(allocator, line[i]);
+                i += 1;
+            }
+        } else {
+            try result.append(allocator, line[i]);
+            i += 1;
+        }
+    }
+    return try result.toOwnedSlice(allocator);
+}
+
+fn loadHistoryIntoInput(
+    input_lines: *std.ArrayList(std.ArrayList(u8)),
+    cursor_line: *usize,
+    cursor_col: *usize,
+    text: []const u8,
+    allocator: std.mem.Allocator,
+) void {
+    for (input_lines.items) |*line| line.deinit(allocator);
+    input_lines.clearRetainingCapacity();
+
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    while (iter.next()) |line_text| {
+        var new_line: std.ArrayList(u8) = .empty;
+        new_line.appendSlice(allocator, line_text) catch {};
+        input_lines.append(allocator, new_line) catch {};
+    }
+
+    if (input_lines.items.len == 0) {
+        input_lines.append(allocator, .empty) catch {};
+    }
+
+    cursor_line.* = input_lines.items.len - 1;
+    cursor_col.* = input_lines.items[cursor_line.*].items.len;
+}
+
 fn extractRegion(
     input_lines: *std.ArrayList(std.ArrayList(u8)),
     start_line: usize,
@@ -1309,6 +1831,121 @@ fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, view: StatusView
 const bubble_padding = 2;
 const max_bubble_pct = 70;
 
+fn isToolRole(role: core.Role) bool {
+    return role == .tool_call or role == .tool_result;
+}
+
+/// Detect markdown fenced code block delimiters: lines that are just
+/// ``` (optionally followed by a language tag like ```go).
+fn isFenceLine(text: []const u8) bool {
+    var i: usize = 0;
+    while (i < text.len and text[i] == ' ') i += 1;
+    if (text.len - i < 3) return false;
+    if (text[i] != '`') return false;
+    var ticks: usize = 0;
+    while (i < text.len and text[i] == '`') {
+        ticks += 1;
+        i += 1;
+    }
+    if (ticks < 3) return false;
+    while (i < text.len) : (i += 1) {
+        const ch = text[i];
+        if (ch != ' ' and !std.ascii.isAlphanumeric(ch) and ch != '-' and ch != '_' and ch != '+') return false;
+    }
+    return true;
+}
+
+/// Parse a single line of text for inline markdown and fill `segs` with
+/// styled segments. Returns the number of segments written.
+///
+/// Handles:
+///   `# heading`   → bold, `#` prefix stripped
+///   `**bold**`    → bold attribute, markers hidden
+///   `` `code` ``  → amber fg, backticks hidden
+fn parseInlineMarkdown(
+    text: []const u8,
+    base_style: vaxis.Style,
+    segs: []vaxis.Cell.Segment,
+) usize {
+    if (text.len == 0 or segs.len == 0) return 0;
+
+    // Headings: strip leading '#'s and the following space.
+    if (text[0] == '#') {
+        var skip: usize = 0;
+        while (skip < text.len and text[skip] == '#') skip += 1;
+        if (skip < text.len and text[skip] == ' ') skip += 1;
+        var style = base_style;
+        style.bold = true;
+        segs[0] = .{ .text = text[skip..], .style = style };
+        return 1;
+    }
+
+    var count: usize = 0;
+    var i: usize = 0;
+    var seg_start: usize = 0;
+    var in_bold = false;
+    var in_code = false;
+
+    while (i < text.len) {
+        if (!in_code and i + 1 < text.len and text[i] == '*' and text[i + 1] == '*') {
+            if (i > seg_start and count < segs.len) {
+                var style = base_style;
+                if (in_bold) style.bold = true;
+                segs[count] = .{ .text = text[seg_start..i], .style = style };
+                count += 1;
+            }
+            in_bold = !in_bold;
+            i += 2;
+            seg_start = i;
+        } else if (text[i] == '`') {
+            if (i > seg_start and count < segs.len) {
+                var style = base_style;
+                if (in_bold) style.bold = true;
+                if (in_code) style.fg = .{ .rgb = .{ 220, 190, 130 } };
+                segs[count] = .{ .text = text[seg_start..i], .style = style };
+                count += 1;
+            }
+            in_code = !in_code;
+            i += 1;
+            seg_start = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    if (seg_start < text.len and count < segs.len) {
+        var style = base_style;
+        if (in_bold) style.bold = true;
+        if (in_code) style.fg = .{ .rgb = .{ 220, 190, 130 } };
+        segs[count] = .{ .text = text[seg_start..], .style = style };
+        count += 1;
+    }
+
+    return count;
+}
+
+/// Pick a color for a tool_call line based on its diff prefix.
+///   "  + ..." / "  1234+ ..." → green   (additions / write content)
+///   "  - ..."                  → red     (removals)
+///   everything else            → dim blue (headers, footers, summaries)
+fn toolLineStyle(text: []const u8) vaxis.Style {
+    var start: usize = 0;
+    while (start < text.len and text[start] == ' ') start += 1;
+    const trimmed = text[start..];
+    if (trimmed.len > 0) {
+        if (trimmed[0] == '+') return .{ .fg = .{ .rgb = .{ 100, 200, 100 } } };
+        if (trimmed[0] == '-') return .{ .fg = .{ .rgb = .{ 220, 100, 100 } } };
+        // Write tool lines: "  1234+ content" — digit prefix followed by '+'
+        if (std.ascii.isDigit(trimmed[0])) {
+            for (trimmed) |ch| {
+                if (ch == '+') return .{ .fg = .{ .rgb = .{ 100, 200, 100 } } };
+                if (!std.ascii.isDigit(ch)) break;
+            }
+        }
+    }
+    return .{ .fg = .{ .rgb = .{ 150, 170, 200 } } };
+}
+
 fn bubbleWidth(text_len: usize, win_width: u16) u16 {
     const max_w = @max(20, (win_width * max_bubble_pct) / 100);
     const content_w: u16 = @intCast(@min(text_len + bubble_padding * 2, max_w));
@@ -1319,20 +1956,28 @@ fn wrapLines(text: []const u8, width: usize, allocator: std.mem.Allocator) !std.
     var result: std.ArrayList([]const u8) = .empty;
     if (width == 0) return result;
 
-    var pos: usize = 0;
-    while (pos < text.len) {
-        var end = @min(pos + width, text.len);
-        if (end < text.len and end > pos) {
-            var break_at = end;
-            while (break_at > pos and text[break_at] != ' ') {
-                break_at -= 1;
-            }
-            if (break_at > pos) {
-                end = break_at + 1;
-            }
+    // Split on hard newlines first, then soft-wrap each paragraph.
+    var line_iter = std.mem.splitScalar(u8, text, '\n');
+    while (line_iter.next()) |paragraph| {
+        if (paragraph.len == 0) {
+            try result.append(allocator, "");
+            continue;
         }
-        try result.append(allocator, text[pos..@min(end, text.len)]);
-        pos = end;
+        var pos: usize = 0;
+        while (pos < paragraph.len) {
+            var end = @min(pos + width, paragraph.len);
+            if (end < paragraph.len and end > pos) {
+                var break_at = end;
+                while (break_at > pos and paragraph[break_at] != ' ') {
+                    break_at -= 1;
+                }
+                if (break_at > pos) {
+                    end = break_at + 1;
+                }
+            }
+            try result.append(allocator, paragraph[pos..@min(end, paragraph.len)]);
+            pos = end;
+        }
     }
     if (result.items.len == 0) {
         try result.append(allocator, "");
@@ -1352,9 +1997,14 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
 
     for (0..line_count) |i| {
         const line = lines[i];
-        const spacing: u32 = if (i > 0) 1 else 0;
+        const prev_role: ?core.Role = if (i > 0) lines[i - 1].role else null;
+        // Tighten consecutive tool rows so the body of one call (header +
+        // many "+ ..." lines) reads as a single block without empty rows
+        // between every entry.
+        const tight = isToolRole(line.role) and prev_role != null and isToolRole(prev_role.?);
+        const spacing: u32 = if (i > 0 and !tight) 1 else 0;
 
-        if (line.role == .system) {
+        if (line.role == .system or isToolRole(line.role)) {
             row_counts[i] = spacing + 1;
             total_rows += row_counts[i];
             continue;
@@ -1393,9 +2043,12 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
 
         const is_right = line.role == .user;
         const is_system = line.role == .system;
+        const is_tool = isToolRole(line.role);
+        const prev_role: ?core.Role = if (i > 0) lines[i - 1].role else null;
+        const tight = is_tool and prev_role != null and isToolRole(prev_role.?);
         var cr = vrow;
 
-        if (i > 0) cr += 1;
+        if (i > 0 and !tight) cr += 1;
 
         if (is_system) {
             const sy = cr - visible_top;
@@ -1406,6 +2059,22 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
                 const sys_style: vaxis.Style = .{ .fg = .{ .index = 8 }, .italic = true };
                 const sys_win = win.child(.{ .x_off = x_off, .y_off = y, .width = text_len, .height = 1 });
                 _ = sys_win.print(&.{.{ .text = line.text, .style = sys_style }}, .{});
+            }
+            vrow = msg_end;
+            continue;
+        }
+
+        if (is_tool) {
+            const sy = cr - visible_top;
+            if (sy >= 0 and sy < rows) {
+                const y: u16 = @intCast(sy);
+                const text_len: u16 = @intCast(@min(line.text.len, win_width -| 2));
+                const tool_style: vaxis.Style = if (line.role == .tool_result)
+                    .{ .fg = .{ .rgb = .{ 220, 110, 110 } } }
+                else
+                    toolLineStyle(line.text);
+                const tool_win = win.child(.{ .x_off = 1, .y_off = y, .width = text_len, .height = 1 });
+                _ = tool_win.print(&.{.{ .text = line.text, .style = tool_style }}, .{});
             }
             vrow = msg_end;
             continue;
@@ -1472,21 +2141,47 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
         else
             .{ .fg = .{ .rgb = .{ 240, 240, 240 } }, .bg = .{ .rgb = .{ 50, 50, 70 } } };
 
+        var in_code_block = false;
         for (wrapped.items) |wline| {
             const sy = cr - visible_top;
             if (sy >= 0 and sy < rows) {
                 const y: u16 = @intCast(sy);
+                const inner: u16 = bw -| (bubble_padding * 2);
                 const bwin = win.child(.{ .x_off = x_off, .y_off = y, .width = bw, .height = 1 });
+
+                // Code blocks get a slightly different bubble background so
+                // the reader can see where code starts and stops.
+                const row_bg: vaxis.Style = if (in_code_block and !is_right)
+                    .{ .fg = bubble_bg.fg, .bg = .{ .rgb = .{ 40, 40, 55 } } }
+                else
+                    bubble_bg;
+
                 for (0..bw) |bx| {
-                    bwin.writeCell(@intCast(bx), 0, .{ .char = .{ .grapheme = " " }, .style = bubble_bg });
+                    bwin.writeCell(@intCast(bx), 0, .{ .char = .{ .grapheme = " " }, .style = row_bg });
                 }
                 const text_win = win.child(.{
                     .x_off = x_off + bubble_padding,
                     .y_off = y,
-                    .width = bw -| (bubble_padding * 2),
+                    .width = inner,
                     .height = 1,
                 });
-                _ = text_win.print(&.{.{ .text = wline, .style = bubble_bg }}, .{});
+
+                if (isFenceLine(wline)) {
+                    in_code_block = !in_code_block;
+                    // Blank row — the bg color shift is enough visual cue.
+                } else if (in_code_block) {
+                    var code_style = row_bg;
+                    code_style.fg = .{ .rgb = .{ 220, 190, 130 } };
+                    _ = text_win.print(&.{.{ .text = wline, .style = code_style }}, .{});
+                } else {
+                    var segs_buf: [64]vaxis.Cell.Segment = undefined;
+                    const seg_count = parseInlineMarkdown(wline, bubble_bg, &segs_buf);
+                    if (seg_count > 0) {
+                        _ = text_win.print(segs_buf[0..seg_count], .{});
+                    } else {
+                        _ = text_win.print(&.{.{ .text = wline, .style = bubble_bg }}, .{});
+                    }
+                }
             }
             cr += 1;
             if (cr - visible_top >= rows) break;

@@ -109,6 +109,8 @@ pub const StreamCallbacks = struct {
     on_token: ?*const fn (ctx: *anyopaque, text: []const u8) void = null,
     on_context: ?*const fn (ctx: *anyopaque, label: []const u8, body: []const u8) void = null,
     on_err: ?*const fn (ctx: *anyopaque, text: []const u8) void = null,
+    on_tool_call: ?*const fn (ctx: *anyopaque, tool_id: []const u8, name: []const u8, args_json: []const u8) void = null,
+    on_tool_result: ?*const fn (ctx: *anyopaque, tool_id: []const u8, output: []const u8, is_error: bool) void = null,
     on_tick: ?*const fn (ctx: *anyopaque) void = null,
     tick_interval_ms: i32 = 150,
 };
@@ -463,6 +465,19 @@ pub const Client = struct {
                     const text_v = ev.get("text") orelse continue;
                     if (text_v != .string) continue;
                     if (callbacks.on_err) |cb| cb(callbacks.ctx, text_v.string);
+                } else if (std.mem.eql(u8, kind_v.string, "tool_call")) {
+                    const tid_v = ev.get("tool_id") orelse continue;
+                    const name_v = ev.get("name") orelse continue;
+                    const args_v = ev.get("args") orelse continue;
+                    if (tid_v != .string or name_v != .string or args_v != .string) continue;
+                    if (callbacks.on_tool_call) |cb| cb(callbacks.ctx, tid_v.string, name_v.string, args_v.string);
+                } else if (std.mem.eql(u8, kind_v.string, "tool_result")) {
+                    const tid_v = ev.get("tool_id") orelse continue;
+                    const out_v = ev.get("output") orelse continue;
+                    const err_v = ev.get("is_error") orelse std.json.Value{ .bool = false };
+                    if (tid_v != .string or out_v != .string) continue;
+                    const is_err = if (err_v == .bool) err_v.bool else false;
+                    if (callbacks.on_tool_result) |cb| cb(callbacks.ctx, tid_v.string, out_v.string, is_err);
                 }
                 continue;
             }
