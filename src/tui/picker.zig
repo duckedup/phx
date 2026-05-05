@@ -338,7 +338,8 @@ pub const Picker = struct {
 
     pub fn draw(self: *const Picker, win: vaxis.Window, t: *const theme_mod.Theme) void {
         if (win.height == 0 or win.width == 0) return;
-        const border_style: vaxis.Style = .{ .fg = .{ .rgb = t.dim() } };
+        const bg: vaxis.Color = .{ .rgb = t.background };
+        const border_style: vaxis.Style = .{ .fg = .{ .rgb = t.dim() }, .bg = bg };
         const inner = win.child(.{
             .x_off = 0,
             .y_off = 0,
@@ -348,7 +349,7 @@ pub const Picker = struct {
         });
         if (inner.height == 0) return;
 
-        _ = inner.print(&.{.{ .text = self.title, .style = .{ .bold = true } }}, .{ .row_offset = 0, .col_offset = 1 });
+        _ = inner.print(&.{.{ .text = self.title, .style = .{ .fg = .{ .rgb = t.foreground }, .bg = bg, .bold = true } }}, .{ .row_offset = 0, .col_offset = 1 });
 
         const list_top: u16 = 1;
         const list_h = inner.height -| list_top;
@@ -367,7 +368,7 @@ pub const Picker = struct {
             const style: vaxis.Style = if (is_cursor)
                 .{ .fg = .{ .rgb = t.pickerCursorFg() }, .bg = .{ .rgb = t.pickerCursorBg() } }
             else
-                .{};
+                .{ .fg = .{ .rgb = t.foreground }, .bg = bg };
             const text = self.rendered[idx];
             _ = inner.print(&.{.{ .text = text, .style = style }}, .{ .row_offset = list_top + @as(u16, @intCast(i)), .col_offset = 1 });
         }

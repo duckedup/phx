@@ -9,6 +9,7 @@ const commands = @import("commands");
 const core = @import("phoenix_core");
 const rpc = @import("rpc");
 const add_model = @import("add_model_wizard.zig");
+const Theme = @import("theme.zig").Theme;
 
 pub const ModelsPage = struct {
     /// Arena that owns the title, entries, and any rebuilt-list strings. The
@@ -186,7 +187,7 @@ pub const ModelsPage = struct {
         return .stay;
     }
 
-    pub fn paint(self: *const ModelsPage, parent: vaxis.Window, arena: std.mem.Allocator) void {
+    pub fn paint(self: *const ModelsPage, parent: vaxis.Window, arena: std.mem.Allocator, t: *const Theme) void {
         if (parent.width < 40 or parent.height < 14) {
             writeText(parent, 0, 0, "Resize terminal to at least 40x14...", .{});
             return;
@@ -205,19 +206,22 @@ pub const ModelsPage = struct {
         const modal_w: u16 = @min(parent.width, 78);
         const modal_h: u16 = @min(parent.height, 24);
         const modal = vaxis.widgets.alignment.center(parent, modal_w, modal_h);
+        const bg: vaxis.Color = .{ .rgb = t.background };
         const inner = modal.child(.{
             .border = .{
                 .where = .all,
                 .glyphs = .single_rounded,
+                .style = .{ .fg = .{ .rgb = t.dim() }, .bg = bg },
             },
         });
         if (inner.height == 0) return;
 
-        const title_style: vaxis.Style = .{ .bold = true };
-        const dim_style: vaxis.Style = .{ .fg = .{ .index = 8 } };
-        const sel_style: vaxis.Style = .{ .reverse = true, .bold = true };
-        const active_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 130, 220, 130 } }, .bold = true };
-        const flash_style: vaxis.Style = .{ .fg = .{ .index = 2 }, .bold = true };
+        const title_style: vaxis.Style = .{ .fg = .{ .rgb = t.foreground }, .bg = bg, .bold = true };
+        const dim_style: vaxis.Style = .{ .fg = .{ .rgb = t.dim() }, .bg = bg };
+        const sel_style: vaxis.Style = .{ .fg = .{ .rgb = t.background }, .bg = .{ .rgb = t.foreground }, .bold = true };
+        const active_style: vaxis.Style = .{ .fg = .{ .rgb = t.success }, .bg = bg, .bold = true };
+        const flash_style: vaxis.Style = .{ .fg = .{ .rgb = t.success }, .bg = bg, .bold = true };
+        const normal_style: vaxis.Style = .{ .fg = .{ .rgb = t.foreground }, .bg = bg };
 
         writeText(inner, 1, 0, self.title, title_style);
 
@@ -231,7 +235,7 @@ pub const ModelsPage = struct {
         for (self.entries, 0..) |e, i| {
             const is_sel = (i == self.cursor);
             const prefix: []const u8 = if (is_sel) " > " else "   ";
-            const style: vaxis.Style = if (is_sel) sel_style else .{};
+            const style: vaxis.Style = if (is_sel) sel_style else normal_style;
             writeText(inner, 1, row, prefix, style);
             const star: []const u8 = if (e.is_active) "* " else "  ";
             writeText(inner, 4, row, star, if (e.is_active) active_style else style);
@@ -258,7 +262,7 @@ pub const ModelsPage = struct {
             const i = self.entries.len;
             const is_sel = (i == self.cursor);
             const prefix: []const u8 = if (is_sel) " > " else "   ";
-            const style: vaxis.Style = if (is_sel) sel_style else .{};
+            const style: vaxis.Style = if (is_sel) sel_style else normal_style;
             writeText(inner, 1, row, prefix, style);
             writeText(inner, 4, row, "+ Add new model", style);
         }

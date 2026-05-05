@@ -701,7 +701,7 @@ fn drawFrame(
 
         var page_arena = std.heap.ArenaAllocator.init(allocator);
         defer page_arena.deinit();
-        page.paint(win, page_arena.allocator());
+        page.paint(win, page_arena.allocator(), t);
         try vx.render(writer);
         try writer.flush();
         return;
