@@ -23,6 +23,7 @@ pub const Runtime = struct {
 };
 
 pub const Theme = struct {
+    name: ?[]const u8 = null,
     background: ?[]const u8 = null,
     foreground: ?[]const u8 = null,
     accent: ?[]const u8 = null,
@@ -410,6 +411,11 @@ const env_name: []const u8 = switch (ap.kind) {
     }
 
     fn applyTheme(self: *Config, a: std.mem.Allocator, v: std.json.Value) !void {
+        // "theme": "dracula" — short form: just the name
+        if (v == .string) {
+            self.theme.name = try a.dupe(u8, v.string);
+            return;
+        }
         const t = try expectObject(v, "theme");
         var it = t.iterator();
         while (it.next()) |entry| {
@@ -417,7 +423,9 @@ const env_name: []const u8 = switch (ap.kind) {
             const val = entry.value_ptr.*;
             const s = try expectString(val, k);
             const dup = try a.dupe(u8, s);
-            if (std.mem.eql(u8, k, "background")) {
+            if (std.mem.eql(u8, k, "name")) {
+                self.theme.name = dup;
+            } else if (std.mem.eql(u8, k, "background")) {
                 self.theme.background = dup;
             } else if (std.mem.eql(u8, k, "foreground")) {
                 self.theme.foreground = dup;

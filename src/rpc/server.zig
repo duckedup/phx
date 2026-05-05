@@ -534,7 +534,7 @@ fn handleSessionSend(
             const txt = try compactAction(a, ctx, active);
             try writeCommandResult(gpa, stdout_fd, id, .{ .compacted = txt });
         },
-        .message, .err, .model_picker, .session_picker, .models_page, .connect_wizard, .cleared, .compacted => {
+        .message, .err, .model_picker, .session_picker, .models_page, .connect_wizard, .cleared, .compacted, .theme_picker => {
             try writeCommandResult(gpa, stdout_fd, id, outcome.result);
         },
     }

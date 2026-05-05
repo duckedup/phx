@@ -15,8 +15,19 @@ pub fn writeUserConfig(
     home: []const u8,
     providers: []const config.ProviderProfile,
 ) !void {
+    return writeUserConfigFull(io, allocator, home, providers, null);
+}
+
+pub fn writeUserConfigFull(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    home: []const u8,
+    providers: []const config.ProviderProfile,
+    theme_name: ?[]const u8,
+) !void {
     if (home.len == 0) return error.HomeRequired;
     for (providers) |p| try validateProvider(p);
+    if (theme_name) |t| try validateValue(t);
 
     const dir = try std.fs.path.join(allocator, &.{ home, ".phoenix" });
     defer allocator.free(dir);
@@ -28,7 +39,7 @@ pub fn writeUserConfig(
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
-    try renderJsonc(&buf, allocator, providers);
+    try renderJsonc(&buf, allocator, providers, theme_name);
 
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = file_path,
@@ -44,8 +55,15 @@ fn renderJsonc(
     buf: *std.ArrayList(u8),
     a: std.mem.Allocator,
     providers: []const config.ProviderProfile,
+    theme_name: ?[]const u8,
 ) !void {
-    try buf.appendSlice(a, "{\n  \"providers\": [\n");
+    try buf.appendSlice(a, "{\n");
+    if (theme_name) |t| {
+        try buf.appendSlice(a, "  ");
+        try writeKeyString(buf, a, "", "theme", t);
+        try buf.appendSlice(a, ",\n");
+    }
+    try buf.appendSlice(a, "  \"providers\": [\n");
     for (providers, 0..) |p, i| {
         try buf.appendSlice(a, "    {\n");
         try writeKeyString(buf, a, "      ", "kind", kindString(p.kind));

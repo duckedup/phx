@@ -5,6 +5,7 @@ const model_cmd = @import("model.zig");
 const skill_cmd = @import("skill.zig");
 const session_cmd = @import("session_cmd.zig");
 const connect_cmd = @import("connect.zig");
+const theme_cmd = @import("theme.zig");
 
 /// One model entry shown in the picker. Owned by the Result arena.
 pub const ModelChoice = struct {
@@ -82,6 +83,12 @@ pub const ModelsPage = struct {
     entries: []const ModelEntry,
 };
 
+/// Payload for the /theme picker. If `requested` is non-null the user typed
+/// `/theme <name>` and the TUI should apply directly without showing a picker.
+pub const ThemePicker = struct {
+    requested: ?[]const u8,
+};
+
 pub const Result = union(enum) {
     /// Command produced a simple text result. Render as a system-role chat line.
     /// Owned by `arena`.
@@ -132,6 +139,10 @@ pub const Result = union(enum) {
     /// on completion it calls `connect.addProvider` then the server marks
     /// the new provider as active. Owned by `arena`.
     connect_wizard,
+
+    /// Show the inline theme picker, or apply a specific theme directly.
+    /// Owned by `arena`.
+    theme_picker: ThemePicker,
 };
 
 /// Returned to the TUI on every dispatch. The TUI must call `deinit` after it is
@@ -179,6 +190,7 @@ const builtin_table = [_]Registry.Builtin{
     .{ .name = "clear", .summary = "Save and reset the conversation", .handler = session_cmd.handleClear },
     .{ .name = "compact", .summary = "Truncate older history to free context", .handler = session_cmd.handleCompact },
     .{ .name = "resume", .summary = "Resume a saved conversation", .handler = session_cmd.handleResume },
+    .{ .name = "theme", .summary = "Change the color theme", .handler = theme_cmd.handle },
 };
 
 pub const DispatchCtx = struct {
@@ -330,6 +342,7 @@ test {
     std.testing.refAllDecls(model_cmd);
     std.testing.refAllDecls(skill_cmd);
     std.testing.refAllDecls(connect_cmd);
+    std.testing.refAllDecls(theme_cmd);
 }
 
 test "parse: /model" {

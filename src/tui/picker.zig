@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const commands = @import("commands");
+const theme_mod = @import("theme.zig");
 
 /// Inline picker shown under the input box. Supports the two flavors Phoenix
 /// currently surfaces — model selection (/model) and saved-session selection
@@ -26,6 +27,7 @@ pub const Picker = struct {
         /// `filtered` is a slice of pointers into `all` matching the current
         /// prefix and is rebuilt by `setCommandFilter`.
         command_complete: CommandComplete,
+        theme: []const theme_mod.ThemeEntry,
     };
 
     pub const CommandComplete = struct {
@@ -94,6 +96,35 @@ pub const Picker = struct {
             .title = title,
             .cursor = 0,
             .mode = .{ .session = buf },
+            .rendered = rendered,
+        };
+    }
+
+    pub fn initTheme(
+        gpa: std.mem.Allocator,
+        current_theme: []const u8,
+    ) !Picker {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+
+        const all = theme_mod.listAll();
+        const entries = try a.alloc(theme_mod.ThemeEntry, all.len);
+        var initial_cursor: usize = 0;
+        for (all, 0..) |e, i| {
+            entries[i] = .{ .id = e.id, .name = e.name };
+            if (std.mem.eql(u8, e.id, current_theme)) initial_cursor = i;
+        }
+        const rendered = try a.alloc([]const u8, all.len);
+        for (entries, 0..) |e, i| {
+            const marker: []const u8 = if (std.mem.eql(u8, e.id, current_theme)) "*" else " ";
+            rendered[i] = try std.fmt.allocPrint(a, " {s} {s}", .{ marker, e.name });
+        }
+        return .{
+            .arena = arena,
+            .title = try a.dupe(u8, "Select theme (Enter to confirm, Esc to cancel)"),
+            .cursor = initial_cursor,
+            .mode = .{ .theme = entries },
             .rendered = rendered,
         };
     }
@@ -221,6 +252,7 @@ pub const Picker = struct {
             .model => |c| c.len,
             .session => |c| c.len,
             .command_complete => |cc| cc.filtered.len,
+            .theme => |t| t.len,
         };
     }
 
@@ -239,6 +271,13 @@ pub const Picker = struct {
     pub fn selectedSession(self: *const Picker) ?commands.SessionChoice {
         return switch (self.mode) {
             .session => |c| if (c.len == 0) null else c[self.cursor],
+            else => null,
+        };
+    }
+
+    pub fn selectedTheme(self: *const Picker) ?theme_mod.ThemeEntry {
+        return switch (self.mode) {
+            .theme => |t| if (t.len == 0) null else t[self.cursor],
             else => null,
         };
     }
@@ -297,10 +336,9 @@ pub const Picker = struct {
         return @min(want, cap);
     }
 
-    pub fn draw(self: *const Picker, win: vaxis.Window) void {
+    pub fn draw(self: *const Picker, win: vaxis.Window, t: *const theme_mod.Theme) void {
         if (win.height == 0 or win.width == 0) return;
-        const border_style: vaxis.Style = .{ .fg = .{ .index = 8 } };
-        // Use a bordered child window for the visual frame.
+        const border_style: vaxis.Style = .{ .fg = .{ .rgb = t.dim() } };
         const inner = win.child(.{
             .x_off = 0,
             .y_off = 0,
@@ -310,13 +348,11 @@ pub const Picker = struct {
         });
         if (inner.height == 0) return;
 
-        // Title on row 0.
         _ = inner.print(&.{.{ .text = self.title, .style = .{ .bold = true } }}, .{ .row_offset = 0, .col_offset = 1 });
 
         const list_top: u16 = 1;
         const list_h = inner.height -| list_top;
         const total = self.count();
-        // Window the choices around the cursor.
         var top: usize = 0;
         if (total > list_h) {
             if (self.cursor >= list_h) top = self.cursor + 1 - list_h;
@@ -329,7 +365,7 @@ pub const Picker = struct {
             if (idx >= self.rendered.len) break;
             const is_cursor = (idx == self.cursor);
             const style: vaxis.Style = if (is_cursor)
-                .{ .fg = .{ .rgb = .{ 0, 0, 0 } }, .bg = .{ .rgb = .{ 220, 220, 220 } } }
+                .{ .fg = .{ .rgb = t.pickerCursorFg() }, .bg = .{ .rgb = t.pickerCursorBg() } }
             else
                 .{};
             const text = self.rendered[idx];

@@ -163,6 +163,10 @@ pub fn writeDispatchResult(
             .entries = p.entries,
         }, .{}),
         .connect_wizard => try appendValue(out, a, .{ .kind = "connect_wizard" }, .{}),
+        .theme_picker => |p| try appendValue(out, a, .{
+            .kind = "theme_picker",
+            .requested = p.requested,
+        }, .{}),
     }
 }
 

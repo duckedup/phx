@@ -6,6 +6,8 @@ const rpc = @import("rpc");
 const Picker = @import("picker.zig").Picker;
 const ModelsPage = @import("models_page.zig").ModelsPage;
 const add_model_wizard = @import("add_model_wizard.zig");
+const theme_mod = @import("theme.zig");
+const Theme = theme_mod.Theme;
 
 const VxEvent = union(enum) {
     key_press: vaxis.Key,
@@ -73,9 +75,28 @@ const Selection = struct {
 
 const paste_char_threshold = 80;
 
-pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void {
+pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8, theme_name: ?[]const u8) !void {
     const io = init.io;
     const allocator = init.gpa;
+
+    var current_theme: Theme = blk: {
+        if (theme_name) |n| {
+            if (theme_mod.isPath(n)) {
+                const resolved = resolveThemePath(allocator, home, n);
+                defer if (resolved) |r| allocator.free(r);
+                if (resolved) |path| {
+                    if (theme_mod.loadFromFile(io, allocator, path)) |t| break :blk t;
+                }
+            }
+            if (theme_mod.getByName(n)) |t| break :blk t;
+        }
+        const persisted = loadPersistedTheme(io, allocator, home);
+        defer if (persisted) |p| allocator.free(p);
+        if (persisted) |p| {
+            if (theme_mod.getByName(p)) |t| break :blk t;
+        }
+        break :blk theme_mod.default();
+    };
 
     var chat_lines: std.ArrayList(ChatLine) = .empty;
     defer {
@@ -179,6 +200,8 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
 
     var picker: ?Picker = null;
     defer if (picker) |*p| p.deinit(allocator);
+
+    var theme_before_preview: ?Theme = null;
 
     // /models page state. When non-null the TUI is in full-screen page mode:
     // chat input is suppressed and every key flows through the page.
@@ -307,6 +330,7 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                         &status_buf,
                         0,
                         selection,
+                        &current_theme,
                     );
                     continue;
                 }
@@ -358,14 +382,24 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
 
                 if (picker) |*p| {
                     if (key.codepoint == vaxis.Key.escape) {
+                        if (theme_before_preview) |saved| {
+                            current_theme = saved;
+                            theme_before_preview = null;
+                        }
                         p.deinit(allocator);
                         picker = null;
                         picker_consumed_key = true;
                     } else if (key.codepoint == vaxis.Key.up) {
                         p.moveUp();
+                        if (p.selectedTheme()) |te| {
+                            if (theme_mod.getByName(te.id)) |preview| current_theme = preview;
+                        }
                         picker_consumed_key = true;
                     } else if (key.codepoint == vaxis.Key.down) {
                         p.moveDown();
+                        if (p.selectedTheme()) |te| {
+                            if (theme_mod.getByName(te.id)) |preview| current_theme = preview;
+                        }
                         picker_consumed_key = true;
                     } else if (autocomplete_active) {
                         // Tab and Enter both complete: insert the highlighted
@@ -427,9 +461,6 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                                 };
                                 defer ar.response.deinit();
 
-                                // Replace the visible chat with the restored
-                                // session's messages so the user sees the
-                                // conversation they're resuming.
                                 for (chat_lines.items) |line| allocator.free(line.text);
                                 chat_lines.clearRetainingCapacity();
                                 scroll_offset = 0;
@@ -443,6 +474,16 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                                     .role = .system,
                                     .text = try allocator.dupe(u8, ar.result.message),
                                 });
+                            } else if (p.selectedTheme()) |te| {
+                                if (theme_mod.getByName(te.id)) |new_theme| {
+                                    current_theme = new_theme;
+                                    theme_before_preview = null;
+                                    try chat_lines.append(allocator, .{
+                                        .role = .system,
+                                        .text = try std.fmt.allocPrint(allocator, "Theme set to {s}.", .{te.name}),
+                                    });
+                                    persistTheme(io, allocator, home, te.id);
+                                }
                             }
 
                             p.deinit(allocator);
@@ -504,6 +545,9 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
                             &status_buf,
                             init,
                             home,
+                            &current_theme,
+                            io,
+                            &theme_before_preview,
                         );
                     }
                 } else if (key.codepoint == vaxis.Key.backspace) {
@@ -615,6 +659,7 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8) !void 
             &status_buf,
             0,
             selection,
+            &current_theme,
         );
     }
 }
@@ -635,6 +680,7 @@ fn drawFrame(
     status_buf: []u8,
     anim_frame: u8,
     sel: ?Selection,
+    t: *const Theme,
 ) !void {
     const win = vx.window();
     win.clear();
@@ -666,21 +712,20 @@ fn drawFrame(
     const raw_input_lines: u16 = @intCast(@min(input_lines.len, 8));
     const input_h: u16 = @min(raw_input_lines + 2, 10);
 
+    const border_color: vaxis.Color = .{ .rgb = t.inputBorderColor() };
+
     if (picker) |p| {
         const picker_h = p.height(h);
         const chat_h = h -| input_h -| status_h -| picker_h;
         last_chat_h.* = chat_h;
 
-        // All pickers (autocomplete, model, session) render above the input.
-        // The autocomplete picker visually expands upward as the user types
-        // `/`, so it sits between the chat scrollback and the input box.
         if (chat_h > 0) {
             const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator, anim_frame);
+            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator, anim_frame, t);
         }
         {
             const pwin = win.child(.{ .x_off = 0, .y_off = chat_h, .width = w, .height = picker_h });
-            p.draw(pwin);
+            p.draw(pwin, t);
         }
         {
             const iwin = win.child(.{
@@ -688,20 +733,20 @@ fn drawFrame(
                 .y_off = chat_h + picker_h,
                 .width = w,
                 .height = input_h,
-                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = border_color } },
             });
-            drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
+            drawInput(iwin, input_lines, cursor_line, cursor_col, vx, t);
         }
         {
             const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
-            drawStatusBar(swin, w, scroll_offset.*, status_view, status_buf);
+            drawStatusBar(swin, w, scroll_offset.*, status_view, status_buf, t);
         }
     } else {
         const chat_h = h -| input_h -| status_h;
         last_chat_h.* = chat_h;
         if (chat_h > 0) {
             const cwin = win.child(.{ .x_off = 0, .y_off = 0, .width = w, .height = chat_h });
-            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator, anim_frame);
+            scroll_offset.* = drawChat(cwin, chat_lines, w, scroll_offset.*, allocator, anim_frame, t);
         }
         {
             const iwin = win.child(.{
@@ -709,13 +754,13 @@ fn drawFrame(
                 .y_off = chat_h,
                 .width = w,
                 .height = input_h,
-                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = .{ .index = 8 } } },
+                .border = .{ .where = .{ .other = .{ .top = true, .bottom = true } }, .style = .{ .fg = border_color } },
             });
-            drawInput(iwin, input_lines, cursor_line, cursor_col, vx);
+            drawInput(iwin, input_lines, cursor_line, cursor_col, vx, t);
         }
         {
             const swin = win.child(.{ .x_off = 0, .y_off = h - status_h, .width = w, .height = status_h });
-            drawStatusBar(swin, w, scroll_offset.*, status_view, status_buf);
+            drawStatusBar(swin, w, scroll_offset.*, status_view, status_buf, t);
         }
     }
 
@@ -809,6 +854,7 @@ const StreamCtx = struct {
     scroll_offset: *u16,
     last_chat_h: *u16,
     status_buf: []u8,
+    theme: *const Theme,
 };
 
 const default_tool_output_lines: usize = 20;
@@ -841,6 +887,7 @@ fn streamRedraw(s: *StreamCtx) void {
         s.status_buf,
         s.anim_frame,
         null,
+        s.theme,
     ) catch {};
 }
 
@@ -1105,8 +1152,10 @@ fn handleSubmit(
     status_buf: []u8,
     init: std.process.Init,
     home: []const u8,
+    current_theme: *Theme,
+    io: std.Io,
+    theme_before_preview: *?Theme,
 ) !void {
-    _ = home;
     // Echo the user's submission immediately. Whether the input turns out to
     // be a command or a chat message, the user sees what they typed.
     try chat_lines.append(allocator, .{ .role = .user, .text = submitted });
@@ -1144,6 +1193,7 @@ fn handleSubmit(
         .scroll_offset = scroll_offset,
         .last_chat_h = last_chat_h,
         .status_buf = status_buf,
+        .theme = current_theme,
     };
 
     // Render once so the user sees their bubble + empty assistant before the
@@ -1249,6 +1299,27 @@ fn handleSubmit(
                     // the `context` event; nothing more to do unless the
                     // server omitted the event (older builds).
                     _ = frag;
+                },
+                .theme_picker => |tp| {
+                    if (tp.requested) |name| {
+                        if (theme_mod.getByName(name)) |new_theme| {
+                            current_theme.* = new_theme;
+                            try chat_lines.append(allocator, .{
+                                .role = .system,
+                                .text = try std.fmt.allocPrint(allocator, "Theme set to {s}.", .{name}),
+                            });
+                            persistTheme(io, allocator, home, name);
+                        } else {
+                            try chat_lines.append(allocator, .{
+                                .role = .system,
+                                .text = try std.fmt.allocPrint(allocator, "Unknown theme: {s}. Use /theme to see available themes.", .{name}),
+                            });
+                        }
+                    } else {
+                        if (picker.*) |*old| old.deinit(allocator);
+                        theme_before_preview.* = current_theme.*;
+                        picker.* = try Picker.initTheme(allocator, current_theme.name);
+                    }
                 },
                 .connect_wizard => {
                     allocator.free(chat_lines.items[asst_idx].text);
@@ -1407,6 +1478,38 @@ fn updateAutocompletePicker(
         p.setCommandFilter(prefix);
         picker.* = p;
     }
+}
+
+fn persistTheme(io: std.Io, allocator: std.mem.Allocator, home: []const u8, theme_id: []const u8) void {
+    const dir = std.fs.path.join(allocator, &.{ home, ".phoenix" }) catch return;
+    defer allocator.free(dir);
+    const file_path = std.fs.path.join(allocator, &.{ dir, "theme" }) catch return;
+    defer allocator.free(file_path);
+    std.Io.Dir.cwd().createDirPath(io, dir) catch return;
+    std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = file_path,
+        .data = theme_id,
+    }) catch {};
+}
+
+fn loadPersistedTheme(io: std.Io, allocator: std.mem.Allocator, home: []const u8) ?[]const u8 {
+    const file_path = std.fs.path.join(allocator, &.{ home, ".phoenix", "theme" }) catch return null;
+    defer allocator.free(file_path);
+    const data = std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(256)) catch return null;
+    defer allocator.free(data);
+    const trimmed = std.mem.trim(u8, data, " \t\n\r");
+    if (trimmed.len == 0) return null;
+    if (theme_mod.getByName(trimmed) != null) {
+        return allocator.dupe(u8, trimmed) catch null;
+    }
+    return null;
+}
+
+fn resolveThemePath(allocator: std.mem.Allocator, home: []const u8, path: []const u8) ?[]const u8 {
+    if (path.len > 1 and path[0] == '~' and path[1] == '/') {
+        return std.fs.path.join(allocator, &.{ home, path[2..] }) catch null;
+    }
+    return allocator.dupe(u8, path) catch null;
 }
 
 fn insertText(
@@ -1757,13 +1860,13 @@ fn removeRegion(
     }
 }
 
-fn drawInput(win: vaxis.Window, lines: []const std.ArrayList(u8), cursor_line: usize, cursor_col: usize, vx: *vaxis.Vaxis) void {
+fn drawInput(win: vaxis.Window, lines: []const std.ArrayList(u8), cursor_line: usize, cursor_col: usize, vx: *vaxis.Vaxis, t: *const Theme) void {
     const inner_h = win.height;
     const inner_w = win.width;
     if (inner_h == 0 or inner_w == 0) return;
 
-    const text_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 220, 220, 220 } } };
-    const cursor_style: vaxis.Style = .{ .fg = .{ .rgb = .{ 0, 0, 0 } }, .bg = .{ .rgb = .{ 220, 220, 220 } } };
+    const text_style: vaxis.Style = .{ .fg = .{ .rgb = t.foreground } };
+    const cursor_style: vaxis.Style = .{ .fg = .{ .rgb = t.cursorFg() }, .bg = .{ .rgb = t.cursorBg() } };
 
     // Show last N lines that fit
     const visible = @min(lines.len, inner_h);
@@ -1806,10 +1909,10 @@ fn drawInput(win: vaxis.Window, lines: []const std.ArrayList(u8), cursor_line: u
 /// Render the status bar. `buf` must outlive the surrounding `vx.render` call:
 /// vaxis stores grapheme slices by reference, not by copy, so a stack-local
 /// buffer here would dangle by the time render walks the cells.
-fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, view: StatusView, buf: []u8) void {
+fn drawStatusBar(win: vaxis.Window, w: u16, scroll_offset: u16, view: StatusView, buf: []u8, t: *const Theme) void {
     const style: vaxis.Style = .{
-        .fg = .{ .rgb = .{ 0, 0, 0 } },
-        .bg = .{ .rgb = .{ 100, 140, 255 } },
+        .fg = .{ .rgb = t.statusBarFg() },
+        .bg = .{ .rgb = t.statusBarBg() },
         .bold = true,
     };
     for (0..w) |x| {
@@ -1866,6 +1969,7 @@ fn parseInlineMarkdown(
     text: []const u8,
     base_style: vaxis.Style,
     segs: []vaxis.Cell.Segment,
+    t: *const Theme,
 ) usize {
     if (text.len == 0 or segs.len == 0) return 0;
 
@@ -1901,7 +2005,7 @@ fn parseInlineMarkdown(
             if (i > seg_start and count < segs.len) {
                 var style = base_style;
                 if (in_bold) style.bold = true;
-                if (in_code) style.fg = .{ .rgb = .{ 220, 190, 130 } };
+                if (in_code) style.fg = .{ .rgb = t.codeFg() };
                 segs[count] = .{ .text = text[seg_start..i], .style = style };
                 count += 1;
             }
@@ -1928,22 +2032,21 @@ fn parseInlineMarkdown(
 ///   "  + ..." / "  1234+ ..." → green   (additions / write content)
 ///   "  - ..."                  → red     (removals)
 ///   everything else            → dim blue (headers, footers, summaries)
-fn toolLineStyle(text: []const u8) vaxis.Style {
+fn toolLineStyle(text: []const u8, t: *const Theme) vaxis.Style {
     var start: usize = 0;
     while (start < text.len and text[start] == ' ') start += 1;
     const trimmed = text[start..];
     if (trimmed.len > 0) {
-        if (trimmed[0] == '+') return .{ .fg = .{ .rgb = .{ 100, 200, 100 } } };
-        if (trimmed[0] == '-') return .{ .fg = .{ .rgb = .{ 220, 100, 100 } } };
-        // Write tool lines: "  1234+ content" — digit prefix followed by '+'
+        if (trimmed[0] == '+') return .{ .fg = .{ .rgb = t.diff_add } };
+        if (trimmed[0] == '-') return .{ .fg = .{ .rgb = t.diff_delete } };
         if (std.ascii.isDigit(trimmed[0])) {
             for (trimmed) |ch| {
-                if (ch == '+') return .{ .fg = .{ .rgb = .{ 100, 200, 100 } } };
+                if (ch == '+') return .{ .fg = .{ .rgb = t.diff_add } };
                 if (!std.ascii.isDigit(ch)) break;
             }
         }
     }
-    return .{ .fg = .{ .rgb = .{ 150, 170, 200 } } };
+    return .{ .fg = .{ .rgb = t.toolDefaultColor() } };
 }
 
 fn bubbleWidth(text_len: usize, win_width: u16) u16 {
@@ -1985,7 +2088,7 @@ fn wrapLines(text: []const u8, width: usize, allocator: std.mem.Allocator) !std.
     return result;
 }
 
-fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_offset: u16, allocator: std.mem.Allocator, anim_frame: u8) u16 {
+fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_offset: u16, allocator: std.mem.Allocator, anim_frame: u8, t: *const Theme) u16 {
     if (lines.len == 0) return 0;
 
     const rows: i64 = win.height;
@@ -2056,7 +2159,7 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
                 const y: u16 = @intCast(sy);
                 const text_len: u16 = @intCast(@min(line.text.len, win_width));
                 const x_off: u16 = (win_width -| text_len) / 2;
-                const sys_style: vaxis.Style = .{ .fg = .{ .index = 8 }, .italic = true };
+                const sys_style: vaxis.Style = .{ .fg = .{ .rgb = t.dim() }, .italic = true };
                 const sys_win = win.child(.{ .x_off = x_off, .y_off = y, .width = text_len, .height = 1 });
                 _ = sys_win.print(&.{.{ .text = line.text, .style = sys_style }}, .{});
             }
@@ -2070,9 +2173,9 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
                 const y: u16 = @intCast(sy);
                 const text_len: u16 = @intCast(@min(line.text.len, win_width -| 2));
                 const tool_style: vaxis.Style = if (line.role == .tool_result)
-                    .{ .fg = .{ .rgb = .{ 220, 110, 110 } } }
+                    .{ .fg = .{ .rgb = t.toolResultColor() } }
                 else
-                    toolLineStyle(line.text);
+                    toolLineStyle(line.text, t);
                 const tool_win = win.child(.{ .x_off = 1, .y_off = y, .width = text_len, .height = 1 });
                 _ = tool_win.print(&.{.{ .text = line.text, .style = tool_style }}, .{});
             }
@@ -2096,9 +2199,9 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
             const y: u16 = @intCast(label_sy);
             const label = if (is_right) "you" else "phoenix";
             const label_style: vaxis.Style = if (is_right)
-                .{ .fg = .{ .rgb = .{ 130, 220, 130 } }, .bold = true }
+                .{ .fg = .{ .rgb = t.userLabelColor() }, .bold = true }
             else
-                .{ .fg = .{ .rgb = .{ 120, 160, 255 } }, .bold = true };
+                .{ .fg = .{ .rgb = t.assistantLabelColor() }, .bold = true };
 
             const label_x = if (is_right) x_off + bw - @as(u16, @intCast(label.len)) else x_off;
             const label_win = win.child(.{
@@ -2137,9 +2240,9 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
 
         // Bubble text
         const bubble_bg: vaxis.Style = if (is_right)
-            .{ .fg = .{ .rgb = .{ 240, 240, 240 } }, .bg = .{ .rgb = .{ 40, 80, 40 } } }
+            .{ .fg = .{ .rgb = t.bubbleFg() }, .bg = .{ .rgb = t.userBubbleBg() } }
         else
-            .{ .fg = .{ .rgb = .{ 240, 240, 240 } }, .bg = .{ .rgb = .{ 50, 50, 70 } } };
+            .{ .fg = .{ .rgb = t.bubbleFg() }, .bg = .{ .rgb = t.assistantBubbleBg() } };
 
         var in_code_block = false;
         for (wrapped.items) |wline| {
@@ -2152,7 +2255,7 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
                 // Code blocks get a slightly different bubble background so
                 // the reader can see where code starts and stops.
                 const row_bg: vaxis.Style = if (in_code_block and !is_right)
-                    .{ .fg = bubble_bg.fg, .bg = .{ .rgb = .{ 40, 40, 55 } } }
+                    .{ .fg = bubble_bg.fg, .bg = .{ .rgb = t.codeBubbleBg() } }
                 else
                     bubble_bg;
 
@@ -2175,7 +2278,7 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
                     _ = text_win.print(&.{.{ .text = wline, .style = code_style }}, .{});
                 } else {
                     var segs_buf: [64]vaxis.Cell.Segment = undefined;
-                    const seg_count = parseInlineMarkdown(wline, bubble_bg, &segs_buf);
+                    const seg_count = parseInlineMarkdown(wline, bubble_bg, &segs_buf, t);
                     if (seg_count > 0) {
                         _ = text_win.print(segs_buf[0..seg_count], .{});
                     } else {

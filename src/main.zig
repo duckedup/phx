@@ -96,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("phoenix: cannot resolve $HOME\n", .{});
             std.process.exit(1);
         };
-        try tui.run(init, &client, home);
+        try tui.run(init, &client, home, cfg.theme.name);
     } else if (std.mem.eql(u8, c, "rpc")) {
         const home_opt: ?[]u8 = resolveHome(init.gpa);
         defer if (home_opt) |h| init.gpa.free(h);

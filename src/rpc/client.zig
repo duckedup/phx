@@ -25,6 +25,7 @@ pub const DispatchResult = union(enum) {
     session_picker: SessionPicker,
     models_page: ModelsPage,
     connect_wizard,
+    theme_picker: ThemePicker,
 
     pub const ModelPicker = struct {
         title: []const u8,
@@ -42,6 +43,9 @@ pub const DispatchResult = union(enum) {
     pub const ModelsPage = struct {
         title: []const u8,
         entries: []commands.ModelEntry,
+    };
+    pub const ThemePicker = struct {
+        requested: ?[]const u8,
     };
 };
 
@@ -743,6 +747,13 @@ fn parseDispatchResult(a: std.mem.Allocator, result_val: std.json.Value) !Dispat
         } };
     } else if (std.mem.eql(u8, kind, "connect_wizard")) {
         return .connect_wizard;
+    } else if (std.mem.eql(u8, kind, "theme_picker")) {
+        const req_v = obj.get("requested");
+        const requested: ?[]const u8 = if (req_v) |rv| switch (rv) {
+            .string => |s| try a.dupe(u8, s),
+            else => null,
+        } else null;
+        return .{ .theme_picker = .{ .requested = requested } };
     } else if (std.mem.eql(u8, kind, "clear_session") or std.mem.eql(u8, kind, "compact_session")) {
         // Server-internal markers that should have been transformed before
         // hitting the wire. If we see one, surface a benign message rather
