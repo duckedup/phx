@@ -10,38 +10,28 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates curl git jq xz-utils
+            ca-certificates curl git build-essential pkg-config libssl-dev
           rm -rf /var/lib/apt/lists/*
 
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Zig
+      - name: Install Rust
         run: |
-          set -eu
-          ZIG_VERSION="$(cat .zigversion)"
-          ARCH="$(uname -m)"
-          TARBALL_URL="$(curl -fsSL https://ziglang.org/download/index.json \
-            | jq -er ".\"${ZIG_VERSION}\"[\"${ARCH}-linux\"].tarball")"
-          echo "Fetching ${TARBALL_URL}"
-          curl -fsSL -o zig.tar.xz "$TARBALL_URL"
-          mkdir -p /opt/zig
-          tar -xJf zig.tar.xz -C /opt/zig --strip-components=1
-          rm zig.tar.xz
-          echo "/opt/zig" >> "$GITHUB_PATH"
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Zig version
-        run: zig version
+      - name: Rust version
+        run: rustc --version && cargo --version
+
+      - name: Format check
+        run: cargo fmt -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
-        run: zig build
+        run: cargo build
 
       - name: Test
-        shell: bash
-        run: |
-          set -euo pipefail
-          zig build test 2>&1 | tee /tmp/zig-build-test.log
-          if grep -q "failed command:" /tmp/zig-build-test.log; then
-            echo "zig reported a failed command; failing CI"
-            exit 1
-          fi
+        run: cargo test --all-features

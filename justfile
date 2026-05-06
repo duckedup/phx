@@ -1,32 +1,35 @@
-zig_version := `cat .zigversion`
-
 build:
-    zig build
+    cargo build
 
 build-release:
-    zig build -Doptimize=ReleaseSafe
+    cargo build --release
 
 run *ARGS:
-    zig build run -- {{ARGS}}
+    cargo run -- {{ARGS}}
 
 rpc:
-    zig build run -- rpc
+    cargo run -- rpc
 
 test:
-    zig build test
+    cargo test --all-features
+
+test-ignored:
+    cargo test --all-features -- --ignored
 
 fmt:
-    zig fmt src/ build.zig
+    cargo fmt
 
-lint: fmt
-    @echo "lint: ok"
+clippy:
+    cargo clippy --all-targets --all-features -- -D warnings
+
+lint: fmt clippy
 
 bench:
     @echo "bench: not yet implemented"
 
 package:
-    zig build -Doptimize=ReleaseSafe
-    @echo "binary at zig-out/bin/phoenix"
+    cargo build --release
+    @echo "binary at target/release/phoenix"
 
 clean:
-    rm -rf zig-out .zig-cache
+    cargo clean

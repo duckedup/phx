@@ -1,11 +1,12 @@
-# Zig
-.zig-cache/
-zig-out/
-zig-pkg/
-*.o
+# Rust
+/target/
+**/*.rs.bk
 
 # Phoenix runtime
 .phoenix/
 
 # Claude
 .claude/
+
+# OS
+.DS_Store
