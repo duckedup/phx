@@ -39,28 +39,18 @@ pub fn discoverIn(io: std.Io, allocator: std.mem.Allocator, base_dir: []const u8
         if (entry.name.len == 0 or entry.name[0] == '.') continue;
         if (entry.kind != .directory) continue;
 
-        // Check for skill.md inside this directory
-        const skill_md_relative = try std.fs.path.join(allocator, &.{ entry.name, "skill.md" });
-        defer allocator.free(skill_md_relative);
-
-        const has_skill_md = blk: {
-            skills_dir.access(io, skill_md_relative, .{}) catch break :blk false;
-            break :blk true;
-        };
-
-        if (!has_skill_md) continue;
+        // Check for skill.md (case-insensitive) inside this directory
+        const actual_md = findSkillMdCaseInsensitive(io, skills_dir, entry.name, allocator) catch continue;
 
         const name = try allocator.dupe(u8, entry.name);
         errdefer allocator.free(name);
         const dir = try std.fs.path.join(allocator, &.{ skills_path, entry.name });
         errdefer allocator.free(dir);
-        const md = try std.fs.path.join(allocator, &.{ skills_path, entry.name, "skill.md" });
-        errdefer allocator.free(md);
 
         try list.append(allocator, .{
             .name = name,
             .dir = dir,
-            .skill_md = md,
+            .skill_md = actual_md,
             .source = source,
         });
     }
@@ -254,9 +244,92 @@ test "layered append order" {
     try std.testing.expect(skills[1].source == .project);
 }
 
+test "finds skills with case-insensitive skill.md" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const tmp_path = try getTmpDirPath(allocator, &tmp);
+    defer allocator.free(tmp_path);
+
+    const skills_dir_path = try std.fs.path.join(allocator, &.{ tmp_path, "skills" });
+    defer allocator.free(skills_dir_path);
+
+    // Create skill dirs with different case variations
+    const lower_dir = try std.fs.path.join(allocator, &.{ skills_dir_path, "lower" });
+    defer allocator.free(lower_dir);
+    const upper_dir = try std.fs.path.join(allocator, &.{ skills_dir_path, "upper" });
+    defer allocator.free(upper_dir);
+    const mixed_dir = try std.fs.path.join(allocator, &.{ skills_dir_path, "mixed" });
+    defer allocator.free(mixed_dir);
+
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, skills_dir_path);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, lower_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, upper_dir);
+    try std.Io.Dir.cwd().createDirPath(std.testing.io, mixed_dir);
+
+    // Create skill.md with different cases
+    const lower_md = try std.fs.path.join(allocator, &.{ lower_dir, "skill.md" });
+    defer allocator.free(lower_md);
+    const upper_md = try std.fs.path.join(allocator, &.{ upper_dir, "SKILL.MD" });
+    defer allocator.free(upper_md);
+    const mixed_md = try std.fs.path.join(allocator, &.{ mixed_dir, "SkIlL.Md" });
+    defer allocator.free(mixed_md);
+
+    const f1 = try std.Io.Dir.cwd().createFile(std.testing.io, lower_md, .{});
+    f1.close(std.testing.io);
+    const f2 = try std.Io.Dir.cwd().createFile(std.testing.io, upper_md, .{});
+    f2.close(std.testing.io);
+    const f3 = try std.Io.Dir.cwd().createFile(std.testing.io, mixed_md, .{});
+    f3.close(std.testing.io);
+
+    const skills = try discoverIn(std.testing.io, allocator, tmp_path, .user);
+    defer freeSkills(allocator, skills);
+
+    try std.testing.expectEqual(@as(usize, 3), skills.len);
+    // Skills are sorted alphabetically by name
+    try std.testing.expectEqualStrings("lower", skills[0].name);
+    try std.testing.expectEqualStrings("mixed", skills[1].name);
+    try std.testing.expectEqualStrings("upper", skills[2].name);
+    
+    // Verify that the skill_md paths have the correct case variation
+    try std.testing.expect(std.mem.endsWith(u8, skills[0].skill_md, "skill.md"));
+    try std.testing.expect(std.mem.endsWith(u8, skills[1].skill_md, "SkIlL.Md"));
+    try std.testing.expect(std.mem.endsWith(u8, skills[2].skill_md, "SKILL.MD"));
+}
+
 fn getTmpDirPath(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) ![]u8 {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const ptr = std.c.getcwd(&buf, buf.len) orelse return error.CwdError;
     const cwd_path = std.mem.sliceTo(ptr, 0);
     return try std.fs.path.join(allocator, &.{ cwd_path, ".zig-cache", "tmp", &tmp.sub_path });
+}
+
+/// Find skill.md file with case-insensitive matching.
+/// Returns the actual path to the file found, or error.FileNotFound if none exists.
+fn findSkillMdCaseInsensitive(io: std.Io, dir: std.Io.Dir, skill_name: []const u8, allocator: std.mem.Allocator) ![]const u8 {
+    const skill_dir_path = try std.fs.path.join(allocator, &.{ skill_name });
+    defer allocator.free(skill_dir_path);
+
+    var skill_dir = dir.openDir(io, skill_dir_path, .{ .iterate = true }) catch return error.FileNotFound;
+    defer skill_dir.close(io);
+
+    var it = skill_dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (isSkillMdFilename(entry.name)) {
+            return try std.fs.path.join(allocator, &.{ skill_dir_path, entry.name });
+        }
+    }
+    return error.FileNotFound;
+}
+
+/// Check if filename matches skill.md (case-insensitive)
+fn isSkillMdFilename(name: []const u8) bool {
+    const target = "skill.md";
+    if (name.len != target.len) return false;
+    for (name, 0..) |c, i| {
+        if (std.ascii.toLower(c) != target[i]) return false;
+    }
+    return true;
 }
