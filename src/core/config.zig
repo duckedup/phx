@@ -87,6 +87,7 @@ pub const ProviderProfile = struct {
     /// back to a static table for cloud models. For local providers (ollama,
     /// llamacpp) this is the only source of truth — onboarding prompts for it.
     context_window: ?u32 = null,
+    cache_ttl: ?[]const u8 = null,
 };
 
 pub const SessionProfile = struct {
@@ -580,6 +581,8 @@ fn applyProviderObject(a: std.mem.Allocator, profile: *ProviderProfile, v: std.j
             const n = try expectInteger(val, "providers[i].context_window");
             if (n <= 0) return error.InvalidConfigValue;
             profile.context_window = @intCast(n);
+        } else if (std.mem.eql(u8, k, "cache_ttl")) {
+            profile.cache_ttl = try a.dupe(u8, try expectString(val, "providers[i].cache_ttl"));
         } else {
             std.log.warn("ignoring unknown providers[].{s}", .{k});
         }

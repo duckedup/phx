@@ -113,6 +113,10 @@ fn renderJsonc(
         if (p.context_window) |cw| {
             try buf.print(a, ",\n      \"context_window\": {d}", .{cw});
         }
+        if (p.cache_ttl) |ttl| {
+            try buf.appendSlice(a, ",\n");
+            try writeKeyString(buf, a, "      ", "cache_ttl", ttl);
+        }
         try buf.appendSlice(a, "\n    }");
         if (i + 1 < providers.len) try buf.appendSlice(a, ",");
         try buf.appendSlice(a, "\n");
@@ -159,6 +163,7 @@ fn validateProvider(p: config.ProviderProfile) !void {
     if (p.project) |x| try validateValue(x);
     if (p.location) |x| try validateValue(x);
     if (p.credentials_path) |x| try validateValue(x);
+    if (p.cache_ttl) |x| try validateValue(x);
     if (p.auth) |auth| switch (auth) {
         .env_var => |v| try validateValue(v),
         .inline_value => |v| try validateValue(v),
@@ -299,6 +304,44 @@ test "rejects newline in model" {
         .{ .kind = .claude, .model = "bad\nmodel", .active = true, .auth = .{ .inline_value = "sk-x" } },
     };
     try testing.expectError(error.InvalidString, writeUserConfig(testing.io, allocator, home, &providers));
+}
+
+test "round-trip cache_ttl" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmpHome(allocator, &tmp);
+    defer allocator.free(home);
+    try std.Io.Dir.cwd().createDirPath(testing.io, home);
+
+    const providers = [_]config.ProviderProfile{
+        .{ .kind = .claude, .model = "claude-opus-4-7", .active = true, .auth = .{ .env_var = "ANTHROPIC_API_KEY" }, .cache_ttl = "1h" },
+    };
+    try writeUserConfig(testing.io, allocator, home, &providers);
+
+    var cfg = try config.Config.load(allocator, testing.io, .{ .home = home });
+    defer cfg.deinit();
+    const ap = cfg.activeProvider().?;
+    try testing.expectEqualStrings("1h", ap.cache_ttl.?);
+}
+
+test "round-trip cache_ttl null" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try tmpHome(allocator, &tmp);
+    defer allocator.free(home);
+    try std.Io.Dir.cwd().createDirPath(testing.io, home);
+
+    const providers = [_]config.ProviderProfile{
+        .{ .kind = .claude, .model = "claude-opus-4-7", .active = true, .auth = .{ .env_var = "ANTHROPIC_API_KEY" } },
+    };
+    try writeUserConfig(testing.io, allocator, home, &providers);
+
+    var cfg = try config.Config.load(allocator, testing.io, .{ .home = home });
+    defer cfg.deinit();
+    const ap = cfg.activeProvider().?;
+    try testing.expect(ap.cache_ttl == null);
 }
 
 test "writes multiple providers, only one active" {

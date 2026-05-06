@@ -191,10 +191,10 @@ pub const ActiveSession = struct {
 
     /// Save the most recent provider usage. The server calls this at the end
     /// of each round so `last_input_tokens` drives auto-compaction.
-    pub fn recordUsage(self: *ActiveSession, input_tokens: u32, output_tokens: u32) void {
-        self.last_input_tokens = input_tokens;
-        self.input_tokens +%= input_tokens;
-        self.output_tokens +%= output_tokens;
+    pub fn recordUsage(self: *ActiveSession, usage: core.Usage) void {
+        self.last_input_tokens = usage.input_tokens;
+        self.input_tokens +%= usage.input_tokens;
+        self.output_tokens +%= usage.output_tokens;
     }
 
     /// Persist (if non-empty) and replace the in-memory session with a fresh

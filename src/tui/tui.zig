@@ -23,6 +23,7 @@ const VxEvent = union(enum) {
 const ChatLine = struct {
     role: core.Role,
     text: []const u8,
+    cache_info: ?[]const u8 = null,
 };
 
 /// Fire-growing thinking animation. Cycles through ember → flame → peak. Each
@@ -100,7 +101,10 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8, theme_
 
     var chat_lines: std.ArrayList(ChatLine) = .empty;
     defer {
-        for (chat_lines.items) |line| allocator.free(line.text);
+        for (chat_lines.items) |line| {
+            allocator.free(line.text);
+            if (line.cache_info) |info| allocator.free(info);
+        }
         chat_lines.deinit(allocator);
     }
 
@@ -461,7 +465,10 @@ pub fn run(init: std.process.Init, client: *rpc.Client, home: []const u8, theme_
                                 };
                                 defer ar.response.deinit();
 
-                                for (chat_lines.items) |line| allocator.free(line.text);
+                                for (chat_lines.items) |line| {
+                                    allocator.free(line.text);
+                                    if (line.cache_info) |info| allocator.free(info);
+                                }
                                 chat_lines.clearRetainingCapacity();
                                 scroll_offset = 0;
                                 for (ar.result.messages) |m| {
@@ -1243,6 +1250,17 @@ fn handleSubmit(
                         .{ c.stop_reason, c.input_tokens, c.output_tokens },
                     );
                 try chat_lines.append(allocator, .{ .role = .system, .text = msg });
+            } else if (c.input_tokens > 0) {
+                var cb: [16]u8 = undefined;
+                var tb: [16]u8 = undefined;
+                const cached_str = fmtTokenCount(&cb, c.cache_read_input_tokens);
+                const total_str = fmtTokenCount(&tb, c.input_tokens);
+                const pct = if (c.input_tokens > 0) (c.cache_read_input_tokens * 100) / c.input_tokens else 0;
+                chat_lines.items[asst_idx].cache_info = try std.fmt.allocPrint(
+                    allocator,
+                    "cached {s}/{s} ({d}%)",
+                    .{ cached_str, total_str, pct },
+                );
             }
         },
         .command => |cmd| {
@@ -1260,7 +1278,10 @@ fn handleSubmit(
                     .text = try allocator.dupe(u8, m),
                 }),
                 .cleared, .compacted => |m| {
-                    for (chat_lines.items) |line| allocator.free(line.text);
+                    for (chat_lines.items) |line| {
+                        allocator.free(line.text);
+                        if (line.cache_info) |info| allocator.free(info);
+                    }
                     chat_lines.clearRetainingCapacity();
                     scroll_offset.* = 0;
                     try chat_lines.append(allocator, .{
@@ -2049,6 +2070,49 @@ fn toolLineStyle(text: []const u8, t: *const Theme) vaxis.Style {
     return .{ .fg = .{ .rgb = t.toolDefaultColor() } };
 }
 
+fn fmtTokenCount(buf: []u8, n: u32) []const u8 {
+    if (n >= 1_000_000) {
+        const whole = n / 1_000_000;
+        const frac = (n % 1_000_000) / 100_000;
+        if (frac > 0) {
+            return std.fmt.bufPrint(buf, "{d}.{d}m", .{ whole, frac }) catch "?";
+        }
+        return std.fmt.bufPrint(buf, "{d}m", .{whole}) catch "?";
+    }
+    if (n >= 1_000) {
+        const whole = n / 1_000;
+        const frac = (n % 1_000) / 100;
+        if (frac > 0) {
+            return std.fmt.bufPrint(buf, "{d}.{d}k", .{ whole, frac }) catch "?";
+        }
+        return std.fmt.bufPrint(buf, "{d}k", .{whole}) catch "?";
+    }
+    return std.fmt.bufPrint(buf, "{d}", .{n}) catch "?";
+}
+
+test "fmtTokenCount formats small numbers" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("0", fmtTokenCount(&buf, 0));
+    try std.testing.expectEqualStrings("999", fmtTokenCount(&buf, 999));
+    try std.testing.expectEqualStrings("500", fmtTokenCount(&buf, 500));
+}
+
+test "fmtTokenCount formats thousands" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("1k", fmtTokenCount(&buf, 1000));
+    try std.testing.expectEqualStrings("1.2k", fmtTokenCount(&buf, 1200));
+    try std.testing.expectEqualStrings("5k", fmtTokenCount(&buf, 5000));
+    try std.testing.expectEqualStrings("10.5k", fmtTokenCount(&buf, 10500));
+    try std.testing.expectEqualStrings("999.9k", fmtTokenCount(&buf, 999900));
+}
+
+test "fmtTokenCount formats millions" {
+    var buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("1m", fmtTokenCount(&buf, 1000000));
+    try std.testing.expectEqualStrings("1.5m", fmtTokenCount(&buf, 1500000));
+    try std.testing.expectEqualStrings("2m", fmtTokenCount(&buf, 2000000));
+}
+
 fn bubbleWidth(text_len: usize, win_width: u16) u16 {
     const max_w = @max(20, (win_width * max_bubble_pct) / 100);
     const content_w: u16 = @intCast(@min(text_len + bubble_padding * 2, max_w));
@@ -2122,7 +2186,8 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
         };
         defer wrapped.deinit(allocator);
 
-        row_counts[i] = spacing + 1 + @as(u32, @intCast(wrapped.items.len));
+        const meta_row: u32 = if (line.cache_info != null) 1 else 0;
+        row_counts[i] = spacing + 1 + @as(u32, @intCast(wrapped.items.len)) + meta_row;
         total_rows += row_counts[i];
     }
 
@@ -2288,6 +2353,18 @@ fn drawChat(win: vaxis.Window, lines: []const ChatLine, win_width: u16, scroll_o
             }
             cr += 1;
             if (cr - visible_top >= rows) break;
+        }
+
+        // Cache info line below assistant bubbles
+        if (line.cache_info) |info| {
+            const meta_sy = cr - visible_top;
+            if (meta_sy >= 0 and meta_sy < rows) {
+                const my: u16 = @intCast(meta_sy);
+                const meta_style: vaxis.Style = .{ .fg = .{ .rgb = t.dim() }, .italic = true };
+                const meta_win = win.child(.{ .x_off = 1, .y_off = my, .width = @intCast(@min(info.len, win_width -| 2)), .height = 1 });
+                _ = meta_win.print(&.{.{ .text = info, .style = meta_style }}, .{});
+            }
+            cr += 1;
         }
 
         vrow = msg_end;

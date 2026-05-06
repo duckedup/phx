@@ -95,6 +95,8 @@ pub const ConversationResult = struct {
     stop_reason: []const u8,
     input_tokens: u32,
     output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
     /// Empty when ok=true; the last err event's text when ok=false.
     /// Owned by the response arena.
     reason: []const u8,
@@ -502,6 +504,8 @@ pub const Client = struct {
                 const stop_str: []const u8 = if (stop_v == .string) stop_v.string else "";
                 const in_v = result.get("input_tokens") orelse std.json.Value{ .integer = 0 };
                 const out_v = result.get("output_tokens") orelse std.json.Value{ .integer = 0 };
+                const cache_create_v = result.get("cache_creation_input_tokens") orelse std.json.Value{ .integer = 0 };
+                const cache_read_v = result.get("cache_read_input_tokens") orelse std.json.Value{ .integer = 0 };
                 const reason_v = result.get("reason") orelse std.json.Value{ .string = "" };
                 const reason_str: []const u8 = if (reason_v == .string) reason_v.string else "";
                 return .{
@@ -510,6 +514,8 @@ pub const Client = struct {
                         .stop_reason = try a.dupe(u8, stop_str),
                         .input_tokens = if (in_v == .integer) @intCast(in_v.integer) else 0,
                         .output_tokens = if (out_v == .integer) @intCast(out_v.integer) else 0,
+                        .cache_creation_input_tokens = if (cache_create_v == .integer) @intCast(cache_create_v.integer) else 0,
+                        .cache_read_input_tokens = if (cache_read_v == .integer) @intCast(cache_read_v.integer) else 0,
                         .reason = try a.dupe(u8, reason_str),
                     } },
                     .response = .{ .arena = resp_arena },

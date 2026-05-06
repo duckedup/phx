@@ -6,6 +6,7 @@ const skill_cmd = @import("skill.zig");
 const session_cmd = @import("session_cmd.zig");
 const connect_cmd = @import("connect.zig");
 const theme_cmd = @import("theme.zig");
+const cache_cmd = @import("cache.zig");
 
 /// One model entry shown in the picker. Owned by the Result arena.
 pub const ModelChoice = struct {
@@ -191,6 +192,7 @@ const builtin_table = [_]Registry.Builtin{
     .{ .name = "compact", .summary = "Truncate older history to free context", .handler = session_cmd.handleCompact },
     .{ .name = "resume", .summary = "Resume a saved conversation", .handler = session_cmd.handleResume },
     .{ .name = "theme", .summary = "Change the color theme", .handler = theme_cmd.handle },
+    .{ .name = "cache", .summary = "Set cache TTL (5m or 1h)", .handler = cache_cmd.handle },
 };
 
 pub const DispatchCtx = struct {
@@ -343,6 +345,7 @@ test {
     std.testing.refAllDecls(skill_cmd);
     std.testing.refAllDecls(connect_cmd);
     std.testing.refAllDecls(theme_cmd);
+    std.testing.refAllDecls(cache_cmd);
 }
 
 test "parse: /model" {
@@ -398,4 +401,62 @@ test "dispatch: plain text returns not_a_command" {
     defer outcome.deinit();
 
     try std.testing.expect(outcome.result == .not_a_command);
+}
+
+test "dispatch: /cache with no args shows current ttl" {
+    const allocator = std.testing.allocator;
+    var cfg = try core.Config.load(allocator, std.testing.io, .{ .home = null });
+    defer cfg.deinit();
+
+    var outcome = try dispatch(
+        .{ .io = std.testing.io, .gpa = allocator, .home = null, .config = &cfg },
+        "/cache",
+    );
+    defer outcome.deinit();
+
+    switch (outcome.result) {
+        .message => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "cache TTL: 5m") != null),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "dispatch: /cache with invalid arg returns err" {
+    const allocator = std.testing.allocator;
+    var cfg = try core.Config.load(allocator, std.testing.io, .{ .home = null });
+    defer cfg.deinit();
+
+    var outcome = try dispatch(
+        .{ .io = std.testing.io, .gpa = allocator, .home = null, .config = &cfg },
+        "/cache 2h",
+    );
+    defer outcome.deinit();
+
+    switch (outcome.result) {
+        .err => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "invalid TTL") != null),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "dispatch: /cache rejects non-claude provider" {
+    const allocator = std.testing.allocator;
+    var cfg = try core.Config.load(allocator, std.testing.io, .{ .home = null });
+    defer cfg.deinit();
+
+    // Switch active provider to openai
+    for (cfg.providers) |*p| p.active = false;
+    if (cfg.providers.len > 0) {
+        cfg.providers[0].kind = .openai;
+        cfg.providers[0].active = true;
+    }
+
+    var outcome = try dispatch(
+        .{ .io = std.testing.io, .gpa = allocator, .home = null, .config = &cfg },
+        "/cache 1h",
+    );
+    defer outcome.deinit();
+
+    switch (outcome.result) {
+        .err => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "only supported for claude") != null),
+        else => return error.TestUnexpectedResult,
+    }
 }

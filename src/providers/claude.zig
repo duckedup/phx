@@ -132,6 +132,13 @@ fn buildRequestBody(allocator: std.mem.Allocator, opts: *const SendOptions) ![]u
     try json_util.appendString(&buf, allocator, opts.config.model);
     try buf.appendSlice(allocator, ",\"max_tokens\":4096");
     try buf.appendSlice(allocator, ",\"stream\":true");
+    if (opts.config.cache_ttl) |ttl| {
+        try buf.appendSlice(allocator, ",\"cache_control\":{\"type\":\"ephemeral\",\"ttl\":");
+        try json_util.appendString(&buf, allocator, ttl);
+        try buf.append(allocator, '}');
+    } else {
+        try buf.appendSlice(allocator, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+    }
 
     if (sys_buf.items.len > 0) {
         try buf.appendSlice(allocator, ",\"system\":");
@@ -274,6 +281,8 @@ const ClaudeIterator = struct {
     stop_reason: StopReason,
     input_tokens: u32,
     output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
     ended: bool,
     // Scratch storage: slices valid until next next() call
     scratch: ?[]u8,
@@ -291,6 +300,8 @@ const ClaudeIterator = struct {
             .stop_reason = .other,
             .input_tokens = 0,
             .output_tokens = 0,
+            .cache_creation_input_tokens = 0,
+            .cache_read_input_tokens = 0,
             .ended = false,
             .scratch = null,
             .scratch_tool_id = null,
@@ -380,6 +391,12 @@ fn nextImpl(it: *EventIterator) ?Event {
             defer parsed.deinit();
             if (json_util.dottedLookup(parsed.value, "message.usage.input_tokens")) |v| {
                 if (v == .integer) self.input_tokens = @intCast(v.integer);
+            }
+            if (json_util.dottedLookup(parsed.value, "message.usage.cache_creation_input_tokens")) |v| {
+                if (v == .integer) self.cache_creation_input_tokens = @intCast(v.integer);
+            }
+            if (json_util.dottedLookup(parsed.value, "message.usage.cache_read_input_tokens")) |v| {
+                if (v == .integer) self.cache_read_input_tokens = @intCast(v.integer);
             }
             continue;
         }
@@ -519,8 +536,10 @@ fn nextImpl(it: *EventIterator) ?Event {
             return Event{ .done = .{
                 .stop_reason = self.stop_reason,
                 .usage = .{
-                    .input_tokens = self.input_tokens,
+                    .input_tokens = self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens,
                     .output_tokens = self.output_tokens,
+                    .cache_creation_input_tokens = self.cache_creation_input_tokens,
+                    .cache_read_input_tokens = self.cache_read_input_tokens,
                 },
             } };
         }
@@ -568,8 +587,9 @@ test "claude: builds request body with system + tools" {
 
     const captured = mock.captured.items[0];
     try std.testing.expect(std.mem.endsWith(u8, captured.url, "/v1/messages"));
-    try std.testing.expect(std.mem.indexOf(u8, captured.body, "\"system\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, captured.body, "\"system\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, captured.body, "You are helpful.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, captured.body, "\"cache_control\":{\"type\":\"ephemeral\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, captured.body, "\"stream\":true") != null);
     try std.testing.expectEqualStrings("sk-test", test_util.headerValue(captured.headers, "x-api-key").?);
     try std.testing.expect(test_util.headerValue(captured.headers, "anthropic-version") != null);
@@ -578,7 +598,7 @@ test "claude: builds request body with system + tools" {
 test "claude: text streaming yields token events" {
     const allocator = std.testing.allocator;
     const fixture =
-        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n" ++
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":3}}}\n\n" ++
         "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" ++
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n" ++
         "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n" ++
@@ -617,8 +637,10 @@ test "claude: text streaming yields token events" {
     try std.testing.expectEqual(@as(usize, 2), token_count);
     try std.testing.expect(done_ev != null);
     try std.testing.expectEqual(StopReason.end_turn, done_ev.?.stop_reason);
-    try std.testing.expectEqual(@as(u32, 10), done_ev.?.usage.input_tokens);
+    try std.testing.expectEqual(@as(u32, 18), done_ev.?.usage.input_tokens);
     try std.testing.expectEqual(@as(u32, 7), done_ev.?.usage.output_tokens);
+    try std.testing.expectEqual(@as(u32, 5), done_ev.?.usage.cache_creation_input_tokens);
+    try std.testing.expectEqual(@as(u32, 3), done_ev.?.usage.cache_read_input_tokens);
 }
 
 test "claude: tool_use streaming yields tool_call event" {
@@ -753,6 +775,95 @@ test "claude: missing credential errors" {
         .config = .{ .model = "claude-opus-4-5", .resolved_credential = null },
     });
     try std.testing.expectError(error.MissingCredential, result);
+}
+
+test "claude: cache_control defaults to ephemeral without ttl" {
+    const allocator = std.testing.allocator;
+    const fixture = test_util.minimal_done_sse;
+    const canned = [_]http_client.Canned{.{ .body = fixture }};
+    var mock = MockTransport.init(allocator, &canned);
+    defer mock.deinit();
+
+    var provider = try create(allocator, std.testing.io, .{
+        .model = "claude-opus-4-5",
+        .resolved_credential = "sk-test",
+    }, mock.transport());
+    defer provider.deinit(allocator);
+
+    const messages = [_]Message{.{ .role = .user, .content = "hi" }};
+    var it = try provider.send(allocator, .{
+        .messages = &messages,
+        .config = .{ .model = "claude-opus-4-5", .resolved_credential = "sk-test" },
+    });
+    defer it.deinit();
+    while (it.next()) |_| {}
+
+    const body = mock.captured.items[0].body;
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"cache_control\":{\"type\":\"ephemeral\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"ttl\"") == null);
+}
+
+test "claude: cache_control includes ttl when set" {
+    const allocator = std.testing.allocator;
+    const fixture = test_util.minimal_done_sse;
+    const canned = [_]http_client.Canned{.{ .body = fixture }};
+    var mock = MockTransport.init(allocator, &canned);
+    defer mock.deinit();
+
+    var provider = try create(allocator, std.testing.io, .{
+        .model = "claude-opus-4-5",
+        .resolved_credential = "sk-test",
+    }, mock.transport());
+    defer provider.deinit(allocator);
+
+    const messages = [_]Message{.{ .role = .user, .content = "hi" }};
+    var it = try provider.send(allocator, .{
+        .messages = &messages,
+        .config = .{ .model = "claude-opus-4-5", .resolved_credential = "sk-test", .cache_ttl = "1h" },
+    });
+    defer it.deinit();
+    while (it.next()) |_| {}
+
+    const body = mock.captured.items[0].body;
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"cache_control\":{\"type\":\"ephemeral\",\"ttl\":\"1h\"}") != null);
+}
+
+test "claude: cache tokens zero when not present in response" {
+    const allocator = std.testing.allocator;
+    const fixture =
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":50,\"output_tokens\":0}}}\n\n" ++
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n" ++
+        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+    const canned = [_]http_client.Canned{.{ .body = fixture }};
+    var mock = MockTransport.init(allocator, &canned);
+    defer mock.deinit();
+
+    var provider = try create(allocator, std.testing.io, .{
+        .model = "claude-opus-4-5",
+        .resolved_credential = "sk-test",
+    }, mock.transport());
+    defer provider.deinit(allocator);
+
+    const messages = [_]Message{.{ .role = .user, .content = "hi" }};
+    var it = try provider.send(allocator, .{
+        .messages = &messages,
+        .config = .{ .model = "claude-opus-4-5", .resolved_credential = "sk-test" },
+    });
+    defer it.deinit();
+
+    const events = try test_util.collectEvents(&it, allocator);
+    defer test_util.freeEvents(allocator, events);
+
+    var done_ev: ?core.DoneEvent = null;
+    for (events) |ev| switch (ev) {
+        .done => |d| done_ev = d,
+        else => {},
+    };
+    try std.testing.expect(done_ev != null);
+    try std.testing.expectEqual(@as(u32, 50), done_ev.?.usage.input_tokens);
+    try std.testing.expectEqual(@as(u32, 0), done_ev.?.usage.cache_creation_input_tokens);
+    try std.testing.expectEqual(@as(u32, 0), done_ev.?.usage.cache_read_input_tokens);
 }
 
 test "claude: e2e roundtrip" {

@@ -42,6 +42,8 @@ pub const ToolResultEvent = struct {
 pub const Usage = struct {
     input_tokens: u32 = 0,
     output_tokens: u32 = 0,
+    cache_creation_input_tokens: u32 = 0,
+    cache_read_input_tokens: u32 = 0,
 };
 
 pub const DoneEvent = struct {
@@ -133,6 +135,9 @@ pub const ProviderConfig = struct {
     /// Optional system prompt; some providers take this as a separate field
     /// (Anthropic), others embed it in the messages array (OpenAI).
     system_prompt: ?[]const u8 = null,
+
+    /// Cache TTL for prompt caching (e.g. "5m", "1h"). Provider-specific.
+    cache_ttl: ?[]const u8 = null,
 };
 
 pub const SendOptions = struct {

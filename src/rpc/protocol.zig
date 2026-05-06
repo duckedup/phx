@@ -328,15 +328,16 @@ pub fn writeSendConversationOkBody(
     out: *std.ArrayList(u8),
     a: std.mem.Allocator,
     stop_reason: core.StopReason,
-    input_tokens: u32,
-    output_tokens: u32,
+    usage: core.Usage,
 ) !void {
     try appendValue(out, a, .{
         .kind = "conversation",
         .ok = true,
         .stop_reason = stopReasonName(stop_reason),
-        .input_tokens = input_tokens,
-        .output_tokens = output_tokens,
+        .input_tokens = usage.input_tokens,
+        .output_tokens = usage.output_tokens,
+        .cache_creation_input_tokens = usage.cache_creation_input_tokens,
+        .cache_read_input_tokens = usage.cache_read_input_tokens,
     }, .{});
 }
 
@@ -699,9 +700,9 @@ test "writeSendConversationOkBody shape" {
     const a = std.testing.allocator;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
-    try writeSendConversationOkBody(&out, a, .end_turn, 12, 34);
+    try writeSendConversationOkBody(&out, a, .end_turn, .{ .input_tokens = 12, .output_tokens = 34, .cache_creation_input_tokens = 5, .cache_read_input_tokens = 8 });
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"conversation\",\"ok\":true,\"stop_reason\":\"end_turn\",\"input_tokens\":12,\"output_tokens\":34}",
+        "{\"kind\":\"conversation\",\"ok\":true,\"stop_reason\":\"end_turn\",\"input_tokens\":12,\"output_tokens\":34,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":8}",
         out.items,
     );
 }
@@ -745,4 +746,18 @@ test "writeSendCommandBody with model_picker" {
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"command\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "\"kind\":\"model_picker\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.items, "claude-opus-4-7") != null);
+}
+
+test "writeSendConversationOkBody includes cache fields" {
+    const a = std.testing.allocator;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(a);
+    try writeSendConversationOkBody(&out, a, .end_turn, .{
+        .input_tokens = 100,
+        .output_tokens = 20,
+        .cache_creation_input_tokens = 0,
+        .cache_read_input_tokens = 0,
+    });
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"cache_creation_input_tokens\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "\"cache_read_input_tokens\":0") != null);
 }

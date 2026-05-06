@@ -701,7 +701,7 @@ fn runConversation(
 
         var it = provider.send(gpa, .{
             .messages = session.messages.items,
-            .config = .{ .model = profile.model },
+            .config = .{ .model = profile.model, .cache_ttl = profile.cache_ttl },
             .tools = tool_slice.items,
         }) catch |err| {
             provider_span.setStatusError(@errorName(err));
@@ -791,8 +791,10 @@ fn runConversation(
         // the active session so persistence + auto-compact see fresh numbers.
         usage_total.input_tokens +%= round_usage.input_tokens;
         usage_total.output_tokens +%= round_usage.output_tokens;
+        usage_total.cache_creation_input_tokens +%= round_usage.cache_creation_input_tokens;
+        usage_total.cache_read_input_tokens +%= round_usage.cache_read_input_tokens;
         stop_reason = round_stop;
-        active.recordUsage(round_usage.input_tokens, round_usage.output_tokens);
+        active.recordUsage(round_usage);
 
         provider_span.setAttrs(&[_]core.Attr{
             core.Attr.integer("input_tokens", @intCast(round_usage.input_tokens)),
@@ -925,7 +927,7 @@ fn runConversation(
     if (last_err) |reason| {
         try protocol.writeSendConversationErrBody(&body, gpa, reason);
     } else {
-        try protocol.writeSendConversationOkBody(&body, gpa, stop_reason, usage_total.input_tokens, usage_total.output_tokens);
+        try protocol.writeSendConversationOkBody(&body, gpa, stop_reason, usage_total);
     }
     var resp_line: std.ArrayList(u8) = .empty;
     defer resp_line.deinit(gpa);
