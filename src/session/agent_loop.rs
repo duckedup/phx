@@ -1,8 +1,10 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use tokio::sync::broadcast;
 
 use crate::config::schema::SessionProfile;
+use crate::plugin::hooks::{HookAction, HookDispatcher, HookEvent};
 use crate::providers::traits::{Event, Provider, SendOptions, StopReason, ToolSchema};
 use crate::session::message::{Message, ToolCall, ToolResult};
 use crate::store::session_store::{SessionId, SessionState, SessionStore};
@@ -138,6 +140,19 @@ impl Session {
         store: &SessionStore,
         project: &Path,
         skills: &[crate::session::skills::Skill],
+    ) {
+        self.run_with_hooks(provider, tools, store, project, skills, None)
+            .await;
+    }
+
+    pub async fn run_with_hooks(
+        &mut self,
+        provider: &dyn Provider,
+        tools: &ToolRegistry,
+        store: &SessionStore,
+        project: &Path,
+        skills: &[crate::session::skills::Skill],
+        hooks: Option<Arc<HookDispatcher>>,
     ) {
         use futures::StreamExt;
 
@@ -304,28 +319,63 @@ impl Session {
                     self.persist_message(store, project, &tc_msg).await;
                     self.add_message(tc_msg);
 
-                    let tr = if let Some(tool) = tools.get(&tc.name) {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&tc.args_json).unwrap_or_default();
-                        match tool.invoke(args).await {
-                            Ok(r) => ToolResult {
-                                id: tc.id.clone(),
-                                output: r.output,
-                                is_error: r.is_error,
-                            },
-                            Err(e) => ToolResult {
-                                id: tc.id.clone(),
-                                output: e.to_string(),
-                                is_error: true,
-                            },
-                        }
+                    // Hook: tool_call_start
+                    let hook_action = if let Some(ref h) = hooks {
+                        let data = serde_json::json!({
+                            "name": tc.name,
+                            "args": serde_json::from_str::<serde_json::Value>(&tc.args_json).unwrap_or_default(),
+                            "call_id": tc.id,
+                        });
+                        h.hook(HookEvent::ToolCallStart, data).await
                     } else {
-                        ToolResult {
+                        HookAction::Allow
+                    };
+
+                    let tr = match hook_action {
+                        HookAction::Block { reason } => ToolResult {
                             id: tc.id.clone(),
-                            output: format!("unknown tool: {}", tc.name),
+                            output: format!("blocked by plugin: {reason}"),
                             is_error: true,
+                        },
+                        _ => {
+                            if let Some(tool) = tools.get(&tc.name) {
+                                let args: serde_json::Value =
+                                    serde_json::from_str(&tc.args_json).unwrap_or_default();
+                                match tool.invoke(args).await {
+                                    Ok(r) => ToolResult {
+                                        id: tc.id.clone(),
+                                        output: r.output,
+                                        is_error: r.is_error,
+                                    },
+                                    Err(e) => ToolResult {
+                                        id: tc.id.clone(),
+                                        output: e.to_string(),
+                                        is_error: true,
+                                    },
+                                }
+                            } else {
+                                ToolResult {
+                                    id: tc.id.clone(),
+                                    output: format!("unknown tool: {}", tc.name),
+                                    is_error: true,
+                                }
+                            }
                         }
                     };
+
+                    // Hook: tool_call_end notification
+                    if let Some(ref h) = hooks {
+                        h.notify(
+                            HookEvent::ToolCallEnd,
+                            serde_json::json!({
+                                "call_id": tc.id,
+                                "name": tc.name,
+                                "output": tr.output,
+                                "is_error": tr.is_error,
+                            }),
+                        )
+                        .await;
+                    }
 
                     let _ = self.events_tx.send(SessionEvent::ToolCallEnd {
                         id: tr.id.clone(),

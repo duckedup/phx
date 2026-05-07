@@ -298,6 +298,20 @@ pub struct SkillsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// PluginsConfig
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct PluginsConfig {
+    #[serde(default)]
+    pub dirs: Vec<PathBuf>,
+    #[serde(default)]
+    pub enabled: Vec<String>,
+    #[serde(default)]
+    pub disabled: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Config (top-level)
 // ---------------------------------------------------------------------------
 
@@ -311,6 +325,8 @@ pub struct Config {
     pub store: StoreConfig,
     #[serde(default)]
     pub skills: SkillsConfig,
+    #[serde(default)]
+    pub plugins: PluginsConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// Tracks which files contributed to this config (populated by the loader).
@@ -415,6 +431,9 @@ impl Config {
         }
         if other.skills != SkillsConfig::default() {
             self.skills = other.skills;
+        }
+        if other.plugins != PluginsConfig::default() {
+            self.plugins = other.plugins;
         }
         if other.theme.is_some() {
             self.theme = other.theme;

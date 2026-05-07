@@ -3,6 +3,7 @@
 mod commands;
 mod config;
 mod otel;
+mod plugin;
 mod providers;
 mod rpc;
 mod session;

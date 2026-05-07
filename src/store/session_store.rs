@@ -102,12 +102,17 @@ impl SessionStore {
 
     // -- path helpers -------------------------------------------------------
 
+    fn project_key(project: &Path) -> PathBuf {
+        let stripped = project.strip_prefix("/").unwrap_or(project);
+        PathBuf::from(stripped.to_string_lossy().replace('/', "_"))
+    }
+
     fn project_dir(&self, project: &Path) -> PathBuf {
-        self.root.join(project)
+        self.root.join(Self::project_key(project))
     }
 
     fn session_dir(&self, project: &Path, id: &SessionId) -> PathBuf {
-        self.root.join(project).join(id.as_str())
+        self.root.join(Self::project_key(project)).join(id.as_str())
     }
 
     fn state_path(&self, project: &Path, id: &SessionId) -> PathBuf {
@@ -411,18 +416,13 @@ mod tests {
         store.create(project, &state).await.unwrap();
 
         // Verify directory exists.
-        assert!(
-            tmp.path()
-                .join(project)
-                .join("doomed")
-                .join("state.json")
-                .exists()
-        );
+        let session_path = tmp.path().join(project).join("doomed");
+        assert!(session_path.join("state.json").exists());
 
         store.destroy(project, &state.id).await.unwrap();
 
         // Directory should be gone.
-        assert!(!tmp.path().join(project).join("doomed").exists());
+        assert!(!session_path.exists());
     }
 
     #[tokio::test]
@@ -457,7 +457,7 @@ mod tests {
         // No leftover temp file.
         assert!(
             !tmp.path()
-                .join(project)
+                .join("proj")
                 .join("up")
                 .join(".state.json.tmp")
                 .exists()

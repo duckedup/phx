@@ -8,6 +8,8 @@ use tokio::sync::broadcast;
 
 use crate::commands::dispatcher::ModelChoice;
 use crate::config::schema::Config;
+use crate::plugin::manager::PluginManager;
+use crate::plugin::{HookAction, HookEvent};
 use crate::providers;
 use crate::providers::traits::Provider;
 use crate::session::agent_loop::{Session, SessionEvent};
@@ -73,6 +75,7 @@ pub struct App {
     pub model_choices: Vec<ModelChoice>,
     pub onboarding: Option<onboarding::OnboardingState>,
     pub pending_session_resume: Option<String>,
+    pub plugin_manager: PluginManager,
     command_items: Vec<PickerItem>,
     display_lines: Vec<DisplayLine>,
     chat_area_height: u16,
@@ -143,6 +146,7 @@ impl App {
                 None
             },
             pending_session_resume: None,
+            plugin_manager: PluginManager::new(),
             command_items,
             display_lines: Vec::new(),
             chat_area_height: 0,
@@ -426,7 +430,9 @@ impl App {
             }
         }
 
-        if self.is_running {
+        let is_thinking =
+            self.is_running && tab.streaming_text.is_empty() && tab.stream_buffer.is_empty();
+        if is_thinking {
             let frame_idx = (self.frame_tick / 4) as usize;
             let spin = spinner_frame(frame_idx);
             let thinking_msgs = ["thinking", "thinking.", "thinking..", "thinking..."];
@@ -1733,11 +1739,25 @@ pub async fn run(config: Config, _needs_onboarding: bool) -> anyhow::Result<()> 
 
     let mut app = App::new(config);
 
+    // Initialize plugins
+    let plugin_dirs = crate::plugin::discover_plugin_dirs(
+        Some(&app.project),
+        &crate::config::paths::user_home(),
+        &app.config.plugins.dirs,
+    );
+    if !plugin_dirs.is_empty() {
+        app.plugin_manager
+            .load_and_start(plugin_dirs, &app.project, &mut app.tools)
+            .await;
+    }
+
     let history_file = crate::config::paths::history_file();
     let rx = app.events_tx.subscribe();
     app.tabs.push(Tab::new("default".into(), rx, history_file));
 
     let result = run_loop(&mut app, &mut terminal).await;
+
+    app.plugin_manager.shutdown_all().await;
 
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
@@ -1924,12 +1944,13 @@ fn handle_command(app: &mut App, input: &str) {
         &crate::config::paths::user_home(),
         &app.config.skills.dirs,
     );
-    let result = crate::commands::dispatcher::dispatch(
+    let result = crate::commands::dispatcher::dispatch_with_plugins(
         input,
         &app.config,
         &skills,
         &app.store,
         &app.project,
+        Some(&app.plugin_manager),
     );
 
     match result {
@@ -2119,6 +2140,39 @@ fn handle_command(app: &mut App, input: &str) {
         crate::commands::CommandResult::ConnectWizard => {
             app.onboarding = Some(onboarding::OnboardingState::new());
         }
+        crate::commands::CommandResult::PluginCommand {
+            plugin_command,
+            args,
+        } => {
+            if let Some(handle) = app.plugin_manager.get_command_handler(&plugin_command) {
+                let result =
+                    futures::executor::block_on(handle.execute_command(&plugin_command, &args));
+                match result {
+                    Ok(value) => {
+                        let msg = value
+                            .get("text")
+                            .or_else(|| value.get("message"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| value.to_string());
+                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                            tab.chat_lines.push(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: msg,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                            tab.chat_lines.push(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: format!("Plugin error: {e}"),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         other => {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 tab.chat_lines.push(ChatLine {
@@ -2292,28 +2346,63 @@ async fn send_message(
             system_prompt,
         };
 
-        let stream = match provider.send(opts).await {
-            Ok(s) => s,
-            Err(e) => {
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: format!("Provider error: {e}"),
-                    });
+        // Run provider.send() concurrently with tick so the thinking
+        // animation stays alive during the HTTP round-trip.
+        let mut tick = tokio::time::interval(Duration::from_millis(16));
+        let send_fut = provider.send(opts);
+        futures::pin_mut!(send_fut);
+
+        let mut cancelled = false;
+        let stream = loop {
+            tokio::select! {
+                result = &mut send_fut => {
+                    match result {
+                        Ok(s) => break s,
+                        Err(e) => {
+                            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                                tab.chat_lines.push(ChatLine {
+                                    role: crate::session::message::Role::System,
+                                    content: format!("Provider error: {e}"),
+                                });
+                            }
+                            app.is_running = false;
+                            app.session = Some(session);
+                            return;
+                        }
+                    }
                 }
-                app.is_running = false;
-                app.session = Some(session);
-                return;
+                maybe_term = term_events.next() => {
+                    if let Some(Ok(CEvent::Key(key))) = maybe_term
+                        && key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        cancelled = true;
+                        break futures::stream::empty().boxed();
+                    }
+                }
+                _ = tick.tick() => {
+                    redraw(app, terminal);
+                }
             }
         };
+
+        if cancelled {
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: "Cancelled.".into(),
+                });
+            }
+            app.is_running = false;
+            app.session = Some(session);
+            return;
+        }
 
         futures::pin_mut!(stream);
 
         let mut assistant_text = String::new();
         let mut pending_tool_calls: Vec<crate::session::message::ToolCall> = vec![];
         let mut got_tool_use_stop = false;
-        let mut cancelled = false;
-        let mut tick = tokio::time::interval(Duration::from_millis(16));
 
         loop {
             tokio::select! {
@@ -2362,22 +2451,18 @@ async fn send_message(
                     if let Some(Ok(CEvent::Key(key))) = maybe_term
                         && key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            cancelled = true;
-                            break;
-                        }
+                    {
+                        cancelled = true;
+                        break;
+                    }
                 }
                 _ = tick.tick() => {
-                    // Smooth streaming: drain buffer gradually
-                    let has_buffer = app.tabs.get(app.active_tab)
-                        .map(|t| !t.stream_buffer.is_empty())
-                        .unwrap_or(false);
-                    if has_buffer {
-                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                            drain_stream_buffer(tab);
-                        }
-                        redraw(app, terminal);
+                    if let Some(tab) = app.tabs.get_mut(app.active_tab)
+                        && !tab.stream_buffer.is_empty()
+                    {
+                        drain_stream_buffer(tab);
                     }
+                    redraw(app, terminal);
                 }
             }
         }
@@ -2433,28 +2518,63 @@ async fn send_message(
 
                 redraw(app, terminal);
 
-                let tr = if let Some(tool) = app.tools.get(&tc.name) {
-                    let args: serde_json::Value =
-                        serde_json::from_str(&tc.args_json).unwrap_or_default();
-                    match tool.invoke(args).await {
-                        Ok(r) => crate::session::message::ToolResult {
-                            id: tc.id.clone(),
-                            output: r.output,
-                            is_error: r.is_error,
-                        },
-                        Err(e) => crate::session::message::ToolResult {
-                            id: tc.id.clone(),
-                            output: e.to_string(),
-                            is_error: true,
-                        },
-                    }
-                } else {
-                    crate::session::message::ToolResult {
+                // Hook: tool_call_start
+                let hook_data = serde_json::json!({
+                    "name": tc.name,
+                    "args": serde_json::from_str::<serde_json::Value>(&tc.args_json).unwrap_or_default(),
+                    "call_id": tc.id,
+                });
+                let hook_action = app
+                    .plugin_manager
+                    .hooks
+                    .hook(HookEvent::ToolCallStart, hook_data)
+                    .await;
+
+                let tr = match hook_action {
+                    HookAction::Block { reason } => crate::session::message::ToolResult {
                         id: tc.id.clone(),
-                        output: format!("unknown tool: {}", tc.name),
+                        output: format!("blocked by plugin: {reason}"),
                         is_error: true,
+                    },
+                    _ => {
+                        if let Some(tool) = app.tools.get(&tc.name) {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&tc.args_json).unwrap_or_default();
+                            match tool.invoke(args).await {
+                                Ok(r) => crate::session::message::ToolResult {
+                                    id: tc.id.clone(),
+                                    output: r.output,
+                                    is_error: r.is_error,
+                                },
+                                Err(e) => crate::session::message::ToolResult {
+                                    id: tc.id.clone(),
+                                    output: e.to_string(),
+                                    is_error: true,
+                                },
+                            }
+                        } else {
+                            crate::session::message::ToolResult {
+                                id: tc.id.clone(),
+                                output: format!("unknown tool: {}", tc.name),
+                                is_error: true,
+                            }
+                        }
                     }
                 };
+
+                // Hook: tool_call_end notification
+                app.plugin_manager
+                    .hooks
+                    .notify(
+                        HookEvent::ToolCallEnd,
+                        serde_json::json!({
+                            "call_id": tc.id,
+                            "name": tc.name,
+                            "output": tr.output,
+                            "is_error": tr.is_error,
+                        }),
+                    )
+                    .await;
 
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                     let output = if tr.output.len() > 2000 {
@@ -2502,6 +2622,7 @@ fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::Stdou
         ])
         .split(sz_rect);
     app.chat_area_height = chunks[1].height;
+    app.frame_tick = app.frame_tick.wrapping_add(1);
     app.compute_display_lines(sz.width);
     let _ = terminal.draw(|f| app.render(f));
 }

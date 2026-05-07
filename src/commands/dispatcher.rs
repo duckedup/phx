@@ -1,5 +1,6 @@
 use crate::commands::{connect, model, session_cmd, skill, theme};
 use crate::config::schema::{Config, ProviderProfile};
+use crate::plugin::PluginManager;
 use crate::session::skills::Skill;
 use crate::store::session_store::SessionStore;
 use crate::tui::theme::ThemeEntry;
@@ -36,7 +37,14 @@ pub enum CommandResult {
     ThemePicker(Vec<ThemeEntry>),
     ModelsPage,
     ConnectWizard,
-    InjectContext { name: String, content: String },
+    InjectContext {
+        name: String,
+        content: String,
+    },
+    PluginCommand {
+        plugin_command: String,
+        args: String,
+    },
     ClearSession,
     CompactSession,
     Cleared,
@@ -64,6 +72,17 @@ pub fn dispatch(
     store: &SessionStore,
     project: &Path,
 ) -> CommandResult {
+    dispatch_with_plugins(input, config, skills, store, project, None)
+}
+
+pub fn dispatch_with_plugins(
+    input: &str,
+    config: &Config,
+    skills: &[Skill],
+    store: &SessionStore,
+    project: &Path,
+    plugins: Option<&PluginManager>,
+) -> CommandResult {
     if !is_command(input) {
         return CommandResult::NotACommand;
     }
@@ -80,8 +99,18 @@ pub fn dispatch(
         "sessions" => session_cmd::handle_resume(store, project),
         "clear" => session_cmd::handle_clear(),
         "compact" => session_cmd::handle_compact(),
-        "help" => CommandResult::Message(help_text(skills)),
+        "help" => CommandResult::Message(help_text(skills, plugins)),
         _ => {
+            // Check plugin commands
+            if let Some(pm) = plugins
+                && pm.get_command_handler(name).is_some()
+            {
+                return CommandResult::PluginCommand {
+                    plugin_command: name.to_string(),
+                    args: args.to_string(),
+                };
+            }
+
             if let Some(s) = skills.iter().find(|s| s.name == name) {
                 match crate::session::skills::load_skill_body(s) {
                     Ok(body) => CommandResult::InjectContext {
@@ -98,6 +127,13 @@ pub fn dispatch(
 }
 
 pub fn list_commands(skills: &[Skill]) -> Vec<CommandInfo> {
+    list_commands_with_plugins(skills, None)
+}
+
+pub fn list_commands_with_plugins(
+    skills: &[Skill],
+    plugins: Option<&PluginManager>,
+) -> Vec<CommandInfo> {
     let mut cmds: Vec<CommandInfo> = vec![
         CommandInfo {
             name: "model".into(),
@@ -157,13 +193,26 @@ pub fn list_commands(skills: &[Skill]) -> Vec<CommandInfo> {
             is_skill: true,
         });
     }
+    if let Some(pm) = plugins {
+        for (name, summary) in pm.plugin_commands() {
+            cmds.push(CommandInfo {
+                name: name.to_string(),
+                summary: if summary.is_empty() {
+                    "Plugin command".into()
+                } else {
+                    summary.to_string()
+                },
+                is_skill: false,
+            });
+        }
+    }
     cmds.sort_by(|a, b| a.name.cmp(&b.name));
     cmds
 }
 
-fn help_text(skills: &[Skill]) -> String {
+fn help_text(skills: &[Skill], plugins: Option<&PluginManager>) -> String {
     let mut lines = vec!["Available commands:".to_string()];
-    for cmd in list_commands(skills) {
+    for cmd in list_commands_with_plugins(skills, plugins) {
         lines.push(format!("  /{:<12} {}", cmd.name, cmd.summary));
     }
     lines.join("\n")
