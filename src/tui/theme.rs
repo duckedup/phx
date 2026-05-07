@@ -74,6 +74,26 @@ impl Theme {
         Self::blend(self.info, self.background, 0.55)
     }
 
+    pub fn status_bar_bg(&self) -> Color {
+        Self::blend(self.accent, self.background, 0.55)
+    }
+
+    pub fn status_bar_fg(&self) -> Color {
+        self.foreground
+    }
+
+    pub fn status_bar_dim(&self) -> Color {
+        Self::blend(self.foreground, self.status_bar_bg(), 0.35)
+    }
+
+    pub fn user_msg_bg(&self) -> Color {
+        Self::blend(self.primary, self.background, 0.88)
+    }
+
+    pub fn user_msg_border(&self) -> Color {
+        self.accent
+    }
+
     pub fn blend(a: Color, b: Color, t: f64) -> Color {
         let (ar, ag, ab) = color_rgb(a);
         let (br, bg, bb) = color_rgb(b);
