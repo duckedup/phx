@@ -22,6 +22,8 @@ pub enum SessionEvent {
     Token(String),
     ToolCallStart { id: String, name: String },
     ToolCallEnd { id: String, output: String },
+    ContextLoaded(Vec<String>),
+    ContextCompacted { removed: usize, remaining: usize },
     Done,
     Error(String),
 }
@@ -39,6 +41,7 @@ pub struct Session {
     pub provider_name: String,
     pub model_name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub context_state: crate::session::context::ContextState,
     events_tx: broadcast::Sender<SessionEvent>,
 }
 
@@ -59,6 +62,7 @@ impl Session {
             provider_name: String::new(),
             model_name: String::new(),
             created_at: chrono::Utc::now(),
+            context_state: crate::session::context::ContextState::default(),
             events_tx,
         }
     }
@@ -140,11 +144,52 @@ impl Session {
 
         loop {
             let tool_schemas = self.tool_schemas(tools);
-            let system_prompt = self
+            let base_prompt = self
                 .profile
                 .system_prompt_path
                 .as_ref()
                 .and_then(|p| std::fs::read_to_string(p).ok());
+
+            let home = crate::config::paths::config_dir()
+                .parent()
+                .unwrap_or(std::path::Path::new("/"))
+                .to_path_buf();
+            let ctx = crate::session::context::build_context(
+                &home,
+                project,
+                &self.messages,
+                &mut self.context_state,
+            );
+
+            let system_prompt = base_prompt.map(|base| {
+                if ctx.system_prompt_suffix.is_empty() {
+                    base
+                } else {
+                    format!("{base}\n\n{}", ctx.system_prompt_suffix)
+                }
+            });
+
+            if !ctx.newly_loaded.is_empty() {
+                let _ = self
+                    .events_tx
+                    .send(SessionEvent::ContextLoaded(ctx.newly_loaded));
+            }
+
+            let provider_profile = crate::config::schema::ProviderProfile::default();
+            let limits = crate::session::context::resolve_context_limits(
+                &self.model_name,
+                &provider_profile,
+                &self.profile,
+            );
+            let prompt_ref = system_prompt.as_deref().unwrap_or("");
+            let compaction =
+                crate::session::context::enforce_limits(&mut self.messages, prompt_ref, &limits);
+            if compaction.was_compacted {
+                let _ = self.events_tx.send(SessionEvent::ContextCompacted {
+                    removed: compaction.removed_count,
+                    remaining: compaction.remaining_count,
+                });
+            }
 
             let provider_messages = self
                 .messages

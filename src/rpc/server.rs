@@ -180,6 +180,8 @@ pub async fn run(
                         } => {
                             write_tool_result_line(&mut output, &id_clone, &tid, &out).await?;
                         }
+                        SessionEvent::ContextLoaded(_) => {}
+                        SessionEvent::ContextCompacted { .. } => {}
                         SessionEvent::Done => {}
                         SessionEvent::Error(e) => {
                             write_error_line(&mut output, &id_clone, &e).await?;

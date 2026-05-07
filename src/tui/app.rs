@@ -2072,17 +2072,30 @@ fn handle_command(app: &mut App, input: &str) {
             }
         }
         crate::commands::CommandResult::CompactSession => {
-            if let Some(session) = &app.session {
-                let msg_count = session.messages.len();
-                let tokens = session.token_input + session.token_output;
+            if let Some(session) = &mut app.session {
+                let before = session.messages.len();
+                let force_limits = crate::session::context::ContextLimits {
+                    context_window: 200_000,
+                    max_output: 16_384,
+                    threshold: 0.0,
+                };
+                let result =
+                    crate::session::context::compact_messages(&mut session.messages, &force_limits);
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: format!(
-                            "Session has {msg_count} messages ({} tokens). Compaction not yet implemented.",
-                            format_tokens(tokens)
-                        ),
-                    });
+                    if result.was_compacted {
+                        tab.chat_lines.push(ChatLine {
+                            role: crate::session::message::Role::System,
+                            content: format!(
+                                "Compacted session: removed {} messages ({before} → {})",
+                                result.removed_count, result.remaining_count
+                            ),
+                        });
+                    } else {
+                        tab.chat_lines.push(ChatLine {
+                            role: crate::session::message::Role::System,
+                            content: format!("Session has {before} messages — too few to compact."),
+                        });
+                    }
                 }
             } else if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 tab.chat_lines.push(ChatLine {
@@ -2166,12 +2179,69 @@ async fn send_message(
             })
             .collect();
 
-        let system_prompt = session
+        let base_prompt = session
             .profile
             .system_prompt_path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .or_else(|| Some(default_system_prompt().to_string()));
+
+        // Context injection: rules + AGENTS.md
+        let home = crate::config::paths::config_dir()
+            .parent()
+            .unwrap_or(std::path::Path::new("/"))
+            .to_path_buf();
+        let ctx = crate::session::context::build_context(
+            &home,
+            &app.project,
+            &session.messages,
+            &mut session.context_state,
+        );
+
+        let system_prompt = base_prompt.map(|base| {
+            if ctx.system_prompt_suffix.is_empty() {
+                base
+            } else {
+                format!("{base}\n\n{}", ctx.system_prompt_suffix)
+            }
+        });
+
+        if !ctx.newly_loaded.is_empty() {
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: format!("Context loaded: {}", ctx.newly_loaded.join(", ")),
+                });
+            }
+            redraw(app, terminal);
+        }
+
+        // Auto-compaction: enforce context limits
+        let active_provider_profile = crate::config::loader::active_provider(&app.config)
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default();
+        let limits = crate::session::context::resolve_context_limits(
+            &session.model_name,
+            &active_provider_profile,
+            &session.profile,
+        );
+        let prompt_ref = system_prompt.as_deref().unwrap_or("");
+        let compaction =
+            crate::session::context::enforce_limits(&mut session.messages, prompt_ref, &limits);
+        if compaction.was_compacted {
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: format!(
+                        "Context compacted: removed {} messages ({} remaining) to stay within {} token limit",
+                        compaction.removed_count,
+                        compaction.remaining_count,
+                        limits.context_window,
+                    ),
+                });
+            }
+            redraw(app, terminal);
+        }
 
         let provider_messages: Vec<ProviderMessage> = session
             .messages

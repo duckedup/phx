@@ -65,6 +65,20 @@ impl Tab {
                     });
                 }
             }
+            SessionEvent::ContextLoaded(names) => {
+                self.chat_lines.push(ChatLine {
+                    role: Role::System,
+                    content: format!("Context loaded: {}", names.join(", ")),
+                });
+            }
+            SessionEvent::ContextCompacted { removed, remaining } => {
+                self.chat_lines.push(ChatLine {
+                    role: Role::System,
+                    content: format!(
+                        "Context compacted: removed {removed} messages ({remaining} remaining)"
+                    ),
+                });
+            }
             SessionEvent::Error(e) => {
                 self.chat_lines.push(ChatLine {
                     role: Role::System,

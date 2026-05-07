@@ -3,7 +3,7 @@
 > Status: Draft
 > Last updated: 2026-05-01
 
-Phoenix is a lightweight, fast, minimalistic agent harness written in Zig. It provides a runtime for agents (LLM-driven or otherwise) that is explicitly *not* opinionated about model providers or subagent topology. The harness gives you the loop, the I/O, the shared state, and the extension points — you bring the rest.
+Phoenix is a lightweight, fast, minimalistic agent harness written in Rust. It provides a runtime for agents (LLM-driven or otherwise) that is explicitly *not* opinionated about model providers or subagent topology. The harness gives you the loop, the I/O, the shared state, and the extension points — you bring the rest.
 
 ---
 
@@ -11,7 +11,7 @@ Phoenix is a lightweight, fast, minimalistic agent harness written in Zig. It pr
 
 ### Goals
 
-- **Tiny core.** A single Zig binary with minimal runtime allocation, fast startup, and predictable resource use. The user should not feel the harness — they should feel the agent.
+- **Tiny core.** A single Rust binary with minimal runtime allocation, fast startup, and predictable resource use. The user should not feel the harness — they should feel the agent.
 - **Two deployment shapes from one core.** Terminal UI (interactive) and headless RPC (for tooling/CI).
 - **Vibes-mode by default.** No permission prompts. The user is the operator; if they don't trust the agent, they shouldn't run it. (See §7.)
 - **Total visibility.** The user can see everything every agent is doing, in real time, at every level of the session tree. Observability is the contract that makes vibes mode safe. (See §11.)
@@ -32,57 +32,48 @@ Phoenix is a lightweight, fast, minimalistic agent harness written in Zig. It pr
 ## 2. High-Level Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│                  Frontends                    │
-│                                              │
-│   ┌──────────────┐    ┌──────────────┐       │
-│   │  TUI         │    │  RPC server  │       │
-│   │  (opentui)   │    │  (stdio/uds) │       │
-│   └──────┬───────┘    └──────┬───────┘       │
-│          │                   │               │
-└──────────┼───────────────────┼───────────────┘
-           │                   │
-           └───────┬───────────┘
-                   ▼
-                  ┌─────────────────────────┐
-                  │      Core runtime       │
-                  │                         │
-                  │  ┌───────────────────┐  │
-                  │  │ Session / agent   │  │
-                  │  │ loop              │  │
-                  │  └───────────────────┘  │
-                  │  ┌───────────────────┐  │
-                  │  │ Tool dispatch     │  │
-                  │  └───────────────────┘  │
-                  │  ┌───────────────────┐  │
-                  │  │ Provider adapters │  │
-                  │  └───────────────────┘  │
-                  └────────────┬────────────┘
-                               │
-                  ┌────────────┴────────────┐
-                  │     Shared store        │
-                  │     (todos + state)     │
-                  │     beans / dolt-lite   │
-                  └─────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│                   TUI (ratatui)                  │
+│   Renders terminal UI, handles user input,       │
+│   manages tabs and display                       │
+└──────────────────────┬──────────────────────────┘
+                       │ uses
+                       ▼
+┌─────────────────────────────────────────────────┐
+│              RPC / Core runtime                  │
+│                                                  │
+│   ┌───────────────┐  ┌───────────────────────┐  │
+│   │ RPC server    │  │ Session / agent loop   │  │
+│   │ (stdio/uds)   │  │ (context, compaction)  │  │
+│   └───────────────┘  └───────────────────────┘  │
+│   ┌───────────────┐  ┌───────────────────────┐  │
+│   │ Tool dispatch │  │ Provider adapters      │  │
+│   └───────────────┘  └───────────────────────┘  │
+└──────────────────────┬──────────────────────────┘
+                       │
+          ┌────────────┴────────────┐
+          │     Shared store        │
+          │  (sessions + todos)     │
+          └─────────────────────────┘
 ```
 
-The core runtime is a library (`libphoenix`). Each frontend is a thin shell that owns I/O and renders, but delegates all reasoning, state, and tool work to the core.
+The TUI is a rendering layer on top of the core runtime. The RPC server exposes the same core as a headless JSON-RPC interface. Both share the session loop, tool dispatch, provider adapters, and store.
 
 ---
 
 ## 3. Language, Build, and Tooling
 
-- **Zig** — primary language. We target the latest stable Zig at the time of merge; version is pinned in `.zigversion` and in the `justfile`.
+- **Rust** — primary language. We target stable Rust; edition is pinned in `Cargo.toml`.
 - **just** — the only command surface. Recipes:
-  - `just build` — debug build of all frontends.
-  - `just build-release` — `ReleaseSafe` for distribution.
+  - `just build` — debug build.
+  - `just build-release` — optimized release build for distribution.
   - `just run` — launch the TUI against the local config.
   - `just rpc` — launch the headless RPC server.
-  - `just test` — Zig tests + integration tests.
-  - `just fmt` / `just lint` — `zig fmt` + a tiny custom checker.
+  - `just test` — `cargo test --all-features`.
+  - `just fmt` / `just lint` — `cargo fmt` + `cargo clippy -- -D warnings`.
   - `just bench` — startup time, tool dispatch latency, store throughput.
-  - `just package` — produce stripped static binaries for release.
-- **No package manager beyond `build.zig.zon`.** Vendor anything we can't pull cleanly.
+  - `just package` — produce release binaries.
+- **Cargo** is the package manager. Dependencies are declared in `Cargo.toml`.
 - **No code generation in the hot path.** Schemas (e.g., for tools, RPC) may be codegen'd at build time, but the runtime touches only the generated artifacts.
 
 ---
@@ -91,9 +82,9 @@ The core runtime is a library (`libphoenix`). Each frontend is a thin shell that
 
 Phoenix ships two frontends that both link the same core. They are subcommands of the `phoenix` binary (`phoenix tui`, `phoenix rpc`).
 
-### 4.1 Terminal (TUI) — `opentui`
+### 4.1 Terminal (TUI) — `ratatui`
 
-- Built on **opentui** for rendering. Phoenix owns layout and event routing.
+- Built on **ratatui** + **crossterm** for rendering. Phoenix owns layout and event routing.
 - **Tabs, not panes.** A tab is one session. The user creates tabs explicitly; agents do not. Switching tabs is `Ctrl+Tab` / `Ctrl+Shift+Tab`. A tab can host:
   - A primary agent session.
   - A tool view (e.g., a file diff).
@@ -120,7 +111,7 @@ Phoenix ships two frontends that both link the same core. They are subcommands o
 
 ### 5.1 Session
 
-A **session** is the unit of agent state: message history, tool registry, allocator arena, and a handle to the shared store. Sessions are cheap to create and serialize.
+A **session** is the unit of agent state: message history, tool registry, and a handle to the shared store. Sessions are cheap to create and serialize.
 
 ### 5.1A Session persistence
 
@@ -201,14 +192,14 @@ spawn_session()         check_sessions()        collect_session()
 
 Each child session runs its agent loop on its own OS thread, drawn from a fixed-size pool.
 
-- **Default pool size:** `2 * std.Thread.getCpuCount()`. Child sessions are I/O-bound (waiting on provider API calls), not CPU-bound, so a pool sized to core count would leave threads idle while waiting on network. 2x cores is a reasonable starting default; tune via config based on actual workload.
+- **Default pool size:** `2 * num_cpus`. Child sessions are I/O-bound (waiting on provider API calls), not CPU-bound, so a pool sized to core count would leave threads idle while waiting on network. 2x cores is a reasonable starting default; tune via config based on actual workload.
 - **Configurable:** `[runtime] max_concurrent_sessions = "auto"`. `"auto"` resolves to `2 * available_cores` at startup; an explicit integer overrides it.
 - **Overflow behavior:** if all pool threads are occupied, `spawn_session` queues the child. The orchestrator still gets a `session_id` back immediately; the child transitions from `queued` to `running` when a thread frees up. Queue order is FIFO.
 - **Orchestrator thread:** the orchestrator's own session loop runs on the main thread (TUI) or a dedicated thread (RPC), *not* in the pool. The pool is exclusively for child sessions.
 
 ### 5A.4 Session isolation
 
-Sessions are independent: each has its own allocator arena, message history, tool registry, and provider connection. The shared store (§9) is the only cross-session coordination surface, and it serializes writes internally.
+Sessions are independent: each has its own message history, tool registry, and provider connection. The shared store (§9) is the only cross-session coordination surface, and it serializes writes internally.
 
 A child session:
 - **Can** read and write to the shared store (todos, KV scratch, tool log).
@@ -225,8 +216,8 @@ The dashboard is a table, one row per child session:
 
 ```
  ID       PROFILE   STATUS    TOOL          TOKENS   LAST OUTPUT
- c-01     coder     running   write_file    12.4k    writing src/core/dispatch.zig...
- c-02     coder     running   run_shell     8.1k     $ zig build test
+ c-01     coder     running   write_file    12.4k    writing src/core/dispatch.rs...
+ c-02     coder     running   run_shell     8.1k     $ cargo test
  c-03     coder     done      —             6.2k     ✓ completed (3 files changed)
  c-04     coder     error     —             4.0k     ✗ provider 429 after retries
  c-05     coder     queued    —             0        waiting for thread
@@ -273,12 +264,12 @@ A user on an 8-core machine runs the orchestrator. The model breaks a task into 
 Config is layered, lowest to highest precedence:
 
 1. Built-in defaults (compiled in).
-2. `~/.config/phoenix/config.toml` — user defaults.
-3. `./.phoenix/config.toml` — project-local.
+2. `~/.phoenix/phoenix.json` — user defaults.
+3. `.phoenix/phoenix.json` — project-local.
 4. `--config` CLI flag and env vars.
 5. Per-session overrides at session creation time (via TUI menu or RPC arg).
 
-Format: **TOML**. Reasoning: human-editable, comment-friendly, and unambiguous about strings vs. lists, which JSON5 and YAML both fumble.
+Format: **JSON**.
 
 Sketch:
 
@@ -320,7 +311,7 @@ backend = "beans"          # "beans" | "doltlite" | "memory"
 path = "./.phoenix/store"
 
 [plugins]
-load = []   # dlopen shared objects; see §8.1
+load = []   # dynamic plugins; see §8.1
 ```
 
 Reload semantics: the TUI watches its config file and hot-reloads non-structural changes (prompts, tool lists). Structural changes (provider, store backend) require restart and Phoenix says so explicitly.
@@ -346,56 +337,51 @@ Two extension surfaces, plus a plugin loader for binary-only distribution.
 
 ### 8.1 Tools
 
-A tool is a Zig struct with either a one-shot or streaming invoke function:
+A tool implements the `Tool` trait with an async invoke function:
 
-```zig
-const Tool = struct {
-    name: []const u8,
-    schema: []const u8,           // JSON schema for args
-    invoke: *const fn (ctx: *Ctx, args: Value) anyerror!Value,
-    invoke_stream: ?*const fn (ctx: *Ctx, args: Value) anyerror!ChunkIterator,
-    max_output_bytes: usize,      // truncation cap; default 512 KiB
-};
+```rust
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn schema(&self) -> ToolSchema;
+    async fn invoke(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;
+}
 
-const ChunkIterator = struct {
-    next: *const fn (self: *ChunkIterator) anyerror!?[]const u8,
-};
+pub struct ToolResult {
+    pub output: String,
+    pub is_error: bool,
+}
 ```
 
-Most tools implement `invoke` (one-shot, returns a complete result). Tools that produce large or incremental output — `run_shell` is the primary case — implement `invoke_stream` instead. The session loop consumes the `ChunkIterator`, forwarding chunks to the frontend in real time (TUI renders lines as they arrive; RPC emits `tool_chunk` events). When the tool completes, the accumulated output is committed to the message history.
+Tools return a complete result from `invoke`. The session loop commits the result to the message history and forwards it to the frontend (TUI renders inline; RPC emits tool result events).
 
-**Truncation.** If a tool's output (one-shot or accumulated stream) exceeds `max_output_bytes`, Phoenix truncates it and appends a `[truncated at 512 KiB]` marker. The full output is still available in the tool log for audit, but the truncated version is what enters the conversation history and counts against the context budget. This prevents a single `find /` or verbose build log from consuming the entire context window.
+**Truncation.** If a tool's output exceeds `max_output_bytes` (default 512 KiB), Phoenix truncates it and appends a `[truncated]` marker. The truncated version is what enters the conversation history and counts against the context budget. This prevents a single `find /` or verbose build log from consuming the entire context window.
 
-Tools are registered at session start. Built-in tools live in `src/tools/`.
-
-**Third-party tools are primarily build-time Zig modules.** The intended extension path is: write a Zig file that exports a `Tool`, add it as a dependency in `build.zig.zon`, and list it in the build configuration. This preserves Zig's strengths — comptime validation, error sets, tagged unions, static analysis — across the extension boundary. There is no C ABI to maintain, no vtable to version, and the tool is compiled and optimized alongside the core.
-
-**`dlopen` is the escape hatch, not the primary path.** For cases where source isn't available (proprietary tools, binary-only distribution), Phoenix supports loading shared objects at runtime from `[plugins].load`. Plugins loaded this way cross a C-ABI boundary: they use a C-compatible vtable, cannot use Zig-specific types in the interface, and are unsandboxed. This is a deliberate trade-off for the small number of tools that genuinely need binary distribution.
+Tools are registered at session start. Built-in tools live in `src/tools/`. Custom tools implement the `Tool` trait and are registered in the tool registry at build time.
 
 ### 8.2 Providers
 
-A **provider** turns a session's message list into a stream of events (tokens, tool calls, completions). Providers implement an adapter interface and live in `src/providers/`.
+A **provider** turns a session's message list into a stream of events (tokens, tool calls, completions). Providers implement the `Provider` trait and live in `src/providers/`.
 
-```zig
-const Provider = struct {
-    send: *const fn (
-        messages: []const Message,
-        tools: []const Tool,
-        config: ProviderConfig,
-    ) anyerror!EventIterator,
-};
+```rust
+#[async_trait]
+pub trait Provider: Send + Sync {
+    async fn send(&self, opts: SendOptions)
+        -> anyhow::Result<Pin<Box<dyn Stream<Item = Event> + Send>>>;
+}
 ```
 
-The adapter takes the conversation history and tool schemas, makes the provider-specific API call, and returns an iterator that yields Phoenix's internal event types (`token`, `tool_call`, `tool_result`, `done`, `error`). The session loop consumes this iterator and stays provider-agnostic.
+The adapter takes the conversation history and tool schemas, makes the provider-specific API call, and returns an async stream that yields Phoenix's internal event types (`Token`, `ToolCall`, `Done`, `Error`). The session loop consumes this stream and stays provider-agnostic.
 
 Day-one providers (shipped in core):
 
 - **`claude`** — Anthropic Messages API. Native tool-use schema; primary target for the Opus / Sonnet / Haiku 4.x family. Streaming over SSE.
-- **`openai`** — OpenAI Chat Completions / Responses API. Used for GPT-class models and any OpenAI-compatible endpoint that follows the same wire format (so self-hosted gateways, Azure OpenAI, etc., flow through this adapter with a base-URL override).
-- **`ollama`** — Ollama REST API. For locally-hosted models managed by Ollama. Streaming over its native JSON stream. Ollama's API is OpenAI-compatible in many cases, but a dedicated adapter handles its model management endpoints (`/api/tags`, `/api/pull`) and its specific streaming format without relying on compatibility shims.
-- **`llamacpp`** — Direct HTTP interface to a llama.cpp server (`--server` mode). For users running raw llama.cpp without Ollama's management layer. Supports its native completion and chat endpoints with grammar-constrained generation for tool-use schemas.
+- **`openai`** — OpenAI Chat Completions API. Used for GPT-class models and any OpenAI-compatible endpoint (self-hosted gateways, Azure OpenAI, etc., via base-URL override).
+- **`ollama`** — Ollama REST API. For locally-hosted models managed by Ollama. Streaming over its native JSON stream.
+- **`gemini`** — Google Gemini API. Direct integration for Gemini 2.x models.
+- **`vertex`** — Google Vertex AI. For Gemini models accessed through GCP.
+- **`nvidia`** — Nvidia NIM API. For models hosted on Nvidia's inference platform (Llama, Nemotron, DeepSeek, Qwen).
 
-Other providers (Bedrock, Vertex, etc.) are build-time Zig modules following the same `Provider` interface.
+Other providers implement the same `Provider` trait.
 
 ### 8.3 Opencode bridge — a tool, not a provider
 
@@ -468,17 +454,7 @@ Compaction is **visible to the user**. The TUI displays "compacted 43 turns into
 
 The compaction *strategy* is pluggable. The core defines the interface; implementations decide what to keep and how to summarize.
 
-```zig
-const Compactor = struct {
-    compact: *const fn (
-        system_prompt: []const Message,
-        history: []const Message,
-        budget_tokens: usize,
-    ) anyerror![]const Message,
-};
-```
-
-The compactor receives the evictable history and a token budget for its output. It returns a replacement message sequence that fits within that budget. The core handles everything else — threshold detection, partitioning, splicing, logging.
+The compaction strategy is implemented in the context manager (`src/session/context.rs`). The `compact_messages` function receives the message history and context limits, partitions into head/middle/tail, and returns a compacted result. The core handles threshold detection, partitioning, splicing, and logging.
 
 ### 10.3 Built-in compactor
 
@@ -488,7 +464,7 @@ One compactor ships in core:
 
 ### 10.4 Extension compactors (not in core)
 
-The `Compactor` interface is the extension point for more sophisticated strategies. Custom compactors are registered the same way as custom tools — as Zig modules at build time, or via `dlopen` plugins at runtime.
+The compaction interface is the extension point for more sophisticated strategies.
 
 ### 10.5 Pinning
 
@@ -547,12 +523,12 @@ Every tool invocation in the tool log carries a `session_id` and a `parent_sessi
 ```
 orchestrator (s-00)  [42.1k tokens, 3m12s]
 ├── c-01 coder       [12.4k tokens, 1m45s]  ✓ done
-│   ├── read_file src/core/session.zig       [0.2s]
-│   ├── write_file src/core/session.zig      [0.1s]
-│   └── run_shell zig build test             [8.3s]
+│   ├── read_file src/session/agent_loop.rs   [0.2s]
+│   ├── write_file src/session/agent_loop.rs  [0.1s]
+│   └── run_shell cargo test                 [8.3s]
 ├── c-02 coder       [8.1k tokens, 2m01s]   ✓ done
-│   ├── read_file src/tools/search.zig       [0.1s]
-│   └── run_shell zig build test             [12.1s]
+│   ├── read_file src/tools/read.rs          [0.1s]
+│   └── run_shell cargo test                 [12.1s]
 ├── c-03 coder       [6.2k tokens, 0m58s]   ✓ done
 ├── c-04 coder       [4.0k tokens, 0m32s]   ✗ error: provider 429
 └── c-05 coder       [0 tokens, 0m00s]       cancelled (never started)
@@ -597,7 +573,7 @@ request_timeout_ms = 120000
 
 - **Timeout.** Every tool invocation has a deadline. Default: 120s for `run_shell`, 30s for all others, configurable per-tool. On timeout, the running process is killed (SIGTERM, then SIGKILL after 5s). The model receives a tool error with the partial output captured so far: "Tool timed out after 120s. Partial output: [...]".
 - **Crash / non-zero exit.** Return stderr + exit code to the model as a tool error. Models are generally good at interpreting these and adjusting.
-- **Built-in tool hang.** If a non-shell tool (e.g., a store operation or provider call inside an orchestration tool) blocks past its deadline, the session loop cancels it via the allocator arena — deallocating the arena invalidates all the tool's in-flight memory. This is Zig's advantage: arena-scoped cleanup is reliable and total.
+- **Built-in tool hang.** If a non-shell tool (e.g., a store operation or provider call inside an orchestration tool) blocks past its deadline, the session loop cancels it via Tokio's cancellation — dropping the task future cleans up all in-flight state.
 
 ```toml
 [tools.run_shell]
@@ -643,36 +619,32 @@ phoenix/
 ├── DESIGN.md              # this file
 ├── README.md
 ├── justfile
-├── build.zig
-├── build.zig.zon
-├── .zigversion
+├── Cargo.toml
 ├── src/
-│   ├── core/              # session loop, dispatch
-│   ├── providers/         # claude, openai, ollama, llamacpp
-│   ├── tools/             # built-in tools
-│   ├── store/             # beans backend, store interface
-│   ├── tui/               # opentui frontend
-│   ├── rpc/               # RPC server + client
-│   └── main.zig           # subcommand dispatch (tui | rpc)
-├── plugins/               # example plugins
-├── tests/
-│   ├── unit/
-│   └── integration/
-└── docs/
-    ├── config.md
-    └── extending.md
+│   ├── main.rs            # subcommand dispatch (tui | rpc)
+│   ├── lib.rs             # library exports
+│   ├── config/            # configuration loading, schema, paths
+│   ├── session/           # session loop, context, orchestration
+│   ├── providers/         # claude, openai, ollama, gemini, vertex, nvidia
+│   ├── tools/             # built-in tools (bash, read, write, edit)
+│   ├── store/             # session persistence, todo store
+│   ├── tui/               # ratatui frontend
+│   ├── rpc/               # RPC server (stdin/stdout JSON-RPC)
+│   ├── otel/              # OpenTelemetry tracing
+│   └── commands/          # slash command dispatch
+└── .forgejo/
+    └── workflows/ci.yml   # CI pipeline
 ```
 
 ---
 
 ## 15. Roadmap (rough)
 
-- **M0 — Skeleton.** `build.zig`, `justfile`, hello-world TUI, hello-world RPC, store interface stub, `claude` provider, two tools (`read_file`, `run_shell`).
-- **M0.5 — Provider parity.** Add `openai`, `ollama`, and `llamacpp` provider adapters; share the event-normalization layer; integration tests against a recorded fixture per provider.
-- **M1 — Sessions & loop.** Real session loop, tool dispatch, audit log to Beans, cancel semantics, token accounting, compaction with `truncate` and `summarize` compactors, session persistence and resume, token budgets, streaming tool output.
-- **M2 — Tabs & orchestration.** TUI tabs; orchestration tools (`spawn_session`, `check_sessions`, `collect_session`, `cancel_session`); thread pool (`2 * getCpuCount()` default); multi-session shared store.
-- **M3 — Plugin loader.** `dlopen` path for binary-only tool distribution.
-- **M4 — Polish.** Config hot-reload, `phoenix trace`, benchmarks, packaging.
+- **M0 — Skeleton.** `Cargo.toml`, `justfile`, hello-world TUI, hello-world RPC, store interface stub, `claude` provider, two tools (`read`, `bash`).
+- **M0.5 — Provider parity.** Add `openai`, `ollama`, `gemini`, `vertex`, and `nvidia` provider adapters; share the event-normalization layer; integration tests per provider.
+- **M1 — Sessions & loop.** Real session loop, tool dispatch, cancel semantics, token accounting, context manager (rules, AGENTS.md, compaction), session persistence and resume, token budgets, streaming tool output.
+- **M2 — Tabs & orchestration.** TUI tabs; orchestration tools (`spawn_session`, `check_sessions`, `collect_session`, `cancel_session`); Tokio task pool; multi-session shared store.
+- **M3 — Polish.** Config hot-reload, `phoenix trace`, benchmarks, packaging.
 
 Each milestone ends with: `just test` green, `just bench` recorded, docs updated.
 

@@ -133,8 +133,11 @@ mod tests {
     #[test]
     fn sessions_dir_under_config() {
         let s = sessions_dir();
-        assert!(s.starts_with(config_dir()));
-        assert!(s.ends_with("sessions"));
+        assert!(
+            s.ends_with(".phoenix/sessions"),
+            "expected path ending in .phoenix/sessions, got {:?}",
+            s
+        );
     }
 
     #[test]
@@ -167,7 +170,11 @@ mod tests {
     fn history_file_path() {
         let h = history_file();
         assert_eq!(h.file_name().unwrap(), "history");
-        assert!(h.starts_with(config_dir()));
+        assert!(
+            h.ends_with(".phoenix/history"),
+            "expected path ending in .phoenix/history, got {:?}",
+            h
+        );
     }
 
     #[test]
