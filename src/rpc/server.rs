@@ -51,9 +51,9 @@ pub async fn run(
 
             COMMAND_LIST => {
                 let skills = crate::session::skills::discover_layered(
-                    &crate::config::paths::config_dir(),
-                    None,
-                    None,
+                    Some(&project),
+                    &crate::config::paths::user_home(),
+                    &config.skills.dirs,
                 );
                 let cmds = dispatcher::list_commands(&skills);
                 let result: Vec<serde_json::Value> = cmds
@@ -76,9 +76,9 @@ pub async fn run(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let skills = crate::session::skills::discover_layered(
-                    &crate::config::paths::config_dir(),
-                    None,
-                    None,
+                    Some(&project),
+                    &crate::config::paths::user_home(),
+                    &config.skills.dirs,
                 );
                 let result = dispatcher::dispatch(input_text, &config, &skills, &store, &project);
                 let result_json = match result {
@@ -111,8 +111,8 @@ pub async fn run(
                             .collect();
                         serde_json::json!({"type": "theme_picker", "items": items})
                     }
-                    dispatcher::CommandResult::InjectContext(ctx) => {
-                        serde_json::json!({"type": "inject_context", "text": ctx})
+                    dispatcher::CommandResult::InjectContext { name, content } => {
+                        serde_json::json!({"type": "inject_context", "name": name, "text": content})
                     }
                     dispatcher::CommandResult::ClearSession => {
                         serde_json::json!({"type": "clear_session"})
@@ -163,7 +163,13 @@ pub async fn run(
                 let mut rx = sess.subscribe();
                 let id_clone = id.clone();
 
-                sess.run(&*provider, &tool_registry, &store, &project).await;
+                let skills = crate::session::skills::discover_layered(
+                    Some(&project),
+                    &crate::config::paths::user_home(),
+                    &config.skills.dirs,
+                );
+                sess.run(&*provider, &tool_registry, &store, &project, &skills)
+                    .await;
 
                 // Drain events that were broadcast during run
                 while let Ok(event) = rx.try_recv() {

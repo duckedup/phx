@@ -60,6 +60,7 @@ pub struct CompactionResult {
 pub struct ContextState {
     loaded_rules: HashSet<PathBuf>,
     loaded_agents: HashSet<PathBuf>,
+    pub activated_skills: HashSet<String>,
     cached_rules: Option<Vec<Rule>>,
     cached_agents: Option<Vec<AgentContext>>,
     touched_files: HashSet<PathBuf>,
@@ -402,6 +403,7 @@ pub fn build_context(
     project: &Path,
     messages: &[Message],
     state: &mut ContextState,
+    skills: &[crate::session::skills::Skill],
 ) -> ContextResult {
     if state.cached_rules.is_none() {
         state.cached_rules = Some(discover_rules(home, project));
@@ -418,7 +420,17 @@ pub fn build_context(
     let agents = state.cached_agents.clone().unwrap_or_default();
     let touched = state.touched_files.clone();
 
-    compute_context(&rules, &agents, &touched, project, state)
+    let mut result = compute_context(&rules, &agents, &touched, project, state);
+
+    let catalog = crate::session::skills::build_skill_catalog(skills);
+    if !catalog.is_empty() {
+        if !result.system_prompt_suffix.is_empty() {
+            result.system_prompt_suffix.push_str("\n\n");
+        }
+        result.system_prompt_suffix.push_str(&catalog);
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -550,10 +562,18 @@ pub fn compact_messages(messages: &mut Vec<Message>, limits: &ContextLimits) -> 
         };
     }
 
-    let removed_count = preserve_tail_start - preserve_head;
+    let protected: Vec<&Message> = messages[preserve_head..preserve_tail_start]
+        .iter()
+        .filter(|m| m.content.contains("<skill_content"))
+        .collect();
+
+    let removed_count = (preserve_tail_start - preserve_head) - protected.len();
 
     let mut compacted = Vec::with_capacity(messages.len() - removed_count + 1);
     compacted.extend_from_slice(&messages[..preserve_head]);
+    for msg in &protected {
+        compacted.push((*msg).clone());
+    }
     compacted.push(Message::system(format!(
         "[Earlier conversation compacted — {removed_count} messages removed to stay within context limits]"
     )));

@@ -103,17 +103,17 @@ impl App {
             );
 
         let skills = crate::session::skills::discover_layered(
-            &crate::config::paths::config_dir(),
-            None,
-            None,
+            Some(&project),
+            &crate::config::paths::user_home(),
+            &config.skills.dirs,
         );
         let command_list = crate::commands::dispatcher::list_commands(&skills);
         let command_items: Vec<PickerItem> = command_list
             .iter()
             .map(|cmd| PickerItem {
-                id: cmd.name.to_string(),
-                label: cmd.name.to_string(),
-                description: cmd.summary.to_string(),
+                id: cmd.name.clone(),
+                label: cmd.name.clone(),
+                description: cmd.summary.clone(),
             })
             .collect();
 
@@ -1919,8 +1919,11 @@ async fn resume_session(app: &mut App, session_id: &str) {
 }
 
 fn handle_command(app: &mut App, input: &str) {
-    let skills =
-        crate::session::skills::discover_layered(&crate::config::paths::config_dir(), None, None);
+    let skills = crate::session::skills::discover_layered(
+        Some(&app.project),
+        &crate::config::paths::user_home(),
+        &app.config.skills.dirs,
+    );
     let result = crate::commands::dispatcher::dispatch(
         input,
         &app.config,
@@ -1957,7 +1960,7 @@ fn handle_command(app: &mut App, input: &str) {
                 });
             }
         }
-        crate::commands::CommandResult::InjectContext(ctx) => {
+        crate::commands::CommandResult::InjectContext { name, content } => {
             if app.session.is_none() {
                 app.session = Some(Session::new(
                     SessionId::new(),
@@ -1965,18 +1968,27 @@ fn handle_command(app: &mut App, input: &str) {
                 ));
             }
             if let Some(session) = &mut app.session {
-                session.add_message(Message::system(&ctx));
-            }
-            let preview = if ctx.len() > 80 {
-                format!("{}...", &ctx[..77])
-            } else {
-                ctx.clone()
-            };
-            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: format!("Skill loaded: {preview}"),
-                });
+                if !session.context_state.activated_skills.insert(name.clone()) {
+                    if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                        tab.chat_lines.push(ChatLine {
+                            role: crate::session::message::Role::System,
+                            content: format!("Skill '{name}' already loaded in this session."),
+                        });
+                    }
+                } else {
+                    session.add_message(Message::system(&content));
+                    let preview = if content.len() > 80 {
+                        format!("{}...", &content[..77])
+                    } else {
+                        content.clone()
+                    };
+                    if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                        tab.chat_lines.push(ChatLine {
+                            role: crate::session::message::Role::System,
+                            content: format!("Skill loaded: {preview}"),
+                        });
+                    }
+                }
             }
         }
         crate::commands::CommandResult::ThemePicker(themes) => {
@@ -2186,16 +2198,22 @@ async fn send_message(
             .and_then(|p| std::fs::read_to_string(p).ok())
             .or_else(|| Some(default_system_prompt().to_string()));
 
-        // Context injection: rules + AGENTS.md
+        // Context injection: rules + AGENTS.md + skills catalog
         let home = crate::config::paths::config_dir()
             .parent()
             .unwrap_or(std::path::Path::new("/"))
             .to_path_buf();
+        let skills = crate::session::skills::discover_layered(
+            Some(&app.project),
+            &crate::config::paths::user_home(),
+            &app.config.skills.dirs,
+        );
         let ctx = crate::session::context::build_context(
             &home,
             &app.project,
             &session.messages,
             &mut session.context_state,
+            &skills,
         );
 
         let system_prompt = base_prompt.map(|base| {

@@ -137,6 +137,7 @@ impl Session {
         tools: &ToolRegistry,
         store: &SessionStore,
         project: &Path,
+        skills: &[crate::session::skills::Skill],
     ) {
         use futures::StreamExt;
 
@@ -159,6 +160,7 @@ impl Session {
                 project,
                 &self.messages,
                 &mut self.context_state,
+                skills,
             );
 
             let system_prompt = base_prompt.map(|base| {
@@ -382,7 +384,13 @@ mod tests {
         let mut session = Session::new(SessionId::new(), profile);
         session.add_message(Message::user("Hi"));
         session
-            .run(&provider, &tools, &store, std::path::Path::new("/test"))
+            .run(
+                &provider,
+                &tools,
+                &store,
+                std::path::Path::new("/test"),
+                &[],
+            )
             .await;
 
         assert_eq!(session.state, SessionStatus::Done);
@@ -400,7 +408,13 @@ mod tests {
         let mut session = Session::new(SessionId::new(), SessionProfile::default());
         session.add_message(Message::user("Hi"));
         session
-            .run(&provider, &tools, &store, std::path::Path::new("/test"))
+            .run(
+                &provider,
+                &tools,
+                &store,
+                std::path::Path::new("/test"),
+                &[],
+            )
             .await;
 
         matches!(session.state, SessionStatus::Error(_));

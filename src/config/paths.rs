@@ -18,6 +18,11 @@ pub fn clear_home_override() {
     *HOME_OVERRIDE.lock().unwrap() = None;
 }
 
+/// Returns the user home directory (`~`).
+pub fn user_home() -> PathBuf {
+    home_dir()
+}
+
 /// Returns the Phoenix home directory: `~/.phoenix`.
 ///
 /// Uses `dirs::home_dir()` to locate the user home, or the test override if

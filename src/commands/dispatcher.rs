@@ -22,8 +22,8 @@ pub struct SessionChoice {
 
 #[derive(Debug, Clone)]
 pub struct CommandInfo {
-    pub name: &'static str,
-    pub summary: &'static str,
+    pub name: String,
+    pub summary: String,
     pub is_skill: bool,
 }
 
@@ -36,7 +36,7 @@ pub enum CommandResult {
     ThemePicker(Vec<ThemeEntry>),
     ModelsPage,
     ConnectWizard,
-    InjectContext(String),
+    InjectContext { name: String, content: String },
     ClearSession,
     CompactSession,
     Cleared,
@@ -83,8 +83,11 @@ pub fn dispatch(
         "help" => CommandResult::Message(help_text(skills)),
         _ => {
             if let Some(s) = skills.iter().find(|s| s.name == name) {
-                match crate::session::skills::load_skill_prompt(s) {
-                    Ok(prompt) => CommandResult::InjectContext(prompt),
+                match crate::session::skills::load_skill_body(s) {
+                    Ok(body) => CommandResult::InjectContext {
+                        name: s.name.clone(),
+                        content: body,
+                    },
                     Err(e) => CommandResult::Error(format!("failed to load skill: {e}")),
                 }
             } else {
@@ -97,59 +100,64 @@ pub fn dispatch(
 pub fn list_commands(skills: &[Skill]) -> Vec<CommandInfo> {
     let mut cmds: Vec<CommandInfo> = vec![
         CommandInfo {
-            name: "model",
-            summary: "Switch model or provider",
+            name: "model".into(),
+            summary: "Switch model or provider".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "models",
-            summary: "Open model management page",
+            name: "models".into(),
+            summary: "Open model management page".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "theme",
-            summary: "Switch color theme",
+            name: "theme".into(),
+            summary: "Switch color theme".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "connect",
-            summary: "Connect a new provider",
+            name: "connect".into(),
+            summary: "Connect a new provider".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "resume",
-            summary: "Resume a previous session",
+            name: "resume".into(),
+            summary: "Resume a previous session".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "sessions",
-            summary: "List and resume sessions",
+            name: "sessions".into(),
+            summary: "List and resume sessions".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "clear",
-            summary: "Clear current session",
+            name: "clear".into(),
+            summary: "Clear current session".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "compact",
-            summary: "Compact session context",
+            name: "compact".into(),
+            summary: "Compact session context".into(),
             is_skill: false,
         },
         CommandInfo {
-            name: "help",
-            summary: "Show available commands",
+            name: "help".into(),
+            summary: "Show available commands".into(),
             is_skill: false,
         },
     ];
     for s in skills {
+        let summary = if s.description.is_empty() {
+            "Skill".into()
+        } else {
+            s.description.clone()
+        };
         cmds.push(CommandInfo {
-            name: Box::leak(s.name.clone().into_boxed_str()),
-            summary: "Skill",
+            name: s.name.clone(),
+            summary,
             is_skill: true,
         });
     }
-    cmds.sort_by(|a, b| a.name.cmp(b.name));
+    cmds.sort_by(|a, b| a.name.cmp(&b.name));
     cmds
 }
 
