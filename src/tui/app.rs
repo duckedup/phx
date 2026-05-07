@@ -416,12 +416,37 @@ impl App {
             input_box::render_input(frame, chunks[1], &empty, &self.theme);
         }
 
-        let status_state = status_bar::StatusState {
-            tokens: self.session.as_ref().map(|s| status_bar::SessionTokens {
+        let (session_tokens, session_cost, session_context) = if let Some(ref s) = self.session {
+            let tokens = status_bar::SessionTokens {
                 input: s.token_input,
                 output: s.token_output,
                 cache_read: s.cache_read_tokens,
-            }),
+            };
+            let cost = crate::providers::model_info::cost_for_model(
+                &s.model_name,
+                s.token_input,
+                s.token_output,
+                s.cache_read_tokens,
+                s.cache_creation_tokens,
+            );
+            let context = if s.last_turn_input > 0 {
+                crate::providers::model_info::context_window_for_model(&s.model_name).map(|cap| {
+                    status_bar::ContextUsage {
+                        used: s.last_turn_input,
+                        capacity: cap,
+                    }
+                })
+            } else {
+                None
+            };
+            (Some(tokens), cost, context)
+        } else {
+            (None, None, None)
+        };
+        let status_state = status_bar::StatusState {
+            tokens: session_tokens,
+            cost: session_cost,
+            context: session_context,
             is_running: self.is_running,
             provider_info: &provider_info,
             frame_tick: self.frame_tick,

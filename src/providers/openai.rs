@@ -144,6 +144,7 @@ fn parse_openai_sse(resp: reqwest::Response) -> EventStream {
         let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
+        let mut cache_read_tokens: u64 = 0;
         let mut stop_reason = StopReason::EndTurn;
 
         while let Some(chunk) = bytes_stream.next().await {
@@ -176,7 +177,7 @@ fn parse_openai_sse(resp: reqwest::Response) -> EventStream {
                     }
                     yield Event::Done {
                         stop_reason: stop_reason.clone(),
-                        usage: Usage { input_tokens, output_tokens, ..Default::default() },
+                        usage: Usage { input_tokens, output_tokens, cache_creation_tokens: 0, cache_read_tokens },
                     };
                     return;
                 }
@@ -186,6 +187,9 @@ fn parse_openai_sse(resp: reqwest::Response) -> EventStream {
                 if let Some(usage) = json.get("usage") {
                     input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(input_tokens);
                     output_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(output_tokens);
+                    if let Some(details) = usage.get("prompt_tokens_details") {
+                        cache_read_tokens = details.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    }
                 }
 
                 let Some(choices) = json.get("choices").and_then(|c| c.as_array()) else { continue };

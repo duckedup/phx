@@ -10,11 +10,40 @@ pub struct SessionTokens {
     pub cache_read: u64,
 }
 
+pub struct ContextUsage {
+    pub used: u64,
+    pub capacity: u32,
+}
+
 pub struct StatusState<'a> {
     pub tokens: Option<SessionTokens>,
+    pub cost: Option<f64>,
+    pub context: Option<ContextUsage>,
     pub is_running: bool,
     pub provider_info: &'a str,
     pub frame_tick: u64,
+}
+
+fn format_cost(cost: f64) -> String {
+    if cost < 0.01 {
+        format!("${:.4}", cost)
+    } else {
+        format!("${:.2}", cost)
+    }
+}
+
+fn format_context(ctx: &ContextUsage) -> String {
+    let pct = if ctx.capacity > 0 {
+        (ctx.used as f64 / ctx.capacity as f64 * 100.0) as u32
+    } else {
+        0
+    };
+    format!(
+        "{}% ({}/{})",
+        pct,
+        format_tokens(ctx.used),
+        format_tokens(ctx.capacity as u64)
+    )
 }
 
 pub fn render_status(frame: &mut Frame, area: Rect, state: &StatusState<'_>, theme: &Theme) {
@@ -32,11 +61,17 @@ pub fn render_status(frame: &mut Frame, area: Rect, state: &StatusState<'_>, the
 
     let mut right_parts: Vec<String> = Vec::new();
     if let Some(ref t) = state.tokens {
-        let mut tok = format!("{}↓ {}↑", format_tokens(t.input), format_tokens(t.output));
+        let mut tok = format!("{}↑ {}↓", format_tokens(t.input), format_tokens(t.output));
         if t.cache_read > 0 {
             tok.push_str(&format!(" {}⚡", format_tokens(t.cache_read)));
         }
         right_parts.push(tok);
+    }
+    if let Some(ref ctx) = state.context {
+        right_parts.push(format_context(ctx));
+    }
+    if let Some(cost) = state.cost {
+        right_parts.push(format_cost(cost));
     }
     if !state.provider_info.is_empty() {
         right_parts.push(state.provider_info.to_string());

@@ -38,6 +38,8 @@ pub struct Session {
     pub token_output: u64,
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Input tokens from the most recent API call (current context size)
+    pub last_turn_input: u64,
     pub profile: SessionProfile,
     pub persist: bool,
     pub provider_name: String,
@@ -59,6 +61,7 @@ impl Session {
             token_output: 0,
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
+            last_turn_input: 0,
             profile,
             persist,
             provider_name: String::new(),

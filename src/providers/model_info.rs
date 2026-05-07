@@ -8,6 +8,10 @@ pub struct ModelInfo {
     pub context_window: u32,
     pub supports_tools: bool,
     pub supports_streaming: bool,
+    /// Cost per million input tokens in USD (0.0 for free/local models)
+    pub input_cost_per_mtok: f64,
+    /// Cost per million output tokens in USD (0.0 for free/local models)
+    pub output_cost_per_mtok: f64,
 }
 
 pub fn known_models() -> Vec<ModelInfo> {
@@ -20,6 +24,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 15.0,
+            output_cost_per_mtok: 75.0,
         },
         ModelInfo {
             id: "claude-opus-4-6",
@@ -28,6 +34,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 15.0,
+            output_cost_per_mtok: 75.0,
         },
         ModelInfo {
             id: "claude-sonnet-4-6",
@@ -36,6 +44,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 3.0,
+            output_cost_per_mtok: 15.0,
         },
         ModelInfo {
             id: "claude-sonnet-4-5-20241022",
@@ -44,6 +54,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 3.0,
+            output_cost_per_mtok: 15.0,
         },
         ModelInfo {
             id: "claude-haiku-4-5-20251001",
@@ -52,6 +64,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.80,
+            output_cost_per_mtok: 4.0,
         },
         ModelInfo {
             id: "claude-3-5-sonnet-20241022",
@@ -60,6 +74,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 3.0,
+            output_cost_per_mtok: 15.0,
         },
         ModelInfo {
             id: "claude-3-5-haiku-20241022",
@@ -68,6 +84,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.80,
+            output_cost_per_mtok: 4.0,
         },
         // ---- OpenAI ----
         ModelInfo {
@@ -77,6 +95,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 1_000_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 2.0,
+            output_cost_per_mtok: 8.0,
         },
         ModelInfo {
             id: "gpt-4.1-mini",
@@ -85,6 +105,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 1_000_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.40,
+            output_cost_per_mtok: 1.60,
         },
         ModelInfo {
             id: "gpt-4.1-nano",
@@ -93,6 +115,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 1_000_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.10,
+            output_cost_per_mtok: 0.40,
         },
         ModelInfo {
             id: "gpt-4o",
@@ -101,6 +125,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 2.50,
+            output_cost_per_mtok: 10.0,
         },
         ModelInfo {
             id: "gpt-4o-mini",
@@ -109,6 +135,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.15,
+            output_cost_per_mtok: 0.60,
         },
         ModelInfo {
             id: "o3",
@@ -117,6 +145,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 2.0,
+            output_cost_per_mtok: 8.0,
         },
         ModelInfo {
             id: "o4-mini",
@@ -125,6 +155,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 1.10,
+            output_cost_per_mtok: 4.40,
         },
         ModelInfo {
             id: "o3-pro",
@@ -133,6 +165,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 200_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 20.0,
+            output_cost_per_mtok: 80.0,
         },
         // ---- Google / Gemini ----
         ModelInfo {
@@ -142,6 +176,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 1_000_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 1.25,
+            output_cost_per_mtok: 10.0,
         },
         ModelInfo {
             id: "gemini-2.5-flash",
@@ -150,6 +186,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 1_000_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.15,
+            output_cost_per_mtok: 0.60,
         },
         ModelInfo {
             id: "gemini-2.0-flash",
@@ -158,6 +196,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 1_000_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.10,
+            output_cost_per_mtok: 0.40,
         },
         // ---- Nvidia NIM ----
         ModelInfo {
@@ -167,6 +207,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "meta/llama-3.1-405b-instruct",
@@ -175,6 +217,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "nvidia/llama-3.1-nemotron-70b-instruct",
@@ -183,6 +227,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "deepseek-ai/deepseek-r1",
@@ -191,6 +237,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: false,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "qwen/qwen2.5-72b-instruct",
@@ -199,6 +247,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         // ---- Ollama (local) ----
         ModelInfo {
@@ -208,6 +258,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "llama3",
@@ -216,6 +268,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 8_192,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "qwen3",
@@ -224,6 +278,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "deepseek-r1",
@@ -232,6 +288,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: false,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "mistral",
@@ -240,6 +298,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 32_768,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "codellama",
@@ -248,6 +308,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 16_384,
             supports_tools: false,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "phi4",
@@ -256,6 +318,8 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 16_384,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
         ModelInfo {
             id: "gemma3",
@@ -264,8 +328,44 @@ pub fn known_models() -> Vec<ModelInfo> {
             context_window: 128_000,
             supports_tools: true,
             supports_streaming: true,
+            input_cost_per_mtok: 0.0,
+            output_cost_per_mtok: 0.0,
         },
     ]
+}
+
+pub fn context_window_for_model(model_id: &str) -> Option<u32> {
+    let models = known_models();
+    models
+        .iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.context_window)
+}
+
+pub fn cost_for_model(
+    model_id: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+) -> Option<f64> {
+    let models = known_models();
+    let info = models.iter().find(|m| m.id == model_id)?;
+    if info.input_cost_per_mtok == 0.0 && info.output_cost_per_mtok == 0.0 {
+        return None;
+    }
+    let input_rate = info.input_cost_per_mtok;
+    let (cache_read_rate, cache_write_rate) = match info.provider_kind {
+        ProviderKind::Claude => (input_rate * 0.1, input_rate * 1.25),
+        ProviderKind::OpenAI => (input_rate * 0.5, input_rate),
+        _ => (input_rate, input_rate),
+    };
+    let cost = (input_tokens as f64 * input_rate
+        + output_tokens as f64 * info.output_cost_per_mtok
+        + cache_read_tokens as f64 * cache_read_rate
+        + cache_creation_tokens as f64 * cache_write_rate)
+        / 1_000_000.0;
+    Some(cost)
 }
 
 pub fn models_for_provider(kind: ProviderKind) -> Vec<&'static ModelInfo> {

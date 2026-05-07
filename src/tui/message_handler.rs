@@ -587,6 +587,7 @@ pub async fn send_message(
                             session.token_output += usage.output_tokens;
                             session.cache_creation_tokens += usage.cache_creation_tokens;
                             session.cache_read_tokens += usage.cache_read_tokens;
+                            session.last_turn_input = usage.input_tokens;
                             if stop_reason == StopReason::ToolUse {
                                 got_tool_use_stop = true;
                             }
