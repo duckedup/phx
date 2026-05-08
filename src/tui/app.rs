@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 use crate::commands::dispatcher::ModelChoice;
 use crate::config::schema::Config;
 use crate::plugin::manager::PluginManager;
+use crate::plugin::wasm_runtime::WasmRuntime;
 use crate::providers;
 use crate::providers::traits::Provider;
 use crate::session::agent_loop::Session;
@@ -24,7 +25,7 @@ use crate::tui::onboarding;
 use crate::tui::picker::{PickerItem, PickerMode, PickerState};
 use crate::tui::rendering::display::DisplayLine;
 use crate::tui::selection::Selection;
-use crate::tui::tabs::{ChatLine, Tab};
+use crate::tui::tabs::{ChatItem, ChatLine, Tab};
 use crate::tui::theme::{self, Theme};
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -49,7 +50,10 @@ pub struct App {
     pub model_choices: Vec<ModelChoice>,
     pub onboarding: Option<onboarding::OnboardingState>,
     pub pending_session_resume: Option<String>,
+    pub pending_skill_message: Option<String>,
     pub plugin_manager: PluginManager,
+    pub extra_plugin_dirs: Vec<std::path::PathBuf>,
+    pub wasm_runtime: Option<WasmRuntime>,
     pub command_items: Vec<PickerItem>,
     pub display_lines: Vec<DisplayLine>,
     pub chat_area_height: u16,
@@ -123,7 +127,10 @@ impl App {
                 None
             },
             pending_session_resume: None,
+            pending_skill_message: None,
             plugin_manager: PluginManager::new(),
+            extra_plugin_dirs: Vec::new(),
+            wasm_runtime: None,
             command_items,
             display_lines: Vec::new(),
             chat_area_height: 0,
@@ -165,6 +172,23 @@ impl App {
 
     pub fn show_toast(&mut self, message: impl Into<String>) {
         self.toast = Some(toast::Toast::new(message.into(), Duration::from_secs(3)));
+    }
+
+    pub fn apply_skill_result(&mut self, result: crate::plugin::wasm_runtime::SkillExecResult) {
+        if !result.toast.is_empty() {
+            self.show_toast(result.toast);
+        }
+        if !result.widget.is_empty()
+            && let Some(tab) = self.current_tab_mut()
+        {
+            tab.chat_lines
+                .push(ChatItem::Widget(crate::tui::tabs::WidgetKind {
+                    json: result.widget,
+                }));
+        }
+        if !result.context.is_empty() {
+            self.pending_skill_message = Some(result.context);
+        }
     }
 
     pub fn recompute_display_lines(&mut self, width: u16) {
@@ -269,6 +293,20 @@ impl App {
         }
 
         match key.code {
+            KeyCode::BackTab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                let cmd = self
+                    .wasm_runtime
+                    .as_ref()
+                    .and_then(|rt| rt.command_for_keybind("shift+tab").map(|s| s.to_string()));
+                if let Some(cmd) = cmd
+                    && let Some(rt) = &mut self.wasm_runtime
+                {
+                    match rt.toggle(&cmd, "") {
+                        Ok(result) => self.apply_skill_result(result),
+                        Err(e) => self.show_toast(format!("Plugin error: {e}")),
+                    }
+                }
+            }
             KeyCode::Tab
                 if key.modifiers.contains(KeyModifiers::CONTROL) && !self.tabs.is_empty() =>
             {
@@ -541,18 +579,18 @@ impl App {
                     self.provider = Some(Arc::from(p));
                     let display = choice.display.clone();
                     if let Some(tab) = self.current_tab_mut() {
-                        tab.chat_lines.push(ChatLine {
+                        tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
                             content: format!("Model: {display}"),
-                        });
+                        }));
                     }
                 }
                 Err(e) => {
                     if let Some(tab) = self.current_tab_mut() {
-                        tab.chat_lines.push(ChatLine {
+                        tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
                             content: format!("Error: {e}"),
-                        });
+                        }));
                     }
                 }
             }
@@ -588,10 +626,10 @@ impl App {
         let config_path = crate::config::paths::user_config_file();
         if let Err(e) = crate::config::writer::save_provider(&config_path, &name, &profile) {
             if let Some(tab) = self.current_tab_mut() {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: format!("Failed to save config: {e}"),
-                });
+                }));
             }
             self.onboarding = None;
             return;
@@ -613,10 +651,10 @@ impl App {
         self.onboarding = None;
 
         if let Some(tab) = self.current_tab_mut() {
-            tab.chat_lines.push(ChatLine {
+            tab.chat_lines.push(ChatItem::Line(ChatLine {
                 role: crate::session::message::Role::System,
                 content: format!("Connected to {name} ({model})."),
-            });
+            }));
         }
     }
 
@@ -652,7 +690,37 @@ impl App {
 
 // ─── Main loop ───────────────────────────────────────────────────────────────
 
-pub async fn run(config: Config, _needs_onboarding: bool) -> anyhow::Result<()> {
+pub fn resolve_extra_plugin_dirs(
+    extras: &[std::path::PathBuf],
+    project: &std::path::Path,
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    for extra in extras {
+        let abs = if extra.is_absolute() {
+            extra.clone()
+        } else {
+            project.join(extra)
+        };
+        if abs.join("Cargo.toml").exists() {
+            out.push(abs);
+        } else if abs.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&abs)
+        {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && p.join("Cargo.toml").exists() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+}
+
+pub async fn run(
+    config: Config,
+    _needs_onboarding: bool,
+    extra_plugin_dirs: Vec<std::path::PathBuf>,
+) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(
@@ -666,6 +734,7 @@ pub async fn run(config: Config, _needs_onboarding: bool) -> anyhow::Result<()> 
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(config);
+    app.extra_plugin_dirs = extra_plugin_dirs;
 
     let plugin_dirs = crate::plugin::discover_plugin_dirs(
         Some(&app.project),
@@ -676,6 +745,49 @@ pub async fn run(config: Config, _needs_onboarding: bool) -> anyhow::Result<()> 
         app.plugin_manager
             .load_and_start(plugin_dirs, &app.project, &mut app.tools)
             .await;
+    }
+
+    if let Ok(mut rt) = WasmRuntime::new() {
+        let wasm_dirs =
+            WasmRuntime::discover_dirs(Some(&app.project), &crate::config::paths::user_home());
+        for dir in &wasm_dirs {
+            let _ = rt.load_from_dir(dir);
+        }
+        let mut source_dirs = WasmRuntime::discover_source_dirs(Some(&app.project));
+        resolve_extra_plugin_dirs(&app.extra_plugin_dirs, &app.project, &mut source_dirs);
+        for dir in &source_dirs {
+            let release_dir = dir.join("target/wasm32-wasip2/release");
+            if release_dir.is_dir() {
+                let _ = rt.load_from_dir(&release_dir);
+            }
+        }
+        app.wasm_runtime = Some(rt);
+    }
+
+    if app
+        .wasm_runtime
+        .as_ref()
+        .is_some_and(|rt| rt.skill_count() > 0)
+        || app.plugin_manager.plugin_count() > 0
+    {
+        let skills = crate::session::skills::discover_layered(
+            Some(&app.project),
+            &crate::config::paths::user_home(),
+            &app.config.skills.dirs,
+        );
+        let command_list = crate::commands::dispatcher::list_commands_with_plugins(
+            &skills,
+            Some(&app.plugin_manager),
+            app.wasm_runtime.as_ref(),
+        );
+        app.command_items = command_list
+            .iter()
+            .map(|cmd| PickerItem {
+                id: cmd.name.clone(),
+                label: cmd.name.clone(),
+                description: cmd.summary.clone(),
+            })
+            .collect();
     }
 
     let history_file = crate::config::paths::history_file();
@@ -819,6 +931,10 @@ async fn run_loop(
 
         if let Some(session_id) = app.pending_session_resume.take() {
             message_handler::resume_session(app, &session_id).await;
+        }
+
+        if let Some(text) = app.pending_skill_message.take() {
+            message_handler::send_message(app, text, terminal).await;
         }
 
         if app.should_quit {

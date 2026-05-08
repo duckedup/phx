@@ -10,7 +10,7 @@ use crate::store::session_store::SessionId;
 use crate::tui::app::App;
 use crate::tui::layout;
 use crate::tui::rendering::helpers::tool_call_summary;
-use crate::tui::tabs::ChatLine;
+use crate::tui::tabs::{ChatItem, ChatLine};
 
 pub fn default_system_prompt() -> &'static str {
     "You are Phoenix, a fast and capable coding assistant running in a terminal.\n\
@@ -48,20 +48,20 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
                         crate::session::message::Role::User
                         | crate::session::message::Role::Assistant => {
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                                tab.chat_lines.push(ChatLine {
+                                tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: msg.role.clone(),
                                     content: msg.content.clone(),
-                                });
+                                }));
                             }
                         }
                         crate::session::message::Role::ToolCall => {
                             if let Some(tc) = &msg.tool_call {
                                 let summary = tool_call_summary(&tc.name, &tc.args_json);
                                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                                    tab.chat_lines.push(ChatLine {
+                                    tab.chat_lines.push(ChatItem::Line(ChatLine {
                                         role: crate::session::message::Role::ToolCall,
                                         content: summary,
-                                    });
+                                    }));
                                 }
                             }
                         }
@@ -73,10 +73,10 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
                                     tr.output.clone()
                                 };
                                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                                    tab.chat_lines.push(ChatLine {
+                                    tab.chat_lines.push(ChatItem::Line(ChatLine {
                                         role: crate::session::message::Role::ToolResult,
                                         content: output,
-                                    });
+                                    }));
                                 }
                             }
                         }
@@ -92,10 +92,10 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
         }
         Err(e) => {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: format!("Failed to resume: {e}"),
-                });
+                }));
             }
         }
     }
@@ -114,6 +114,7 @@ pub fn handle_command(app: &mut App, input: &str) {
         &app.store,
         &app.project,
         Some(&app.plugin_manager),
+        app.wasm_runtime.as_ref(),
     );
 
     use crate::tui::picker::{PickerItem, PickerMode, PickerState};
@@ -122,18 +123,18 @@ pub fn handle_command(app: &mut App, input: &str) {
     match result {
         crate::commands::CommandResult::Message(msg) => {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: msg,
-                });
+                }));
             }
         }
         crate::commands::CommandResult::Error(err) => {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: format!("Error: {err}"),
-                });
+                }));
             }
         }
         crate::commands::CommandResult::ClearSession => {
@@ -141,10 +142,10 @@ pub fn handle_command(app: &mut App, input: &str) {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 tab.chat_lines.clear();
                 tab.streaming_text.clear();
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: "Session cleared.".into(),
-                });
+                }));
             }
         }
         crate::commands::CommandResult::InjectContext { name, content } => {
@@ -157,10 +158,10 @@ pub fn handle_command(app: &mut App, input: &str) {
             if let Some(session) = &mut app.session {
                 if !session.context_state.activated_skills.insert(name.clone()) {
                     if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                        tab.chat_lines.push(ChatLine {
+                        tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
                             content: format!("Skill '{name}' already loaded in this session."),
-                        });
+                        }));
                     }
                 } else {
                     session.add_message(Message::system(&content));
@@ -170,10 +171,10 @@ pub fn handle_command(app: &mut App, input: &str) {
                         content.clone()
                     };
                     if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                        tab.chat_lines.push(ChatLine {
+                        tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
                             content: format!("Skill loaded: {preview}"),
-                        });
+                        }));
                     }
                 }
             }
@@ -187,10 +188,10 @@ pub fn handle_command(app: &mut App, input: &str) {
                 let config_path = crate::config::paths::user_config_file();
                 let _ = crate::config::writer::save_theme(&config_path, &entry.id);
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatLine {
+                    tab.chat_lines.push(ChatItem::Line(ChatLine {
                         role: crate::session::message::Role::System,
                         content: format!("Theme: {}", entry.name),
-                    });
+                    }));
                 }
             } else {
                 app.saved_theme = Some(app.theme.clone());
@@ -227,10 +228,10 @@ pub fn handle_command(app: &mut App, input: &str) {
             let choices = crate::commands::model::list_model_entries(&app.config);
             if choices.is_empty() {
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatLine {
+                    tab.chat_lines.push(ChatItem::Line(ChatLine {
                         role: crate::session::message::Role::System,
                         content: "No models configured. Use /connect to add a provider.".into(),
-                    });
+                    }));
                 }
             } else {
                 let items: Vec<PickerItem> = choices
@@ -249,10 +250,10 @@ pub fn handle_command(app: &mut App, input: &str) {
         crate::commands::CommandResult::SessionPicker(choices) => {
             if choices.is_empty() {
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatLine {
+                    tab.chat_lines.push(ChatItem::Line(ChatLine {
                         role: crate::session::message::Role::System,
                         content: "No sessions to resume.".into(),
-                    });
+                    }));
                 }
             } else {
                 let items: Vec<PickerItem> = choices
@@ -282,25 +283,25 @@ pub fn handle_command(app: &mut App, input: &str) {
                     crate::session::context::compact_messages(&mut session.messages, &force_limits);
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                     if result.was_compacted {
-                        tab.chat_lines.push(ChatLine {
+                        tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
                             content: format!(
                                 "Compacted session: removed {} messages ({before} → {})",
                                 result.removed_count, result.remaining_count
                             ),
-                        });
+                        }));
                     } else {
-                        tab.chat_lines.push(ChatLine {
+                        tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
                             content: format!("Session has {before} messages — too few to compact."),
-                        });
+                        }));
                     }
                 }
             } else if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: "No active session to compact.".into(),
-                });
+                }));
             }
         }
         crate::commands::CommandResult::ConnectWizard => {
@@ -322,29 +323,136 @@ pub fn handle_command(app: &mut App, input: &str) {
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| value.to_string());
                         if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                            tab.chat_lines.push(ChatLine {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
                                 role: crate::session::message::Role::System,
                                 content: msg,
-                            });
+                            }));
                         }
                     }
                     Err(e) => {
                         if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                            tab.chat_lines.push(ChatLine {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
                                 role: crate::session::message::Role::System,
                                 content: format!("Plugin error: {e}"),
-                            });
+                            }));
                         }
                     }
                 }
             }
         }
+        crate::commands::CommandResult::WasmSkillCommand { command, args } => {
+            if let Some(rt) = &mut app.wasm_runtime {
+                match rt.execute(&command, &args) {
+                    Ok(result) => {
+                        app.apply_skill_result(result);
+                    }
+                    Err(e) => {
+                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: format!("WASM skill error: {e}"),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        crate::commands::CommandResult::ReloadPlugins => {
+            use crate::plugin::wasm_runtime::WasmRuntime;
+            use crate::tui::picker::PickerItem;
+
+            if let Some(rt) = &mut app.wasm_runtime {
+                let wasm_dirs = WasmRuntime::discover_dirs(
+                    Some(&app.project),
+                    &crate::config::paths::user_home(),
+                );
+                let mut source_dirs = WasmRuntime::discover_source_dirs(Some(&app.project));
+                crate::tui::app::resolve_extra_plugin_dirs(
+                    &app.extra_plugin_dirs,
+                    &app.project,
+                    &mut source_dirs,
+                );
+
+                let result = rt.reload(&wasm_dirs, &source_dirs);
+
+                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                    for build in &result.builds {
+                        let status = if build.success { "ok" } else { "FAILED" };
+                        tab.chat_lines.push(ChatItem::Line(ChatLine {
+                            role: crate::session::message::Role::System,
+                            content: format!("build {} — {status}", build.name),
+                        }));
+                        if !build.success {
+                            let last_lines: String = build
+                                .stderr
+                                .lines()
+                                .filter(|l| l.starts_with("error"))
+                                .take(5)
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if !last_lines.is_empty() {
+                                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                    role: crate::session::message::Role::System,
+                                    content: last_lines,
+                                }));
+                            }
+                        }
+                    }
+
+                    let mut parts = Vec::new();
+                    if !result.added.is_empty() {
+                        parts.push(format!("loaded: {}", result.added.join(", ")));
+                    }
+                    if !result.removed.is_empty() {
+                        parts.push(format!("removed: {}", result.removed.join(", ")));
+                    }
+                    if !result.errors.is_empty() {
+                        parts.push(format!("errors: {}", result.errors.join("; ")));
+                    }
+                    let msg = if parts.is_empty() && result.builds.is_empty() {
+                        "No WASM plugins found.".to_string()
+                    } else if parts.is_empty() {
+                        "Reload complete.".to_string()
+                    } else {
+                        parts.join(" | ")
+                    };
+                    tab.chat_lines.push(ChatItem::Line(ChatLine {
+                        role: crate::session::message::Role::System,
+                        content: msg,
+                    }));
+                }
+
+                let skills = crate::session::skills::discover_layered(
+                    Some(&app.project),
+                    &crate::config::paths::user_home(),
+                    &app.config.skills.dirs,
+                );
+                let command_list = crate::commands::dispatcher::list_commands_with_plugins(
+                    &skills,
+                    Some(&app.plugin_manager),
+                    app.wasm_runtime.as_ref(),
+                );
+                app.command_items = command_list
+                    .iter()
+                    .map(|cmd| PickerItem {
+                        id: cmd.name.clone(),
+                        label: cmd.name.clone(),
+                        description: cmd.summary.clone(),
+                    })
+                    .collect();
+            } else if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: "WASM runtime not available.".into(),
+                }));
+            }
+        }
         other => {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: format!("{other:?}"),
-                });
+                }));
             }
         }
     }
@@ -359,10 +467,10 @@ pub async fn send_message(
         Some(p) => Arc::clone(p),
         None => {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: "No provider configured. Use /connect to add one.".into(),
-                });
+                }));
             }
             return;
         }
@@ -444,10 +552,10 @@ pub async fn send_message(
 
         if !ctx.newly_loaded.is_empty() {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: format!("Context loaded: {}", ctx.newly_loaded.join(", ")),
-                });
+                }));
             }
             redraw(app, terminal);
         }
@@ -465,7 +573,7 @@ pub async fn send_message(
             crate::session::context::enforce_limits(&mut session.messages, prompt_ref, &limits);
         if compaction.was_compacted {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: format!(
                         "Context compacted: removed {} messages ({} remaining) to stay within {} token limit",
@@ -473,7 +581,7 @@ pub async fn send_message(
                         compaction.remaining_count,
                         limits.context_window,
                     ),
-                });
+                }));
             }
             redraw(app, terminal);
         }
@@ -521,10 +629,10 @@ pub async fn send_message(
                         Ok(s) => break s,
                         Err(e) => {
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                                tab.chat_lines.push(ChatLine {
+                                tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: crate::session::message::Role::System,
                                     content: format!("Provider error: {e}"),
-                                });
+                                }));
                             }
                             app.is_running = false;
                             app.session = Some(session);
@@ -549,10 +657,10 @@ pub async fn send_message(
 
         if cancelled {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: "Cancelled.".into(),
-                });
+                }));
             }
             app.is_running = false;
             app.session = Some(session);
@@ -599,10 +707,10 @@ pub async fn send_message(
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                                 tab.streaming_text.clear();
                                 tab.stream_buffer.clear();
-                                tab.chat_lines.push(ChatLine {
+                                tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: crate::session::message::Role::System,
                                     content: format!("Error: {e}"),
-                                });
+                                }));
                             }
                             app.is_running = false;
                             app.session = Some(session);
@@ -639,10 +747,10 @@ pub async fn send_message(
         if cancelled {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 tab.streaming_text.clear();
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
                     content: "Cancelled.".into(),
-                });
+                }));
             }
             app.is_running = false;
             app.session = Some(session);
@@ -657,10 +765,10 @@ pub async fn send_message(
             session.add_message(asst_msg);
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 let text = std::mem::take(&mut tab.streaming_text);
-                tab.chat_lines.push(ChatLine {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::Assistant,
                     content: text,
-                });
+                }));
             }
         }
 
@@ -673,10 +781,10 @@ pub async fn send_message(
                 session.add_message(tc_msg);
                 let summary = tool_call_summary(&tc.name, &tc.args_json);
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatLine {
+                    tab.chat_lines.push(ChatItem::Line(ChatLine {
                         role: crate::session::message::Role::ToolCall,
                         content: summary,
-                    });
+                    }));
                 }
 
                 redraw(app, terminal);
@@ -744,10 +852,10 @@ pub async fn send_message(
                     } else {
                         tr.output.clone()
                     };
-                    tab.chat_lines.push(ChatLine {
+                    tab.chat_lines.push(ChatItem::Line(ChatLine {
                         role: crate::session::message::Role::ToolResult,
                         content: output,
-                    });
+                    }));
                 }
 
                 redraw(app, terminal);

@@ -5,7 +5,7 @@ use crate::session::message::Role;
 use crate::tui::rendering::diff::{is_diff_content, render_side_by_side_diff};
 use crate::tui::rendering::helpers::wrap_text;
 use crate::tui::rendering::markdown::render_markdown;
-use crate::tui::tabs::ChatLine;
+use crate::tui::tabs::{ChatItem, ChatLine, WidgetKind};
 use crate::tui::theme::Theme;
 
 pub struct DisplayLine {
@@ -37,7 +37,36 @@ impl DisplayLine {
     }
 }
 
-pub fn build_chat_display_lines(
+pub fn build_item_display_lines(
+    lines: &mut Vec<DisplayLine>,
+    item: &ChatItem,
+    theme: &Theme,
+    content_width: usize,
+    pad: u16,
+) {
+    match item {
+        ChatItem::Line(cl) => build_chat_display_lines(lines, cl, theme, content_width, pad),
+        ChatItem::Widget(w) => build_widget_display_lines(lines, w, theme, content_width, pad),
+    }
+}
+
+fn build_widget_display_lines(
+    lines: &mut Vec<DisplayLine>,
+    widget: &WidgetKind,
+    theme: &Theme,
+    content_width: usize,
+    pad: u16,
+) {
+    crate::tui::rendering::plugin_ui::render_ui_json(
+        lines,
+        &widget.json,
+        theme,
+        content_width,
+        pad,
+    );
+}
+
+fn build_chat_display_lines(
     lines: &mut Vec<DisplayLine>,
     cl: &ChatLine,
     theme: &Theme,

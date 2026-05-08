@@ -1,0 +1,9 @@
+[package]
+name = "phoenix-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "SDK for building Phoenix WASM skill plugins"
+
+[dependencies]
+wit-bindgen = "0.41"

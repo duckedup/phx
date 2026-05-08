@@ -7,6 +7,9 @@ build-release:
 run *ARGS:
     cargo run -- {{ARGS}}
 
+run-plugins *ARGS:
+    cargo run -- --plugin-dir examples/plugins {{ARGS}}
+
 rpc:
     cargo run -- rpc
 

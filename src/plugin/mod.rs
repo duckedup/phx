@@ -5,6 +5,7 @@ pub mod manifest;
 pub mod tool_adapter;
 pub mod transport;
 pub mod ui;
+pub mod wasm_runtime;
 
 pub use hooks::{HookAction, HookEvent};
 pub use manager::{PluginManager, discover_plugin_dirs};

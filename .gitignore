@@ -1,12 +1,14 @@
 # Rust
-/target/
+**/target/
 **/*.rs.bk
 
 # Phoenix runtime
 .phoenix/
 
-# Claude
-.claude/
-
 # OS
 .DS_Store
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

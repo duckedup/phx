@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::tui::layout::CHAT_PADDING;
-use crate::tui::rendering::display::{DisplayLine, build_chat_display_lines};
+use crate::tui::rendering::display::{DisplayLine, build_item_display_lines};
 use crate::tui::rendering::helpers::{spinner_frame, wrap_text};
 use crate::tui::tabs::Tab;
 use crate::tui::theme::Theme;
@@ -55,8 +55,8 @@ pub fn compute_display_lines(
 
     let mut lines = Vec::new();
 
-    for cl in &tab.chat_lines {
-        build_chat_display_lines(&mut lines, cl, theme, content_width, pad);
+    for item in &tab.chat_lines {
+        build_item_display_lines(&mut lines, item, theme, content_width, pad);
     }
 
     if !tab.streaming_text.is_empty() {

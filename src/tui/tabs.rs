@@ -9,12 +9,29 @@ pub struct ChatLine {
     pub content: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct WidgetKind {
+    pub json: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ChatItem {
+    Line(ChatLine),
+    Widget(WidgetKind),
+}
+
+impl From<ChatLine> for ChatItem {
+    fn from(cl: ChatLine) -> Self {
+        ChatItem::Line(cl)
+    }
+}
+
 pub struct Tab {
     pub id: String,
     pub title: String,
     pub events_rx: broadcast::Receiver<SessionEvent>,
     pub input: InputState,
-    pub chat_lines: Vec<ChatLine>,
+    pub chat_lines: Vec<ChatItem>,
     pub scroll_offset: usize,
     pub auto_scroll: bool,
     pub streaming_text: String,
@@ -46,54 +63,54 @@ impl Tab {
                 self.streaming_text.push_str(&text);
             }
             SessionEvent::ToolCallStart { name, .. } => {
-                self.chat_lines.push(ChatLine {
+                self.chat_lines.push(ChatItem::Line(ChatLine {
                     role: Role::ToolCall,
                     content: format!("Running: {name}"),
-                });
+                }));
             }
             SessionEvent::ToolCallEnd { output, .. } => {
-                self.chat_lines.push(ChatLine {
+                self.chat_lines.push(ChatItem::Line(ChatLine {
                     role: Role::ToolResult,
                     content: output,
-                });
+                }));
             }
             SessionEvent::Done => {
                 if !self.streaming_text.is_empty() {
-                    self.chat_lines.push(ChatLine {
+                    self.chat_lines.push(ChatItem::Line(ChatLine {
                         role: Role::Assistant,
                         content: std::mem::take(&mut self.streaming_text),
-                    });
+                    }));
                 }
             }
             SessionEvent::ContextLoaded(names) => {
-                self.chat_lines.push(ChatLine {
+                self.chat_lines.push(ChatItem::Line(ChatLine {
                     role: Role::System,
                     content: format!("Context loaded: {}", names.join(", ")),
-                });
+                }));
             }
             SessionEvent::ContextCompacted { removed, remaining } => {
-                self.chat_lines.push(ChatLine {
+                self.chat_lines.push(ChatItem::Line(ChatLine {
                     role: Role::System,
                     content: format!(
                         "Context compacted: removed {removed} messages ({remaining} remaining)"
                     ),
-                });
+                }));
             }
             SessionEvent::Error(e) => {
-                self.chat_lines.push(ChatLine {
+                self.chat_lines.push(ChatItem::Line(ChatLine {
                     role: Role::System,
                     content: format!("Error: {e}"),
-                });
+                }));
             }
         }
         self.auto_scroll = true;
     }
 
     pub fn add_user_message(&mut self, content: String) {
-        self.chat_lines.push(ChatLine {
+        self.chat_lines.push(ChatItem::Line(ChatLine {
             role: Role::User,
             content,
-        });
+        }));
         self.auto_scroll = true;
     }
 

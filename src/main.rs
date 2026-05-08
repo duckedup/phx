@@ -26,6 +26,9 @@ struct Cli {
 
     #[arg(long)]
     config: Option<PathBuf>,
+
+    #[arg(long = "plugin-dir", short = 'p')]
+    plugin_dirs: Vec<PathBuf>,
 }
 
 #[derive(clap::Subcommand)]
@@ -47,11 +50,8 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         None | Some(Command::Tui) => {
-            if !config::loader::active_provider_usable(&cfg) {
-                tui::run(cfg, true).await?;
-            } else {
-                tui::run(cfg, false).await?;
-            }
+            let needs_onboarding = !config::loader::active_provider_usable(&cfg);
+            tui::run(cfg, needs_onboarding, cli.plugin_dirs).await?;
         }
         Some(Command::Rpc) => {
             let stdin = tokio::io::BufReader::new(tokio::io::stdin());

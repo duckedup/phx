@@ -1,0 +1,20 @@
+package phoenix:plugin@0.1.0;
+
+world skill-plugin {
+    record plugin-metadata {
+        name: string,
+        command: string,
+        description: string,
+        keybind: string,
+    }
+
+    record skill-result {
+        context: string,
+        toast: string,
+        widget: string,
+    }
+
+    export get-metadata: func() -> plugin-metadata;
+    export execute: func(arguments: string) -> result<skill-result, string>;
+    export on-exit: func() -> result<skill-result, string>;
+}

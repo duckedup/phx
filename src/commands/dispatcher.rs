@@ -1,6 +1,7 @@
 use crate::commands::{connect, model, session_cmd, skill, theme};
 use crate::config::schema::{Config, ProviderProfile};
 use crate::plugin::PluginManager;
+use crate::plugin::wasm_runtime::WasmRuntime;
 use crate::session::skills::Skill;
 use crate::store::session_store::SessionStore;
 use crate::tui::theme::ThemeEntry;
@@ -45,6 +46,11 @@ pub enum CommandResult {
         plugin_command: String,
         args: String,
     },
+    WasmSkillCommand {
+        command: String,
+        args: String,
+    },
+    ReloadPlugins,
     ClearSession,
     CompactSession,
     Cleared,
@@ -72,7 +78,7 @@ pub fn dispatch(
     store: &SessionStore,
     project: &Path,
 ) -> CommandResult {
-    dispatch_with_plugins(input, config, skills, store, project, None)
+    dispatch_with_plugins(input, config, skills, store, project, None, None)
 }
 
 pub fn dispatch_with_plugins(
@@ -82,6 +88,7 @@ pub fn dispatch_with_plugins(
     store: &SessionStore,
     project: &Path,
     plugins: Option<&PluginManager>,
+    wasm_runtime: Option<&WasmRuntime>,
 ) -> CommandResult {
     if !is_command(input) {
         return CommandResult::NotACommand;
@@ -99,7 +106,8 @@ pub fn dispatch_with_plugins(
         "sessions" => session_cmd::handle_resume(store, project),
         "clear" => session_cmd::handle_clear(),
         "compact" => session_cmd::handle_compact(),
-        "help" => CommandResult::Message(help_text(skills, plugins)),
+        "reload" => CommandResult::ReloadPlugins,
+        "help" => CommandResult::Message(help_text(skills, plugins, wasm_runtime)),
         _ => {
             // Check plugin commands
             if let Some(pm) = plugins
@@ -107,6 +115,15 @@ pub fn dispatch_with_plugins(
             {
                 return CommandResult::PluginCommand {
                     plugin_command: name.to_string(),
+                    args: args.to_string(),
+                };
+            }
+
+            if let Some(rt) = wasm_runtime
+                && rt.has_command(name)
+            {
+                return CommandResult::WasmSkillCommand {
+                    command: name.to_string(),
                     args: args.to_string(),
                 };
             }
@@ -127,12 +144,13 @@ pub fn dispatch_with_plugins(
 }
 
 pub fn list_commands(skills: &[Skill]) -> Vec<CommandInfo> {
-    list_commands_with_plugins(skills, None)
+    list_commands_with_plugins(skills, None, None)
 }
 
 pub fn list_commands_with_plugins(
     skills: &[Skill],
     plugins: Option<&PluginManager>,
+    wasm_runtime: Option<&WasmRuntime>,
 ) -> Vec<CommandInfo> {
     let mut cmds: Vec<CommandInfo> = vec![
         CommandInfo {
@@ -176,6 +194,11 @@ pub fn list_commands_with_plugins(
             is_skill: false,
         },
         CommandInfo {
+            name: "reload".into(),
+            summary: "Reload WASM plugins".into(),
+            is_skill: false,
+        },
+        CommandInfo {
             name: "help".into(),
             summary: "Show available commands".into(),
             is_skill: false,
@@ -206,13 +229,30 @@ pub fn list_commands_with_plugins(
             });
         }
     }
+    if let Some(rt) = wasm_runtime {
+        for (name, description) in rt.commands() {
+            cmds.push(CommandInfo {
+                name: name.to_string(),
+                summary: if description.is_empty() {
+                    "WASM skill".into()
+                } else {
+                    description.to_string()
+                },
+                is_skill: true,
+            });
+        }
+    }
     cmds.sort_by(|a, b| a.name.cmp(&b.name));
     cmds
 }
 
-fn help_text(skills: &[Skill], plugins: Option<&PluginManager>) -> String {
+fn help_text(
+    skills: &[Skill],
+    plugins: Option<&PluginManager>,
+    wasm_runtime: Option<&WasmRuntime>,
+) -> String {
     let mut lines = vec!["Available commands:".to_string()];
-    for cmd in list_commands_with_plugins(skills, plugins) {
+    for cmd in list_commands_with_plugins(skills, plugins, wasm_runtime) {
         lines.push(format!("  /{:<12} {}", cmd.name, cmd.summary));
     }
     lines.join("\n")
