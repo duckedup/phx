@@ -418,7 +418,7 @@ impl App {
 
         let (session_tokens, session_cost, session_context) = if let Some(ref s) = self.session {
             let tokens = status_bar::SessionTokens {
-                input: s.token_input,
+                input: s.token_input + s.cache_read_tokens + s.cache_creation_tokens,
                 output: s.token_output,
                 cache_read: s.cache_read_tokens,
             };

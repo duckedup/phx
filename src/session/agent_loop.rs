@@ -298,6 +298,9 @@ impl Session {
                         self.token_output += usage.output_tokens;
                         self.cache_creation_tokens += usage.cache_creation_tokens;
                         self.cache_read_tokens += usage.cache_read_tokens;
+                        self.last_turn_input = usage.input_tokens
+                            + usage.cache_read_tokens
+                            + usage.cache_creation_tokens;
                         if stop_reason == StopReason::ToolUse {
                             got_tool_use_stop = true;
                         }

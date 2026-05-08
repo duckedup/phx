@@ -27,6 +27,8 @@ pub struct StatusState<'a> {
 fn format_cost(cost: f64) -> String {
     if cost < 0.01 {
         format!("${:.4}", cost)
+    } else if cost < 1.0 {
+        format!("${:.3}", cost)
     } else {
         format!("${:.2}", cost)
     }
