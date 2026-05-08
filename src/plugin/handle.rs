@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::host_handler::HostHandler;
 use super::manifest::PluginManifest;
 use super::transport::PluginTransport;
 
@@ -78,6 +79,10 @@ impl PluginHandle {
         self.transport
             .request_with_timeout("command/execute", params, Duration::from_secs(10))
             .await
+    }
+
+    pub async fn set_host_handler(&self, handler: Arc<HostHandler>) {
+        self.transport.set_host_handler(handler).await;
     }
 
     pub async fn invoke_tool(

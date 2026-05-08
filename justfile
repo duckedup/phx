@@ -36,3 +36,9 @@ package:
 
 clean:
     cargo clean
+
+# Initialize beads issue tracking for this project
+bd-init:
+    bd init --reinit-local --prefix PHX
+    git config beads.role contributor
+    chmod 700 .beads

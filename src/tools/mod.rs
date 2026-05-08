@@ -1,5 +1,6 @@
 mod bash;
 mod edit;
+pub mod orchestration;
 mod read;
 pub mod traits;
 mod write;

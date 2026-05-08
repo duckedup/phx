@@ -1,8 +1,12 @@
-use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+
+use super::host_handler::HostHandler;
 
 #[derive(Debug, Serialize)]
 struct JsonRpcRequest {
@@ -43,6 +47,7 @@ pub struct PluginTransport {
     stdin: Mutex<tokio::process::ChildStdin>,
     stdout: Mutex<BufReader<tokio::process::ChildStdout>>,
     next_id: Mutex<u64>,
+    host_handler: Mutex<Option<Arc<HostHandler>>>,
 }
 
 impl PluginTransport {
@@ -65,6 +70,7 @@ impl PluginTransport {
             stdin: Mutex::new(stdin),
             stdout: Mutex::new(BufReader::new(stdout)),
             next_id: Mutex::new(1),
+            host_handler: Mutex::new(None),
         })
     }
 
@@ -135,15 +141,59 @@ impl PluginTransport {
         }
     }
 
+    pub async fn set_host_handler(&self, handler: Arc<HostHandler>) {
+        *self.host_handler.lock().await = Some(handler);
+    }
+
     async fn read_response(&self) -> anyhow::Result<JsonRpcResponse> {
-        let mut stdout = self.stdout.lock().await;
-        let mut line = String::new();
-        let n = stdout.read_line(&mut line).await?;
-        if n == 0 {
-            anyhow::bail!("plugin process closed stdout");
+        loop {
+            let mut stdout = self.stdout.lock().await;
+            let mut line = String::new();
+            let n = stdout.read_line(&mut line).await?;
+            if n == 0 {
+                anyhow::bail!("plugin process closed stdout");
+            }
+            drop(stdout);
+
+            let resp: JsonRpcResponse = serde_json::from_str(line.trim())?;
+
+            if let Some(method) = &resp.method
+                && method.starts_with("host/")
+            {
+                let req_id = resp.id;
+                let params = resp.params.clone().unwrap_or_default();
+                let handler = self.host_handler.lock().await;
+
+                let result = if let Some(h) = handler.as_ref() {
+                    h.handle(method, params).await
+                } else {
+                    Err(format!("no host handler registered for {method}"))
+                };
+
+                let response_json = match result {
+                    Ok(val) => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": val,
+                    }),
+                    Err(msg) => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": { "code": -32000, "message": msg },
+                    }),
+                };
+
+                let mut response_bytes = serde_json::to_vec(&response_json)?;
+                response_bytes.push(b'\n');
+                let mut stdin = self.stdin.lock().await;
+                stdin.write_all(&response_bytes).await?;
+                stdin.flush().await?;
+
+                continue;
+            }
+
+            return Ok(resp);
         }
-        let resp: JsonRpcResponse = serde_json::from_str(line.trim())?;
-        Ok(resp)
     }
 
     pub async fn shutdown(&self) {

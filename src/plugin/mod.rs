@@ -1,5 +1,6 @@
 pub mod handle;
 pub mod hooks;
+pub mod host_handler;
 pub mod manager;
 pub mod manifest;
 pub mod tool_adapter;

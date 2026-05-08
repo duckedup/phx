@@ -126,7 +126,7 @@ Rehydration loads the message history into memory. The agent picks up where the 
 
 **Lifecycle.** Sessions are persisted by default. `session.destroy` (RPC) or closing a tab with the destroy keybind removes the session directory. Old sessions are never auto-deleted; the user or a cleanup tool manages retention.
 
-**Child sessions (orchestration).** Child sessions spawned by an orchestrator are ephemeral by default — they are not persisted to disk. Their results are captured by `collect_session` and their invocations are recorded in the tool log. If a child session's profile sets `persist = true`, it is persisted like any other session.
+**Child sessions (orchestration).** Child sessions spawned by an orchestrator are ephemeral by default — they are not persisted to disk. Their results are captured by `collect_agent` and their invocations are recorded in the tool log. If a child session's profile sets `persist = true`, it is persisted like any other session.
 
 ```toml
 [session.default]
@@ -140,122 +140,211 @@ persist = false             # in-memory only; lost on exit
 
 Phoenix doesn't have separate "agent" and "orchestrator" code paths. There is one loop *per session*. What differs is the **tool set** the session is configured with:
 
-- A plain agent has tools like `read_file`, `run_shell`, `search`.
-- An orchestrator has, in addition, orchestration tools (see §5A) that let the model manage child sessions.
+- A plain agent has tools like `read`, `write`, `bash`, `edit`.
+- An orchestrator has, in addition, orchestration tools (see §5A) that let the model manage child agents.
 
 This means orchestration is just configuration. There is no daemon, no scheduler, no implicit fan-out. The agent calls orchestration tools because the user gave it those tools; the harness obeys.
 
 ### 5.3 No automatic subagent spawn
 
-Restated, because it's load-bearing: the **harness** never spawns a subagent. The **model** can request a spawn *only if* the user enabled orchestration tools in this session's config. Two consequences:
+Restated, because it's load-bearing: the **harness** never spawns a subagent. Orchestration tools (`spawn_agent`, `check_agents`, etc.) are **never** included in the default session's tool list. The main agent cannot call them unless:
+
+1. The user explicitly adds them to a session profile's tool list, or
+2. A plugin (like the orchestrate plugin, §8.5) invokes them via the bidirectional RPC protocol (`host/tool_call`).
+
+The normal path to orchestration is the orchestrate plugin — the user runs `/orchestrate <task>`, the plugin handles fan-out. The model never sees orchestration tools unless you configure it that way.
+
+Three consequences:
 
 1. A default config is single-agent. You have to opt in to orchestration.
-2. Removing the orchestration tools from a config is a hard guarantee that no subagents will appear, regardless of what the model tries to call.
+2. Removing the orchestration tools from a config (or not loading the orchestrate plugin) is a hard guarantee that no subagents will appear, regardless of what the model tries to call.
+3. Plugins can orchestrate without the model knowing — the plugin calls tools on the host directly.
 
 ---
 
 ## 5A. Async Orchestration
 
-Orchestration in Phoenix is async-first: the orchestrator fans out work to child sessions that run concurrently, polls for completion, and collects results. This section is the complete specification.
+Orchestration in Phoenix is async-first and cross-provider: the orchestrator fans out work to child agents that run concurrently — potentially on different models from different providers — polls for completion, collects results, and merges changes back. Each child agent runs in an isolated git worktree, fully traced via OTEL.
 
 ### 5A.1 Orchestration tools
 
-An orchestrator session gets four tools:
+An orchestrator session gets five tools:
 
-- **`spawn_session(profile, prompt)`** — creates a child session using a named `[session.*]` profile from config, starts it running on a worker thread, and returns immediately with a `session_id`. Non-blocking. The orchestrator can call this multiple times in a single tool-use turn to fan out work in parallel.
-- **`check_sessions(ids?)`** — returns the status of child sessions: `queued`, `running`, `done`, `error`. Optionally filtered by a list of IDs; without args, returns all children of this orchestrator. The orchestrator calls this to decide when to collect.
-- **`collect_session(session_id)`** — retrieves the final output of a completed child session. Fails if the child is still running. Once collected, the child's result is cleared from the pool (the audit log in the store retains it).
-- **`cancel_session(session_id)`** — cancels a running or queued child session. The child stops at the next tool-dispatch boundary and transitions to `cancelled`. Returns immediately; the cancellation is asynchronous.
+- **`spawn_agent(prompt, provider?, model?, profile?, tools?, worktree?, context?, persist?)`** — creates a child agent session on any configured provider, starts it running on a tokio task, and returns immediately with a `session_id`. Non-blocking. Each child gets its own git worktree (via embedded [worktrunk](https://worktrunk.dev)) by default. The `provider` and `model` parameters allow cross-provider spawning — a Claude orchestrator can spawn OpenAI, Gemini, or local Ollama children. The `context` parameter accepts an array of file paths to pre-load into the child's conversation.
+- **`check_agents(ids?)`** — returns the status of child agents: `queued`, `running`, `done`, `error`. Includes provider, model, active tool, token usage, elapsed time, and worktree branch. Optionally filtered by a list of IDs; without args, returns all children of this orchestrator.
+- **`collect_agent(session_id)`** — retrieves the final output of a completed child agent, including a diff summary (files changed, insertions, deletions) when the child ran in a worktree. Fails if the child is still running.
+- **`merge_agent(session_id, strategy?, message?, cleanup?)`** — merges a completed child's worktree branch back into the parent branch. Supports squash (default), rebase, or merge strategies. On conflict, returns conflict details to the orchestrator model for resolution. Cleanup removes the worktree and branch after merging.
+- **`cancel_agent(session_id, reason?)`** — cancels a running or queued child agent. The child stops at the next tool-dispatch boundary, transitions to `cancelled`, and its worktree is cleaned up. Returns immediately; the cancellation is asynchronous.
 
 ### 5A.2 Lifecycle
 
 ```
-spawn_session()         check_sessions()        collect_session()
-      │                       │                        │
-      ▼                       ▼                        ▼
- ┌─────────┐  thread avail  ┌─────────┐  session    ┌─────────┐
- │ queued  │───────────────▶│ running │──completes─▶│  done   │──▶ collected
- └─────────┘                └─────────┘             └─────────┘
-                               │                       │
-                               ▼                       ▼
-                            ┌─────────┐            ┌─────────┐
-                            │cancelled│            │  error  │
-                            └─────────┘            └─────────┘
+spawn_agent()          check_agents()         collect_agent()       merge_agent()
+      │                      │                       │                     │
+      ▼                      ▼                       ▼                     ▼
+ ┌─────────┐  slot avail  ┌─────────┐  session    ┌─────────┐         ┌─────────┐
+ │ queued  │─────────────▶│ running │──completes─▶│  done   │────────▶│ merged  │
+ └─────────┘              └─────────┘             └─────────┘         └─────────┘
+                              │                       │
+                              ▼                       ▼
+                           ┌─────────┐            ┌─────────┐
+                           │cancelled│            │  error  │
+                           └─────────┘            └─────────┘
 ```
 
-1. **Fan-out.** The orchestrator model calls `spawn_session` N times. Each call returns immediately with a `session_id`. If a thread is available, the child starts immediately (`running`); otherwise it enters a FIFO queue (`queued`).
-2. **Poll.** The orchestrator's next model turn calls `check_sessions()`. The harness returns a list of `{id, status, profile, prompt_summary}` objects. The model decides whether to wait (call `check_sessions` again next turn) or collect finished results.
-3. **Collect.** For each child in `done` or `error` state, the model calls `collect_session(id)`. The response includes the child's final output (or error message). The model can now synthesize, report to the user, or spawn further children.
-4. **Cancel.** The user can cancel the orchestrator session (which cancels all running children), or the orchestrator model can call `cancel_session(id)` if it decides a child is no longer needed. Cancelled children stop at the next tool-dispatch boundary.
+1. **Fan-out.** The orchestrator calls `spawn_agent` N times. Each call creates a worktree, starts (or queues) the child, and returns a `session_id` immediately. Children can target different providers and models.
+2. **Poll.** The orchestrator calls `check_agents()`. The harness returns status for each child including provider, model, active tool, tokens, and worktree branch.
+3. **Collect.** For each child in `done` or `error` state, the orchestrator calls `collect_agent(id)`. The response includes the child's final output and a diff summary of changes made in its worktree.
+4. **Merge.** The orchestrator calls `merge_agent(id, strategy="squash")` to integrate the child's changes into the parent branch. If there are conflicts, the orchestrator model can resolve them (the child's worktree stays alive until cleanup) or spawn a new child to resolve.
+5. **Cancel.** The user can cancel the orchestrator session (which cancels all running children and cleans up all worktrees), or the orchestrator model can call `cancel_agent(id)` if it decides a child is no longer needed.
 
-### 5A.3 Thread pool
+### 5A.3 Cross-provider spawning
 
-Each child session runs its agent loop on its own OS thread, drawn from a fixed-size pool.
+Each spawned agent can target any configured provider and model:
 
-- **Default pool size:** `2 * num_cpus`. Child sessions are I/O-bound (waiting on provider API calls), not CPU-bound, so a pool sized to core count would leave threads idle while waiting on network. 2x cores is a reasonable starting default; tune via config based on actual workload.
+```
+Orchestrator (Claude Opus)
+├── spawn_agent(prompt="write tests", provider="gpt", model="o3")
+│   └── Child runs on OpenAI o3
+├── spawn_agent(prompt="research API", provider="gemini")
+│   └── Child runs on Gemini (profile default model)
+├── spawn_agent(prompt="lint code")
+│   └── Child inherits orchestrator's Claude Opus
+└── spawn_agent(prompt="generate fixtures", provider="local")
+    └── Child runs on local Ollama qwen3:32b
+```
+
+Provider resolution: look up the named profile in `Config.providers`, optionally override the model, call `create_provider()` to get a `Box<dyn Provider>`. If no provider is specified, the child inherits the orchestrator's provider.
+
+### 5A.4 Worktree isolation (via embedded worktrunk)
+
+Phoenix embeds [worktrunk](https://worktrunk.dev) as a Rust library dependency (`worktrunk = { version = "0.48", default-features = false }` — no CLI deps). Each child agent gets its own git worktree by default, eliminating filesystem conflicts between parallel agents.
+
+**Why worktrees:** When multiple agents write code in parallel, filesystem conflicts are the #1 failure mode. Agent A writes `src/lib.rs`, Agent B writes `src/lib.rs` → last write wins, work lost. Git worktrees solve this at the filesystem level. Each worktree is a full checkout sharing the same `.git` object store — true isolation with near-zero storage overhead.
+
+**Worktree lifecycle:**
+1. `spawn_agent` creates a branch (`phoenix/agent/{child_id}`) and worktree at `{project}/../.phoenix-worktrees/{project}.{child_id}`.
+2. Child runs with `cwd` set to the worktree path.
+3. On completion, Phoenix auto-commits any uncommitted changes on the child's branch.
+4. `collect_agent` returns a diff summary (files changed, insertions, deletions).
+5. `merge_agent` squashes/rebases/merges the child's branch back into the parent.
+6. Cleanup removes the worktree directory and deletes the branch.
+
+**When not to use worktrees:** Set `worktree: false` for read-only tasks (research, analysis), tasks that don't touch files, or non-git projects. Default: `worktree: true` for any child with write/edit tools in its profile.
+
+**Build cache sharing:** Worktrunk supports sharing build caches between worktrees. Phoenix configures this automatically so `cargo build` in one worktree reuses artifacts from others.
+
+### 5A.5 Context sharing
+
+`spawn_agent` accepts a `context` parameter — an array of file paths to pre-load into the child's conversation:
+
+```json
+{
+  "prompt": "Add error handling to the API routes",
+  "context": ["src/api/routes.rs", "src/api/errors.rs", "DESIGN.md"],
+  "provider": "gpt",
+  "model": "o3"
+}
+```
+
+The harness reads each file and prepends them as a system-level context block before the user prompt. The child sees the files as if it had already read them — no wasted tool calls for the child to `read` files the orchestrator already knows it needs.
+
+### 5A.6 Nested orchestration
+
+A child whose session profile includes orchestration tools can spawn grandchildren, each with their own worktree and OTEL span tree. The span hierarchy nests deeper — `follows_from` links chain through the tree.
+
+```
+orchestrator (claude-opus)
+├── c-01 (gpt-o3, coder) — writes feature
+├── c-02 (claude-sonnet, orchestrator) — handles test suite
+│   ├── c-02-a (ollama/qwen, coder) — unit tests
+│   └── c-02-b (ollama/qwen, coder) — integration tests
+└── c-03 (gemini-flash, researcher) — API docs
+```
+
+The `max_concurrent_sessions` semaphore is global. If the limit is 8 and the orchestrator spawns 6 children, one of which is itself an orchestrator that tries to spawn 4 grandchildren — only 2 of those grandchildren start immediately; the other 2 queue until slots free up. This prevents runaway fan-out without a separate config knob.
+
+### 5A.7 Task pool
+
+Each child session runs its agent loop as a tokio task, bounded by a global semaphore.
+
+- **Default pool size:** `2 * num_cpus`. Child sessions are I/O-bound (waiting on provider API calls), not CPU-bound.
 - **Configurable:** `[runtime] max_concurrent_sessions = "auto"`. `"auto"` resolves to `2 * available_cores` at startup; an explicit integer overrides it.
-- **Overflow behavior:** if all pool threads are occupied, `spawn_session` queues the child. The orchestrator still gets a `session_id` back immediately; the child transitions from `queued` to `running` when a thread frees up. Queue order is FIFO.
-- **Orchestrator thread:** the orchestrator's own session loop runs on the main thread (TUI) or a dedicated thread (RPC), *not* in the pool. The pool is exclusively for child sessions.
+- **Overflow behavior:** if all slots are occupied, `spawn_agent` queues the child. The orchestrator still gets a `session_id` back immediately; the child transitions from `queued` to `running` when a slot frees up. Queue order is FIFO.
+- **Shared across nesting levels.** Orchestrator children and grandchildren compete for the same pool. No separate quotas.
 
-### 5A.4 Session isolation
+### 5A.8 Session isolation
 
-Sessions are independent: each has its own message history, tool registry, and provider connection. The shared store (§9) is the only cross-session coordination surface, and it serializes writes internally.
+Sessions are independent: each has its own message history, tool registry, provider connection, and working directory (worktree). The shared store (§9) is the only cross-session coordination surface.
 
 A child session:
 - **Can** read and write to the shared store (todos, KV scratch, tool log).
 - **Cannot** access the orchestrator's message history or tool state.
-- **Cannot** spawn its own children (unless the child's profile also includes orchestration tools — nested orchestration is possible but must be explicitly configured).
+- **Can** spawn its own children if its profile includes orchestration tools.
+- **Operates** in its own git worktree (isolated filesystem).
 
-### 5A.5 Frontend integration
+### 5A.9 OTEL tracing
 
-#### TUI: orchestrator dashboard
-
-When an orchestrator spawns children, Phoenix opens an **orchestrator dashboard** tab. This is a live, structured view of the entire session tree — not a raw output stream.
-
-The dashboard is a table, one row per child session:
+Every child agent gets the same OTEL span tree as the main agent — session span, provider spans, tool spans — with `follows_from` links connecting children to the orchestrator. All streaming I/O flows through the same tracing pipeline.
 
 ```
- ID       PROFILE   STATUS    TOOL          TOKENS   LAST OUTPUT
- c-01     coder     running   write_file    12.4k    writing src/core/dispatch.rs...
- c-02     coder     running   run_shell     8.1k     $ cargo test
- c-03     coder     done      —             6.2k     ✓ completed (3 files changed)
- c-04     coder     error     —             4.0k     ✗ provider 429 after retries
- c-05     coder     queued    —             0        waiting for thread
+session(session_id="orchestrator-s00")
+├── provider(provider="anthropic", model="claude-opus-4-7")
+├── tool(tool="spawn_agent") → child_spawned(child_id="c-01")
+│
+├── session(session_id="c-01")  [follows_from: orchestrator-s00]
+│   ├── provider(provider="openai", model="o3")
+│   ├── tool(tool="read")
+│   ├── provider(provider="openai", model="o3")
+│   ├── tool(tool="write")
+│   └── tool(tool="bash")
+│
+└── session(session_id="c-02")  [follows_from: orchestrator-s00]
+    ├── provider(provider="gemini", model="2.5-flash")
+    └── tool(tool="read")
 ```
 
-**Columns:** session ID, profile name, status (`queued`/`running`/`done`/`error`/`cancelled`), active tool (if running), cumulative token use, last line of output (truncated to fit).
+The existing `RingBuffer` captures all tracing events into an in-memory ring with broadcast subscribers. Child spans land in the same ring as the parent — a single subscriber sees the full session tree. The `session_id` field on every span lets consumers filter by child.
 
-**Aggregate status line** at the top: `5 children: 2 running, 1 done, 1 error, 1 queued | 30.7k tokens total`
+When the OTLP exporter is enabled, the full span tree exports to any OTLP-compatible backend (Jaeger, Grafana Tempo, Honeycomb). Each child session appears as a linked trace.
 
-**Interactions:**
-- **Select a row and press Enter** to drill into that child's full streaming output in a new tab. The tab is read-only — you're observing, not interacting.
-- **Press `c`** on a selected row to cancel that child session.
-- **Press `q`** to return to the orchestrator's own conversation tab (where the orchestrator model's reasoning and tool calls are displayed as normal).
-
-The dashboard updates in real time. Rows reorder by status: running first, then queued, then done/error/cancelled. Token counts tick up as provider responses stream in.
-
-**No automatic tab creation.** Children do not create tabs on their own. The dashboard is the default view for orchestration. The user explicitly drills in when they want to see a specific child's output. This keeps the tab bar manageable even with 20+ children.
+### 5A.10 Frontend integration
 
 #### RPC
 
-`session.events` for the orchestrator emits `child_spawned`, `child_status_changed`, and `child_completed` events in addition to the orchestrator's own token stream. RPC clients can also call `session.events` on a child session ID directly to stream its output. The dashboard's data model — child list with status, tool, tokens, last output — is available via `session.children` as a single RPC call for clients that want to build their own dashboard UI.
+`session.events` for the orchestrator emits `child_spawned`, `child_status_changed`, and `child_completed` events in addition to the orchestrator's own token stream. RPC clients can also call `session.events` on a child session ID directly to stream its output. The child list with status, provider, model, tool, tokens, branch, and last output is available via `session.children` as a single RPC call for clients that want to build their own dashboard UI.
 
-### 5A.6 Example config
+#### TUI (future)
 
-```toml
-[runtime]
-max_concurrent_sessions = "auto"   # defaults to 2x available cores
+The TUI can consume child event streams and the session pool state to render a dashboard. This is presentation-layer work, not core infrastructure. The core provides all the data; the TUI subscribes and renders.
 
-[session.coder]
-system_prompt_path = "./prompts/coder.md"
-tools = ["read_file", "write_file", "run_shell", "search"]
+### 5A.11 Example config
 
-[session.orchestrator]
-extends = "default"
-tools = ["read_file", "search", "spawn_session", "check_sessions", "collect_session", "cancel_session"]
+```json
+{
+  "runtime": {
+    "max_concurrent_sessions": "auto"
+  },
+  "sessions": {
+    "coder": {
+      "system_prompt_path": "./prompts/coder.md",
+      "tools": ["bash", "read", "write", "edit"],
+      "persist": false
+    },
+    "researcher": {
+      "system_prompt_path": "./prompts/researcher.md",
+      "tools": ["bash", "read"],
+      "persist": false
+    },
+    "orchestrator": {
+      "extends": "default",
+      "tools": ["read", "bash", "spawn_agent", "check_agents", "collect_agent", "merge_agent", "cancel_agent"]
+    }
+  }
+}
 ```
 
-A user on an 8-core machine runs the orchestrator. The model breaks a task into 5 subtasks, calls `spawn_session("coder", ...)` five times. All five start immediately (5 < 8 cores). The orchestrator polls with `check_sessions()`, collects results as they finish, and synthesizes a final response.
+A user on an 8-core machine runs the orchestrator. The model breaks a task into 5 subtasks, calls `spawn_agent` five times — two on GPT o3, two on Claude Sonnet, one on local Ollama. Each child gets its own worktree. All five start immediately (5 < 16 slots). The orchestrator polls with `check_agents()`, collects results as they finish, reviews diffs, and calls `merge_agent` to integrate changes back.
 
 ---
 
@@ -304,7 +393,7 @@ tools = ["read_file", "write_file", "run_shell", "search"]
 
 [session.orchestrator]
 extends = "default"
-tools = ["read_file", "search", "spawn_session", "check_sessions", "collect_session", "cancel_session"]
+tools = ["read", "bash", "spawn_agent", "check_agents", "collect_agent", "merge_agent", "cancel_agent"]
 
 [store]
 backend = "beans"          # "beans" | "doltlite" | "memory"
@@ -403,6 +492,44 @@ tools = ["read_file", "write_file", "run_shell", "search", "opencode_delegate"]
 [tools.opencode_delegate]
 endpoint = "http://localhost:4096"
 ```
+
+### 8.4 Plugin RPC protocol — bidirectional
+
+The subprocess plugin protocol (`src/plugin/transport.rs`) is JSON-RPC over stdin/stdout. The base protocol has host → plugin calls. For powerful plugins (especially orchestration), the protocol is **bidirectional** — plugins can call back into the host.
+
+#### Host → Plugin (existing)
+
+- `initialize` — plugin startup handshake
+- `tool/invoke` — host asks plugin to execute one of its registered tools
+- `command/execute` — host asks plugin to run a slash command
+- `event/hook` — host notifies plugin of a hookable event
+- `shutdown` — graceful shutdown notification
+
+#### Plugin → Host (new)
+
+- **`host/tool_call(name, args)`** — plugin asks the host to invoke a registered tool and return the result. This is the key extension: the orchestrate plugin can call `spawn_agent`, `check_agents`, `collect_agent`, `merge_agent`, and `cancel_agent` directly without a model round-trip. The host looks up the tool in the registry, invokes it, and returns the `ToolResult`.
+- **`host/session_events(session_id)`** — plugin subscribes to a child session's event stream. The host begins streaming events as JSON-RPC notifications (`event/child_session`). This gives the plugin real-time visibility into child progress without polling.
+- **`host/get_config(keys)`** — plugin reads host configuration (provider profiles, session profiles). This lets the orchestrate plugin discover available providers/models and make intelligent decisions about which model to assign to each subtask.
+
+The transport already uses request IDs for matching — bidirectional calls just require the host to listen for incoming requests on the plugin's stdout (currently only reads responses) and route `host/*` methods to a handler with access to the tool registry, session pool, and config.
+
+### 8.5 Orchestrate plugin
+
+The **orchestrate plugin** is a subprocess plugin (not WASM — it needs async, long-running state, and its own model calls) that provides orchestration as a mode. It builds on Josh's plugin system (`src/plugin/`) and the bidirectional RPC protocol (§8.4).
+
+The orchestrate plugin is invoked via `/orchestrate <task description>`. It:
+
+1. Receives the task via `command/execute`.
+2. Calls `host/get_config` to discover available providers and models.
+3. Makes its own model call to decompose the task into subtasks.
+4. Calls `host/tool_call` with `spawn_agent` for each subtask — choosing the best provider/model for each.
+5. Subscribes to child events via `host/session_events`.
+6. Polls progress, handles errors, and merges results via `host/tool_call`.
+7. Returns a synthesized summary to the user.
+
+The orchestration *strategy* lives in the plugin. The *primitives* (`spawn_agent`, worktrees, OTEL tracing) live in the core. This keeps the core simple and lets different orchestration strategies compete as plugins.
+
+**Note on tool visibility:** Orchestration tools (`spawn_agent`, etc.) are **not** included in the default session's tool list. The main agent never calls them unless explicitly configured to do so, or unless a plugin (like the orchestrate plugin) invokes them via `host/tool_call`. This matches §5.3: the harness never auto-spawns. The orchestrate plugin is the user's opt-in to orchestration.
 
 ---
 
@@ -591,7 +718,7 @@ kill_grace_period_ms = 5000
 
 ### 12.4 Child session failures (orchestration)
 
-A child session that errors out transitions to `error` state with a captured error message. The orchestrator's `collect_session` call returns the error. The orchestrator model decides what to do — spawn a replacement, skip the subtask, or report to the user. The harness never auto-retries a child session; that decision belongs to the orchestrator model.
+A child session that errors out transitions to `error` state with a captured error message. The orchestrator's `collect_agent` call returns the error. The orchestrator (model or plugin) decides what to do — spawn a replacement, skip the subtask, or report to the user. The harness never auto-retries a child session; that decision belongs to the orchestrator.
 
 ---
 
@@ -643,7 +770,7 @@ phoenix/
 - **M0 — Skeleton.** `Cargo.toml`, `justfile`, hello-world TUI, hello-world RPC, store interface stub, `claude` provider, two tools (`read`, `bash`).
 - **M0.5 — Provider parity.** Add `openai`, `ollama`, `gemini`, `vertex`, and `nvidia` provider adapters; share the event-normalization layer; integration tests per provider.
 - **M1 — Sessions & loop.** Real session loop, tool dispatch, cancel semantics, token accounting, context manager (rules, AGENTS.md, compaction), session persistence and resume, token budgets, streaming tool output.
-- **M2 — Tabs & orchestration.** TUI tabs; orchestration tools (`spawn_session`, `check_sessions`, `collect_session`, `cancel_session`); Tokio task pool; multi-session shared store.
+- **M2 — Orchestration.** Orchestration tools (`spawn_agent`, `check_agents`, `collect_agent`, `merge_agent`, `cancel_agent`); embedded worktrunk for worktree isolation; OTEL tracing for child agents; bidirectional plugin RPC; orchestrate plugin; Tokio task pool; multi-session shared store.
 - **M3 — Polish.** Config hot-reload, `phoenix trace`, benchmarks, packaging.
 
 Each milestone ends with: `just test` green, `just bench` recorded, docs updated.

@@ -10,6 +10,7 @@ mod session;
 mod store;
 mod tools;
 mod tui;
+mod worktree;
 
 use clap::Parser;
 use std::path::PathBuf;

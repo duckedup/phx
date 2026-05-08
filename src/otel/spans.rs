@@ -1,24 +1,24 @@
 use tracing::Span;
 
-/// Create a span for an LLM provider call.
-///
-/// Fields: `provider`, `model`.
 pub fn provider_span(provider: &str, model: &str) -> Span {
-    tracing::info_span!("provider", provider = provider, model = model,)
+    tracing::info_span!("provider", provider = provider, model = model)
 }
 
-/// Create a span for a tool invocation.
-///
-/// Fields: `tool`.
-pub fn tool_span(tool: &str) -> Span {
-    tracing::info_span!("tool", tool = tool,)
+pub fn tool_span(tool: &str, call_id: &str) -> Span {
+    tracing::info_span!("tool", tool = tool, call_id = call_id)
 }
 
-/// Create a span for a session lifecycle.
-///
-/// Fields: `session_id`.
 pub fn session_span(session_id: &str) -> Span {
-    tracing::info_span!("session", session_id = session_id,)
+    tracing::info_span!("session", session_id = session_id)
+}
+
+pub fn child_session_span(session_id: &str, parent_session_id: &str) -> Span {
+    let span = tracing::info_span!(
+        "session",
+        session_id = session_id,
+        parent_session_id = parent_session_id,
+    );
+    span
 }
 
 #[cfg(test)]
@@ -42,41 +42,24 @@ mod tests {
     #[test]
     fn test_provider_span_has_expected_fields() {
         let (sub, _ring) = test_subscriber();
-
         with_default(sub, || {
-            let span = provider_span("anthropic", "claude-4");
-            let _guard = span.enter();
+            let span = provider_span("openai", "gpt-4");
+            assert_eq!(span.metadata().map(|m| m.name()), Some("provider"));
 
-            // Verify the span was created with the right metadata
-            span.record("provider", "anthropic");
-
-            // Access span fields via the extensions
-            span.with_subscriber(|(id, dispatch)| {
-                // Verify span exists in the subscriber
-                let _ = id;
-                let _ = dispatch;
-            });
+            let field_names: Vec<&str> = span
+                .metadata()
+                .map(|m| m.fields().iter().map(|f: Field| f.name()).collect())
+                .unwrap_or_default();
+            assert!(field_names.contains(&"provider"));
+            assert!(field_names.contains(&"model"));
         });
-
-        // Verify the span has the right name and fields by inspecting metadata
-        let span = provider_span("openai", "gpt-4");
-        assert_eq!(span.metadata().map(|m| m.name()), Some("provider"));
-
-        // Verify field names exist in metadata
-        let field_names: Vec<&str> = span
-            .metadata()
-            .map(|m| m.fields().iter().map(|f: Field| f.name()).collect())
-            .unwrap_or_default();
-        assert!(field_names.contains(&"provider"));
-        assert!(field_names.contains(&"model"));
     }
 
     #[test]
     fn test_tool_span_has_expected_fields() {
         let (sub, _ring) = test_subscriber();
-
         with_default(sub, || {
-            let span = tool_span("read_file");
+            let span = tool_span("read_file", "tc-001");
             assert_eq!(span.metadata().map(|m| m.name()), Some("tool"));
 
             let field_names: Vec<&str> = span
@@ -84,13 +67,13 @@ mod tests {
                 .map(|m| m.fields().iter().map(|f: Field| f.name()).collect())
                 .unwrap_or_default();
             assert!(field_names.contains(&"tool"));
+            assert!(field_names.contains(&"call_id"));
         });
     }
 
     #[test]
     fn test_session_span_has_expected_fields() {
         let (sub, _ring) = test_subscriber();
-
         with_default(sub, || {
             let span = session_span("sess-abc-123");
             assert_eq!(span.metadata().map(|m| m.name()), Some("session"));
@@ -100,6 +83,22 @@ mod tests {
                 .map(|m| m.fields().iter().map(|f: Field| f.name()).collect())
                 .unwrap_or_default();
             assert!(field_names.contains(&"session_id"));
+        });
+    }
+
+    #[test]
+    fn test_child_session_span_has_parent_field() {
+        let (sub, _ring) = test_subscriber();
+        with_default(sub, || {
+            let span = child_session_span("child-001", "parent-000");
+            assert_eq!(span.metadata().map(|m| m.name()), Some("session"));
+
+            let field_names: Vec<&str> = span
+                .metadata()
+                .map(|m| m.fields().iter().map(|f: Field| f.name()).collect())
+                .unwrap_or_default();
+            assert!(field_names.contains(&"session_id"));
+            assert!(field_names.contains(&"parent_session_id"));
         });
     }
 

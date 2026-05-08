@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::broadcast;
 
@@ -47,6 +48,7 @@ pub struct Session {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub context_state: crate::session::context::ContextState,
     events_tx: broadcast::Sender<SessionEvent>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -69,7 +71,20 @@ impl Session {
             created_at: chrono::Utc::now(),
             context_state: crate::session::context::ContextState::default(),
             events_tx,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn cancel_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancel_flag)
+    }
+
+    pub fn set_cancel_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.cancel_flag = flag;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::Relaxed)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
@@ -157,11 +172,40 @@ impl Session {
         skills: &[crate::session::skills::Skill],
         hooks: Option<Arc<HookDispatcher>>,
     ) {
+        use tracing::Instrument;
+
+        let session_span = crate::otel::spans::session_span(&self.id.0);
+        self.run_inner(provider, tools, store, project, skills, hooks)
+            .instrument(session_span)
+            .await;
+    }
+
+    async fn run_inner(
+        &mut self,
+        provider: &dyn Provider,
+        tools: &ToolRegistry,
+        store: &SessionStore,
+        project: &Path,
+        skills: &[crate::session::skills::Skill],
+        hooks: Option<Arc<HookDispatcher>>,
+    ) {
         use futures::StreamExt;
 
         self.state = SessionStatus::Running;
+        tracing::info!(
+            provider = %self.provider_name,
+            model = %self.model_name,
+            "session started",
+        );
 
         loop {
+            if self.is_cancelled() {
+                self.state = SessionStatus::Cancelled;
+                tracing::info!("session cancelled");
+                let _ = self.events_tx.send(SessionEvent::Error("cancelled".into()));
+                return;
+            }
+
             let tool_schemas = self.tool_schemas(tools);
             let base_prompt = self
                 .profile
@@ -256,10 +300,15 @@ impl Session {
                 system_prompt,
             };
 
+            let provider_span =
+                crate::otel::spans::provider_span(&self.provider_name, &self.model_name);
+            let _provider_guard = provider_span.enter();
+
             let stream = match provider.send(opts).await {
                 Ok(s) => s,
                 Err(e) => {
                     let msg = e.to_string();
+                    tracing::error!(parent: &provider_span, error = %msg, "provider call failed");
                     self.state = SessionStatus::Error(msg.clone());
                     let _ = self.events_tx.send(SessionEvent::Error(msg));
                     return;
@@ -301,17 +350,29 @@ impl Session {
                         self.last_turn_input = usage.input_tokens
                             + usage.cache_read_tokens
                             + usage.cache_creation_tokens;
+                        tracing::info!(
+                            parent: &provider_span,
+                            tokens_in = usage.input_tokens,
+                            tokens_out = usage.output_tokens,
+                            cache_read = usage.cache_read_tokens,
+                            cache_create = usage.cache_creation_tokens,
+                            stop_reason = ?stop_reason,
+                            "provider response",
+                        );
                         if stop_reason == StopReason::ToolUse {
                             got_tool_use_stop = true;
                         }
                     }
                     Event::Error(e) => {
+                        tracing::error!(parent: &provider_span, error = %e, "provider stream error");
                         self.state = SessionStatus::Error(e.to_string());
                         let _ = self.events_tx.send(SessionEvent::Error(e.to_string()));
                         return;
                     }
                 }
             }
+
+            drop(_provider_guard);
 
             if !assistant_text.is_empty() {
                 let msg = Message::assistant(std::mem::take(&mut assistant_text));
@@ -321,6 +382,13 @@ impl Session {
 
             if !pending_tool_calls.is_empty() {
                 for tc in &pending_tool_calls {
+                    if self.is_cancelled() {
+                        self.state = SessionStatus::Cancelled;
+                        tracing::info!("session cancelled between tool calls");
+                        let _ = self.events_tx.send(SessionEvent::Error("cancelled".into()));
+                        return;
+                    }
+
                     let tc_msg = Message::tool_call(tc.clone());
                     self.persist_message(store, project, &tc_msg).await;
                     self.add_message(tc_msg);
@@ -337,29 +405,62 @@ impl Session {
                         HookAction::Allow
                     };
 
+                    let tool_span = crate::otel::spans::tool_span(&tc.name, &tc.id);
+                    let _tool_guard = tool_span.enter();
+
                     let tr = match hook_action {
-                        HookAction::Block { reason } => ToolResult {
-                            id: tc.id.clone(),
-                            output: format!("blocked by plugin: {reason}"),
-                            is_error: true,
-                        },
+                        HookAction::Block { reason } => {
+                            tracing::info!(
+                                parent: &tool_span,
+                                blocked_by = "plugin",
+                                reason = %reason,
+                                "tool blocked",
+                            );
+                            ToolResult {
+                                id: tc.id.clone(),
+                                output: format!("blocked by plugin: {reason}"),
+                                is_error: true,
+                            }
+                        }
                         _ => {
                             if let Some(tool) = tools.get(&tc.name) {
                                 let args: serde_json::Value =
                                     serde_json::from_str(&tc.args_json).unwrap_or_default();
+                                let start = std::time::Instant::now();
                                 match tool.invoke(args).await {
-                                    Ok(r) => ToolResult {
-                                        id: tc.id.clone(),
-                                        output: r.output,
-                                        is_error: r.is_error,
-                                    },
-                                    Err(e) => ToolResult {
-                                        id: tc.id.clone(),
-                                        output: e.to_string(),
-                                        is_error: true,
-                                    },
+                                    Ok(r) => {
+                                        tracing::info!(
+                                            parent: &tool_span,
+                                            output_bytes = r.output.len(),
+                                            is_error = r.is_error,
+                                            duration_ms = start.elapsed().as_millis() as u64,
+                                            "tool completed",
+                                        );
+                                        ToolResult {
+                                            id: tc.id.clone(),
+                                            output: r.output,
+                                            is_error: r.is_error,
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            parent: &tool_span,
+                                            error = %e,
+                                            duration_ms = start.elapsed().as_millis() as u64,
+                                            "tool failed",
+                                        );
+                                        ToolResult {
+                                            id: tc.id.clone(),
+                                            output: e.to_string(),
+                                            is_error: true,
+                                        }
+                                    }
                                 }
                             } else {
+                                tracing::warn!(
+                                    parent: &tool_span,
+                                    "unknown tool",
+                                );
                                 ToolResult {
                                     id: tc.id.clone(),
                                     output: format!("unknown tool: {}", tc.name),
@@ -368,6 +469,8 @@ impl Session {
                             }
                         }
                     };
+
+                    drop(_tool_guard);
 
                     // Hook: tool_call_end notification
                     if let Some(ref h) = hooks {
@@ -400,12 +503,18 @@ impl Session {
 
             self.state = SessionStatus::Done;
             self.persist_state(store, project).await;
+            tracing::info!(
+                tokens_in = self.token_input,
+                tokens_out = self.token_output,
+                "session completed",
+            );
             let _ = self.events_tx.send(SessionEvent::Done);
             break;
         }
     }
 
     pub fn cancel(&mut self) {
+        self.cancel_flag.store(true, Ordering::Relaxed);
         self.state = SessionStatus::Cancelled;
     }
 }
