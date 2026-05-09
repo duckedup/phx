@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::traits::{Tool, ToolError, ToolResult, ToolSchema};
+use super::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 
 /// Default number of lines returned when `limit` is not specified.
 const DEFAULT_LIMIT: usize = 2000;
@@ -15,9 +15,11 @@ pub struct ReadTool;
 impl Tool for ReadTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "read",
-            description: "Read the contents of a file. Returns line-numbered output (cat -n style). \
-                          Defaults to the first 2000 lines. Use offset/limit for large files.",
+            name: "read".into(),
+            description:
+                "Read the contents of a file. Returns line-numbered output (cat -n style). \
+                          Defaults to the first 2000 lines. Use offset/limit for large files."
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -41,7 +43,11 @@ impl Tool for ReadTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let file_path = args
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -103,6 +109,7 @@ impl Tool for ReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::traits::NoopInputRequester;
     use tempfile::TempDir;
 
     fn write_temp(dir: &TempDir, name: &str, content: &str) -> String {
@@ -116,7 +123,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_temp(&dir, "test.txt", "alpha\nbeta\ngamma\n");
 
-        let result = ReadTool.invoke(json!({"file_path": path})).await.unwrap();
+        let result = ReadTool
+            .invoke(json!({"file_path": path}), &NoopInputRequester)
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("alpha"));
         assert!(result.output.contains("beta"));
@@ -133,7 +143,10 @@ mod tests {
         let path = write_temp(&dir, "slice.txt", "one\ntwo\nthree\nfour\nfive\n");
 
         let result = ReadTool
-            .invoke(json!({"file_path": path, "offset": 1, "limit": 2}))
+            .invoke(
+                json!({"file_path": path, "offset": 1, "limit": 2}),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -150,7 +163,10 @@ mod tests {
         let path = write_temp(&dir, "short.txt", "one\ntwo\n");
 
         let result = ReadTool
-            .invoke(json!({"file_path": path, "offset": 100}))
+            .invoke(
+                json!({"file_path": path, "offset": 100}),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
         assert!(!result.is_error);
@@ -160,7 +176,10 @@ mod tests {
     #[tokio::test]
     async fn read_missing_file() {
         let result = ReadTool
-            .invoke(json!({"file_path": "/tmp/nonexistent_phoenix_test_file.txt"}))
+            .invoke(
+                json!({"file_path": "/tmp/nonexistent_phoenix_test_file.txt"}),
+                &NoopInputRequester,
+            )
             .await;
         match result {
             Err(ToolError::ExecutionFailed(msg)) => {
@@ -172,7 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_missing_path_arg() {
-        let result = ReadTool.invoke(json!({})).await;
+        let result = ReadTool.invoke(json!({}), &NoopInputRequester).await;
         match result {
             Err(ToolError::InvalidArgs(msg)) => {
                 assert!(msg.contains("file_path"), "msg was: {msg}");
@@ -186,7 +205,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_temp(&dir, "nums.txt", "aaa\nbbb\n");
 
-        let result = ReadTool.invoke(json!({"file_path": path})).await.unwrap();
+        let result = ReadTool
+            .invoke(json!({"file_path": path}), &NoopInputRequester)
+            .await
+            .unwrap();
         let first_line = result.output.lines().next().unwrap();
         // Should start with "     1\t"
         assert!(
@@ -200,7 +222,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_temp(&dir, "empty.txt", "");
 
-        let result = ReadTool.invoke(json!({"file_path": path})).await.unwrap();
+        let result = ReadTool
+            .invoke(json!({"file_path": path}), &NoopInputRequester)
+            .await
+            .unwrap();
         assert!(!result.is_error);
         assert_eq!(result.output, "");
     }

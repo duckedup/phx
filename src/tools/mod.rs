@@ -2,6 +2,7 @@ mod bash;
 mod edit;
 pub mod orchestration;
 mod read;
+pub mod skill_tool;
 pub mod traits;
 mod write;
 
@@ -107,7 +108,7 @@ mod tests {
         let reg = build_registry_all();
         let schemas = reg.list_schemas();
         assert_eq!(schemas.len(), 4);
-        let names: Vec<&str> = schemas.iter().map(|s| s.name).collect();
+        let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"bash"));
         assert!(names.contains(&"read"));
         assert!(names.contains(&"write"));

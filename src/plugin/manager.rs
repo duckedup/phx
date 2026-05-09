@@ -103,6 +103,19 @@ impl PluginManager {
             handle.shutdown().await;
         }
     }
+
+    pub async fn reload(
+        &mut self,
+        dirs: Vec<PathBuf>,
+        project: &Path,
+        tool_registry: &mut ToolRegistry,
+    ) {
+        self.shutdown_all().await;
+        self.handles.clear();
+        self.commands.clear();
+        self.hooks = Arc::new(HookDispatcher::new());
+        self.load_and_start(dirs, project, tool_registry).await;
+    }
 }
 
 impl Default for PluginManager {

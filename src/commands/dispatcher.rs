@@ -22,11 +22,20 @@ pub struct SessionChoice {
     pub model: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandSource {
+    Builtin,
+    Skill,
+    Plugin,
+    WasmPlugin,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandInfo {
     pub name: String,
     pub summary: String,
     pub is_skill: bool,
+    pub source: CommandSource,
 }
 
 #[derive(Debug)]
@@ -38,6 +47,7 @@ pub enum CommandResult {
     ThemePicker(Vec<ThemeEntry>),
     ModelsPage,
     ConnectWizard,
+    ContextInfo,
     InjectContext {
         name: String,
         content: String,
@@ -107,6 +117,7 @@ pub fn dispatch_with_plugins(
         "clear" => session_cmd::handle_clear(),
         "compact" => session_cmd::handle_compact(),
         "reload" => CommandResult::ReloadPlugins,
+        "context" => CommandResult::ContextInfo,
         "help" => CommandResult::Message(help_text(skills, plugins, wasm_runtime)),
         _ => {
             // Check plugin commands
@@ -157,51 +168,67 @@ pub fn list_commands_with_plugins(
             name: "model".into(),
             summary: "Switch model or provider".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "models".into(),
             summary: "Open model management page".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "theme".into(),
             summary: "Switch color theme".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "connect".into(),
             summary: "Connect a new provider".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "resume".into(),
             summary: "Resume a previous session".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "sessions".into(),
             summary: "List and resume sessions".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "clear".into(),
             summary: "Clear current session".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "compact".into(),
             summary: "Compact session context".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
+        },
+        CommandInfo {
+            name: "context".into(),
+            summary: "List tools and skills".into(),
+            is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "reload".into(),
-            summary: "Reload WASM plugins".into(),
+            summary: "Reload plugins".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
         CommandInfo {
             name: "help".into(),
             summary: "Show available commands".into(),
             is_skill: false,
+            source: CommandSource::Builtin,
         },
     ];
     for s in skills {
@@ -214,6 +241,7 @@ pub fn list_commands_with_plugins(
             name: s.name.clone(),
             summary,
             is_skill: true,
+            source: CommandSource::Skill,
         });
     }
     if let Some(pm) = plugins {
@@ -226,6 +254,7 @@ pub fn list_commands_with_plugins(
                     summary.to_string()
                 },
                 is_skill: false,
+                source: CommandSource::Plugin,
             });
         }
     }
@@ -239,6 +268,7 @@ pub fn list_commands_with_plugins(
                     description.to_string()
                 },
                 is_skill: true,
+                source: CommandSource::WasmPlugin,
             });
         }
     }

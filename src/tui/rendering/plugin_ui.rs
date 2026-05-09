@@ -1,58 +1,10 @@
 use ratatui::prelude::*;
-use serde::Deserialize;
+
+use phoenix_shared::ui_types::{TextStyle, UiNode};
 
 use super::display::DisplayLine;
 use super::helpers::wrap_text;
 use crate::tui::theme::Theme;
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-pub enum UiNode {
-    #[serde(rename = "text")]
-    Text {
-        content: String,
-        #[serde(default)]
-        style: TextStyle,
-    },
-    #[serde(rename = "box")]
-    Box {
-        #[serde(default)]
-        title: String,
-        #[serde(default)]
-        children: Vec<UiNode>,
-    },
-    #[serde(rename = "column")]
-    Column {
-        #[serde(default)]
-        children: Vec<UiNode>,
-    },
-    #[serde(rename = "row")]
-    Row {
-        #[serde(default)]
-        children: Vec<UiNode>,
-    },
-    #[serde(rename = "gauge")]
-    Gauge {
-        #[serde(default)]
-        label: String,
-        #[serde(default)]
-        ratio: f64,
-    },
-    #[serde(rename = "spacer")]
-    Spacer,
-}
-
-#[derive(Deserialize, Default)]
-pub struct TextStyle {
-    #[serde(default)]
-    pub bold: bool,
-    #[serde(default)]
-    pub italic: bool,
-    #[serde(default)]
-    pub dim: bool,
-    #[serde(default)]
-    pub fg: Option<String>,
-}
 
 pub fn render_ui_json(
     lines: &mut Vec<DisplayLine>,

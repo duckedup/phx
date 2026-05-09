@@ -426,8 +426,9 @@ impl Session {
                             if let Some(tool) = tools.get(&tc.name) {
                                 let args: serde_json::Value =
                                     serde_json::from_str(&tc.args_json).unwrap_or_default();
+                                let noop = crate::tools::traits::NoopInputRequester;
                                 let start = std::time::Instant::now();
-                                match tool.invoke(args).await {
+                                match tool.invoke(args, &noop).await {
                                     Ok(r) => {
                                         tracing::info!(
                                             parent: &tool_span,

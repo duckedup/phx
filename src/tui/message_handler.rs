@@ -107,6 +107,7 @@ pub fn handle_command(app: &mut App, input: &str) {
         &crate::config::paths::user_home(),
         &app.config.skills.dirs,
     );
+    let rt_guard = app.wasm_runtime.as_ref().map(|rt| rt.lock());
     let result = crate::commands::dispatcher::dispatch_with_plugins(
         input,
         &app.config,
@@ -114,8 +115,9 @@ pub fn handle_command(app: &mut App, input: &str) {
         &app.store,
         &app.project,
         Some(&app.plugin_manager),
-        app.wasm_runtime.as_ref(),
+        rt_guard.as_deref(),
     );
+    drop(rt_guard);
 
     use crate::tui::picker::{PickerItem, PickerMode, PickerState};
     use crate::tui::theme;
@@ -201,6 +203,7 @@ pub fn handle_command(app: &mut App, input: &str) {
                         id: t.id.clone(),
                         label: t.name.clone(),
                         description: String::new(),
+                        source_tag: None,
                     })
                     .collect();
                 app.picker = Some(PickerState::new(items, PickerMode::Theme));
@@ -218,6 +221,7 @@ pub fn handle_command(app: &mut App, input: &str) {
                         id: i.to_string(),
                         label: c.display.clone(),
                         description: c.provider_name.clone(),
+                        source_tag: None,
                     })
                     .collect();
                 app.model_choices = choices;
@@ -241,6 +245,7 @@ pub fn handle_command(app: &mut App, input: &str) {
                         id: i.to_string(),
                         label: c.display.clone(),
                         description: c.provider_name.clone(),
+                        source_tag: None,
                     })
                     .collect();
                 app.model_choices = choices;
@@ -261,6 +266,7 @@ pub fn handle_command(app: &mut App, input: &str) {
                     .map(|c| PickerItem {
                         id: c.id.clone(),
                         label: c.display_name.clone(),
+                        source_tag: None,
                         description: if c.model.is_empty() {
                             c.provider.clone()
                         } else {
@@ -341,8 +347,8 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
         }
         crate::commands::CommandResult::WasmSkillCommand { command, args } => {
-            if let Some(rt) = &mut app.wasm_runtime {
-                match rt.execute(&command, &args) {
+            if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
+                match rt.lock().execute(&command, &args) {
                     Ok(result) => {
                         app.apply_skill_result(result);
                     }
@@ -358,14 +364,22 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
         }
         crate::commands::CommandResult::ReloadPlugins => {
-            use crate::plugin::wasm_runtime::WasmRuntime;
-            use crate::tui::picker::PickerItem;
+            if app.is_reloading {
+                return;
+            }
+            app.is_reloading = true;
 
-            if let Some(rt) = &mut app.wasm_runtime {
-                let wasm_dirs = WasmRuntime::discover_dirs(
+            if let Some(rt_arc) = app.wasm_runtime.clone() {
+                use crate::plugin::wasm_runtime::WasmRuntime;
+
+                let mut wasm_dirs = WasmRuntime::discover_dirs(
                     Some(&app.project),
                     &crate::config::paths::user_home(),
                 );
+                let workspace_wasm = app.project.join("target/wasm32-wasip2/release");
+                if workspace_wasm.is_dir() {
+                    wasm_dirs.push(workspace_wasm);
+                }
                 let mut source_dirs = WasmRuntime::discover_source_dirs(Some(&app.project));
                 crate::tui::app::resolve_extra_plugin_dirs(
                     &app.extra_plugin_dirs,
@@ -373,77 +387,128 @@ pub fn handle_command(app: &mut App, input: &str) {
                     &mut source_dirs,
                 );
 
-                let result = rt.reload(&wasm_dirs, &source_dirs);
+                let handle = tokio::task::spawn_blocking(move || {
+                    let result = rt_arc.lock().reload(&wasm_dirs, &source_dirs);
+                    let tool_schemas = rt_arc.lock().tool_plugin_schemas();
+                    let skill_tool_commands: Vec<(String, String)> = rt_arc
+                        .lock()
+                        .tool_skill_commands()
+                        .into_iter()
+                        .map(|(c, d)| (c.to_string(), d.to_string()))
+                        .collect();
+                    crate::tui::app::ReloadOutput {
+                        wasm_result: Some(result),
+                        tool_schemas,
+                        skill_tool_commands,
+                    }
+                });
+                app.reload_task = Some(handle);
+            } else {
+                app.is_reloading = false;
+                app.show_toast("WASM runtime not available.".to_string());
+            }
+        }
+        crate::commands::CommandResult::ContextInfo => {
+            let builtin_tools: std::collections::HashSet<&str> = [
+                "bash",
+                "read",
+                "write",
+                "edit",
+                "spawn_agent",
+                "check_agents",
+                "collect_agent",
+                "cancel_agent",
+                "merge_agent",
+            ]
+            .into();
 
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    for build in &result.builds {
-                        let status = if build.success { "ok" } else { "FAILED" };
-                        tab.chat_lines.push(ChatItem::Line(ChatLine {
-                            role: crate::session::message::Role::System,
-                            content: format!("build {} — {status}", build.name),
-                        }));
-                        if !build.success {
-                            let last_lines: String = build
-                                .stderr
-                                .lines()
-                                .filter(|l| l.starts_with("error"))
-                                .take(5)
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            if !last_lines.is_empty() {
-                                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                    role: crate::session::message::Role::System,
-                                    content: last_lines,
-                                }));
-                            }
-                        }
-                    }
+            let mut lines = Vec::new();
+            let mut schemas = app.tools.list_schemas();
+            schemas.sort_by(|a, b| a.name.cmp(&b.name));
 
-                    let mut parts = Vec::new();
-                    if !result.added.is_empty() {
-                        parts.push(format!("loaded: {}", result.added.join(", ")));
-                    }
-                    if !result.removed.is_empty() {
-                        parts.push(format!("removed: {}", result.removed.join(", ")));
-                    }
-                    if !result.errors.is_empty() {
-                        parts.push(format!("errors: {}", result.errors.join("; ")));
-                    }
-                    let msg = if parts.is_empty() && result.builds.is_empty() {
-                        "No WASM plugins found.".to_string()
-                    } else if parts.is_empty() {
-                        "Reload complete.".to_string()
-                    } else {
-                        parts.join(" | ")
-                    };
-                    tab.chat_lines.push(ChatItem::Line(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: msg,
-                    }));
-                }
+            let (core_tools, plugin_tools): (Vec<_>, Vec<_>) = schemas
+                .iter()
+                .partition(|s| builtin_tools.contains(s.name.as_str()));
 
-                let skills = crate::session::skills::discover_layered(
-                    Some(&app.project),
-                    &crate::config::paths::user_home(),
-                    &app.config.skills.dirs,
-                );
-                let command_list = crate::commands::dispatcher::list_commands_with_plugins(
-                    &skills,
-                    Some(&app.plugin_manager),
-                    app.wasm_runtime.as_ref(),
-                );
-                app.command_items = command_list
-                    .iter()
-                    .map(|cmd| PickerItem {
-                        id: cmd.name.clone(),
-                        label: cmd.name.clone(),
-                        description: cmd.summary.clone(),
+            lines.push("### Tools".to_string());
+            lines.push(String::new());
+            for schema in &core_tools {
+                format_bullet(&mut lines, &schema.name, &schema.description, "");
+            }
+
+            if !plugin_tools.is_empty() {
+                let rt_guard = app.wasm_runtime.as_ref().map(|rt| rt.lock());
+                let skill_cmds: std::collections::HashSet<String> = rt_guard
+                    .as_ref()
+                    .map(|rt| {
+                        rt.commands()
+                            .into_iter()
+                            .map(|(c, _)| c.to_string())
+                            .collect()
                     })
-                    .collect();
-            } else if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                    .unwrap_or_default();
+                drop(rt_guard);
+
+                lines.push(String::new());
+                lines.push("### Plugin tools".to_string());
+                lines.push(String::new());
+                for schema in &plugin_tools {
+                    let tag = if skill_cmds.contains(&schema.name) {
+                        " (s)"
+                    } else {
+                        ""
+                    };
+                    format_bullet(&mut lines, &schema.name, &schema.description, tag);
+                }
+            }
+
+            let skills = crate::session::skills::discover_layered(
+                Some(&app.project),
+                &crate::config::paths::user_home(),
+                &app.config.skills.dirs,
+            );
+            if !skills.is_empty() {
+                lines.push(String::new());
+                lines.push("### Skills".to_string());
+                lines.push(String::new());
+                for skill in &skills {
+                    let tag = if skill.is_tool { " [tool]" } else { "" };
+                    format_bullet(&mut lines, &skill.name, &skill.description, tag);
+                }
+            }
+
+            {
+                let rt_guard2 = app.wasm_runtime.as_ref().map(|rt| rt.lock());
+                let wasm_skill_only: Vec<(&str, &str)> = rt_guard2
+                    .as_ref()
+                    .map(|rt| {
+                        rt.commands()
+                            .into_iter()
+                            .filter(|(cmd, _)| {
+                                !rt.tool_skill_commands().iter().any(|(c, _)| c == cmd)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let process_cmds = app.plugin_manager.plugin_commands();
+
+                if !wasm_skill_only.is_empty() || !process_cmds.is_empty() {
+                    lines.push(String::new());
+                    lines.push("### Plugin commands".to_string());
+                    lines.push(String::new());
+                    for (name, desc) in &wasm_skill_only {
+                        format_bullet(&mut lines, name, desc, "");
+                    }
+                    for (name, summary) in &process_cmds {
+                        format_bullet(&mut lines, name, summary, "");
+                    }
+                }
+            }
+
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: "WASM runtime not available.".into(),
+                    role: crate::session::message::Role::Assistant,
+                    content: lines.join("\n"),
                 }));
             }
         }
@@ -811,7 +876,8 @@ pub async fn send_message(
                         if let Some(tool) = app.tools.get(&tc.name) {
                             let args: serde_json::Value =
                                 serde_json::from_str(&tc.args_json).unwrap_or_default();
-                            match tool.invoke(args).await {
+                            let noop = crate::tools::traits::NoopInputRequester;
+                            match tool.invoke(args, &noop).await {
                                 Ok(r) => crate::session::message::ToolResult {
                                     id: tc.id.clone(),
                                     output: r.output,
@@ -891,4 +957,95 @@ pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::S
     app.frame_tick = app.frame_tick.wrapping_add(1);
     app.recompute_display_lines(sz.width);
     let _ = terminal.draw(|f| app.render(f));
+}
+
+pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
+    use crate::tui::picker::PickerItem;
+
+    app.tools.retain_builtins();
+
+    // Register WASM tool plugins
+    for (plugin_key, meta) in &output.tool_schemas {
+        let adapter = crate::plugin::wasm_tool_adapter::WasmToolAdapter::new(
+            std::sync::Arc::clone(app.wasm_runtime.as_ref().unwrap()),
+            plugin_key.clone(),
+            meta.name.clone(),
+            meta.description.clone(),
+            &meta.parameters_json,
+        );
+        app.tools.register(std::sync::Arc::new(adapter));
+    }
+
+    // Register WASM skill-tools (is_tool only)
+    for (command, description) in &output.skill_tool_commands {
+        let adapter = crate::plugin::wasm_tool_adapter::WasmSkillToolAdapter::new(
+            std::sync::Arc::clone(app.wasm_runtime.as_ref().unwrap()),
+            command.clone(),
+            format!("Toggle skill: {description}"),
+        );
+        app.tools.register(std::sync::Arc::new(adapter));
+    }
+
+    // Re-discover markdown skills and register isTool skills
+    let skills = crate::session::skills::discover_layered(
+        Some(&app.project),
+        &crate::config::paths::user_home(),
+        &app.config.skills.dirs,
+    );
+    crate::tools::skill_tool::register_skill_tools(&skills, &mut app.tools);
+
+    // Rebuild command items
+    {
+        let rt_guard = app.wasm_runtime.as_ref().map(|rt| rt.lock());
+        let command_list = crate::commands::dispatcher::list_commands_with_plugins(
+            &skills,
+            Some(&app.plugin_manager),
+            rt_guard.as_deref(),
+        );
+        app.command_items = command_list
+            .iter()
+            .map(|cmd| PickerItem {
+                id: cmd.name.clone(),
+                label: cmd.name.clone(),
+                description: cmd.summary.clone(),
+                source_tag: crate::tui::app::command_source_tag(&cmd.source),
+            })
+            .collect();
+    }
+
+    // Show result
+    if let Some(ref result) = output.wasm_result {
+        let mut parts = Vec::new();
+        for build in &result.builds {
+            if !build.success {
+                parts.push(format!("build {} FAILED", build.name));
+            }
+        }
+        if !result.errors.is_empty() {
+            parts.push(format!("errors: {}", result.errors.join("; ")));
+        }
+        let msg = if parts.is_empty() {
+            format!("Reload complete. {} tools registered.", app.tools.count())
+        } else {
+            format!(
+                "Reload complete ({} tools). {}",
+                app.tools.count(),
+                parts.join(" | ")
+            )
+        };
+        app.show_toast(msg);
+    } else {
+        app.show_toast(format!(
+            "Reload complete. {} tools registered.",
+            app.tools.count()
+        ));
+    }
+}
+
+fn format_bullet(lines: &mut Vec<String>, name: &str, description: &str, tag: &str) {
+    if description.is_empty() {
+        lines.push(format!("- **{name}**{tag}"));
+    } else {
+        lines.push(format!("- **{name}**{tag} — {description}"));
+    }
 }

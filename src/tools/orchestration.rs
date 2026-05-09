@@ -8,7 +8,7 @@ use crate::config::schema::Config;
 use crate::session::orchestration::SessionPool;
 use crate::store::session_store::SessionStore;
 
-use super::traits::{Tool, ToolError, ToolResult, ToolSchema};
+use super::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 
 // ---------------------------------------------------------------------------
 // spawn_agent
@@ -26,9 +26,10 @@ pub struct SpawnAgentTool {
 impl Tool for SpawnAgentTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "spawn_agent",
+            name: "spawn_agent".into(),
             description: "Spawn a child agent on any configured provider. Returns immediately \
-                          with a session ID. The child runs asynchronously in its own git worktree.",
+                          with a session ID. The child runs asynchronously in its own git worktree."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -63,7 +64,11 @@ impl Tool for SpawnAgentTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let prompt = args["prompt"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'prompt'".into()))?
@@ -152,8 +157,8 @@ pub struct CheckAgentsTool {
 impl Tool for CheckAgentsTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "check_agents",
-            description: "Poll status of child agents. Returns status, active tool, tokens, and elapsed time.",
+            name: "check_agents".into(),
+            description: "Poll status of child agents. Returns status, active tool, tokens, and elapsed time.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -167,7 +172,11 @@ impl Tool for CheckAgentsTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let ids: Option<Vec<String>> = args["ids"].as_array().map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
@@ -226,9 +235,10 @@ pub struct CollectAgentTool {
 impl Tool for CollectAgentTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "collect_agent",
+            name: "collect_agent".into(),
             description: "Retrieve the final output from a completed child agent. Includes diff \
-                          summary when the child ran in a worktree.",
+                          summary when the child ran in a worktree."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -242,7 +252,11 @@ impl Tool for CollectAgentTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let session_id = args["session_id"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'session_id'".into()))?;
@@ -284,8 +298,8 @@ pub struct CancelAgentTool {
 impl Tool for CancelAgentTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "cancel_agent",
-            description: "Cancel a running or queued child agent. Cleans up its worktree.",
+            name: "cancel_agent".into(),
+            description: "Cancel a running or queued child agent. Cleans up its worktree.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -303,7 +317,11 @@ impl Tool for CancelAgentTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let session_id = args["session_id"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'session_id'".into()))?;
@@ -339,8 +357,9 @@ pub struct MergeAgentTool {
 impl Tool for MergeAgentTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "merge_agent",
-            description: "Merge a completed child's worktree branch back into the parent branch.",
+            name: "merge_agent".into(),
+            description: "Merge a completed child's worktree branch back into the parent branch."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -367,7 +386,11 @@ impl Tool for MergeAgentTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let session_id = args["session_id"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'session_id'".into()))?;

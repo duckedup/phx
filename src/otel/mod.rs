@@ -68,10 +68,28 @@ pub fn init(cfg: TelemetryInit) -> TelemetryHandle {
 
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
+    let log_writer = {
+        let log_dir = crate::config::paths::config_dir();
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("phoenix.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .unwrap_or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/dev/null")
+                    .unwrap()
+            });
+        std::sync::Mutex::new(file)
+    };
+
     let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
+        .with_writer(log_writer)
         .with_target(true)
-        .with_ansi(true);
+        .with_ansi(false);
 
     tracing_subscriber::registry()
         .with(env_filter)

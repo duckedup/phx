@@ -1,5 +1,12 @@
 pub mod ui;
 
+pub use phoenix_shared;
+pub use phoenix_shared::context_types;
+pub use phoenix_shared::hook_types;
+pub use phoenix_shared::skill_types;
+pub use phoenix_shared::tool_types;
+pub use phoenix_shared::ui_types;
+
 use ui::UiNode;
 
 /// Result returned by a plugin's `execute` or `on_exit` function.
@@ -49,9 +56,7 @@ impl SkillResult {
 
 /// Internal: convert SDK SkillResult to WIT strings.
 #[doc(hidden)]
-pub fn __to_wit_result(
-    r: SkillResult,
-) -> (String, String, String) {
+pub fn __to_wit_result(r: SkillResult) -> (String, String, String) {
     let widget_json = match r.widget {
         Some(node) => node.to_json(),
         None => String::new(),
@@ -107,12 +112,13 @@ pub fn __to_wit_result(
 /// ```
 #[macro_export]
 macro_rules! skill {
-    // Full form: keybind + on_exit
+    // Full form: keybind + on_exit + is_tool
     (
         name: $name:expr,
         command: $command:expr,
         description: $desc:expr,
         keybind: $kb:expr,
+        is_tool: $is_tool:expr,
         execute($args:ident) $body:block,
         on_exit() $exit_body:block
     ) => {
@@ -125,12 +131,19 @@ macro_rules! skill {
                         command: string,
                         description: string,
                         keybind: string,
+                        is-tool: bool,
                     }
                     record skill-result {
                         context: string,
                         toast: string,
                         widget: string,
                     }
+                    record command-output {
+                        stdout: string,
+                        stderr: string,
+                        exit-code: s32,
+                    }
+                    import run-command: func(program: string, args: list<string>) -> result<command-output, string>;
                     export get-metadata: func() -> plugin-metadata;
                     export execute: func(arguments: string) -> result<skill-result, string>;
                     export on-exit: func() -> result<skill-result, string>;
@@ -154,6 +167,7 @@ macro_rules! skill {
                     command: $command.into(),
                     description: $desc.into(),
                     keybind: $kb.into(),
+                    is_tool: $is_tool,
                 }
             }
 
@@ -170,6 +184,25 @@ macro_rules! skill {
             }
         }
     };
+    // Full form: keybind + on_exit (no is_tool, defaults false)
+    (
+        name: $name:expr,
+        command: $command:expr,
+        description: $desc:expr,
+        keybind: $kb:expr,
+        execute($args:ident) $body:block,
+        on_exit() $exit_body:block
+    ) => {
+        $crate::skill! {
+            name: $name,
+            command: $command,
+            description: $desc,
+            keybind: $kb,
+            is_tool: false,
+            execute($args) $body,
+            on_exit() $exit_body
+        }
+    };
     // Basic form: no keybind, no exit
     (
         name: $name:expr,
@@ -177,59 +210,104 @@ macro_rules! skill {
         description: $desc:expr,
         execute($args:ident) $body:block
     ) => {
+        $crate::skill! {
+            name: $name,
+            command: $command,
+            description: $desc,
+            keybind: "",
+            is_tool: false,
+            execute($args) $body,
+            on_exit() {
+                Ok($crate::SkillResult::empty())
+            }
+        }
+    };
+}
+
+/// Declare a Phoenix tool plugin.
+///
+/// # Example
+/// ```rust,ignore
+/// use phoenix_plugin_sdk::tool;
+///
+/// tool! {
+///     tools: [
+///         {
+///             name: "greet",
+///             description: "Greet someone",
+///             parameters: r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#,
+///             invoke(name, args) {
+///                 let who = args.get("name").and_then(|v| v.as_str()).unwrap_or("world");
+///                 Ok((format!("Hello, {who}!"), false))
+///             }
+///         }
+///     ]
+/// }
+/// ```
+#[macro_export]
+macro_rules! tool {
+    (
+        tools: [
+            $(
+                {
+                    name: $name:expr,
+                    description: $desc:expr,
+                    parameters: $params:expr,
+                    invoke($tool_name_arg:ident, $args_arg:ident) $body:block
+                }
+            ),+ $(,)?
+        ]
+    ) => {
         ::wit_bindgen::generate!({
             inline: r#"
                 package phoenix:plugin@0.1.0;
-                world skill-plugin {
-                    record plugin-metadata {
+                world tool-plugin {
+                    record tool-metadata {
                         name: string,
-                        command: string,
                         description: string,
-                        keybind: string,
+                        parameters-json: string,
                     }
-                    record skill-result {
-                        context: string,
-                        toast: string,
-                        widget: string,
+                    record tool-result {
+                        output: string,
+                        is-error: bool,
                     }
-                    export get-metadata: func() -> plugin-metadata;
-                    export execute: func(arguments: string) -> result<skill-result, string>;
-                    export on-exit: func() -> result<skill-result, string>;
+                    export get-tool-metadata: func() -> list<tool-metadata>;
+                    export invoke-tool: func(name: string, args-json: string) -> result<tool-result, string>;
                 }
             "#,
-            world: "skill-plugin",
+            world: "tool-plugin",
         });
 
-        struct PhoenixSkillPlugin;
-        export!(PhoenixSkillPlugin);
+        struct PhoenixToolPlugin;
+        export!(PhoenixToolPlugin);
 
-        fn __convert(r: $crate::SkillResult) -> SkillResult {
-            let (context, toast, widget) = $crate::__to_wit_result(r);
-            SkillResult { context, toast, widget }
-        }
+        impl Guest for PhoenixToolPlugin {
+            fn get_tool_metadata() -> Vec<ToolMetadata> {
+                vec![
+                    $(
+                        ToolMetadata {
+                            name: $name.into(),
+                            description: $desc.into(),
+                            parameters_json: $params.into(),
+                        },
+                    )+
+                ]
+            }
 
-        impl Guest for PhoenixSkillPlugin {
-            fn get_metadata() -> PluginMetadata {
-                PluginMetadata {
-                    name: $name.into(),
-                    command: $command.into(),
-                    description: $desc.into(),
-                    keybind: String::new(),
+            fn invoke_tool(__tool_name: String, __args_json: String) -> Result<ToolResult, String> {
+                let __parsed_args: serde_json::Value = serde_json::from_str(&__args_json)
+                    .map_err(|e| format!("invalid JSON args: {e}"))?;
+                match __tool_name.as_str() {
+                    $(
+                        $name => {
+                            fn __inner($tool_name_arg: String, $args_arg: serde_json::Value) -> Result<(String, bool), String>
+                                $body
+                            let (output, is_error) = __inner(__tool_name, __parsed_args)?;
+                            Ok(ToolResult { output, is_error })
+                        }
+                    )+
+                    other => Err(format!("unknown tool: {other}")),
                 }
-            }
-
-            fn execute($args: String) -> Result<SkillResult, String> {
-                fn __inner($args: String) -> Result<$crate::SkillResult, String>
-                    $body
-                __inner($args).map(__convert)
-            }
-
-            fn on_exit() -> Result<SkillResult, String> {
-                Ok(SkillResult {
-                    context: String::new(),
-                    toast: String::new(),
-                    widget: String::new(),
-                })
             }
         }
     };

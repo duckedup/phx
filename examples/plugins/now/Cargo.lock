@@ -376,6 +376,7 @@ name = "phoenix-plugin-now"
 version = "0.1.0"
 dependencies = [
  "phoenix-plugin-sdk",
+ "serde_json",
  "wit-bindgen",
 ]
 
@@ -383,7 +384,16 @@ dependencies = [
 name = "phoenix-plugin-sdk"
 version = "0.1.0"
 dependencies = [
+ "phoenix-shared",
  "wit-bindgen",
+]
+
+[[package]]
+name = "phoenix-shared"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

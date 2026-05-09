@@ -2,6 +2,7 @@ pub mod add_model_wizard;
 pub mod app;
 pub mod components;
 pub mod input;
+pub mod input_requester;
 pub mod layout;
 pub mod message_handler;
 pub mod models_page;

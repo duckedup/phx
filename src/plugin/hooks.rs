@@ -1,98 +1,71 @@
-use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+use async_trait::async_trait;
+
+pub use phoenix_shared::hook_types::{HookAction, HookEvent};
+
 use super::handle::PluginHandle;
 
 const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum HookEvent {
-    SessionStart,
-    SessionEnd,
-    Token,
-    ToolCallStart,
-    ToolCallEnd,
-    CompactionStart,
-    MessagePreSend,
-    ContextLoaded,
-    ContextCompacted,
+#[async_trait]
+pub trait HookSubscriber: Send + Sync {
+    async fn on_notify(&self, event: &str, data: serde_json::Value) -> anyhow::Result<()>;
+    async fn on_hook(&self, event: &str, data: serde_json::Value) -> anyhow::Result<HookAction>;
+    fn name(&self) -> &str;
 }
 
-impl HookEvent {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::SessionStart => "session_start",
-            Self::SessionEnd => "session_end",
-            Self::Token => "token",
-            Self::ToolCallStart => "tool_call_start",
-            Self::ToolCallEnd => "tool_call_end",
-            Self::CompactionStart => "compaction_start",
-            Self::MessagePreSend => "message_pre_send",
-            Self::ContextLoaded => "context_loaded",
-            Self::ContextCompacted => "context_compacted",
-        }
+#[async_trait]
+impl HookSubscriber for PluginHandle {
+    async fn on_notify(&self, _event: &str, data: serde_json::Value) -> anyhow::Result<()> {
+        self.notify("event/notify", data).await
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "session_start" => Some(Self::SessionStart),
-            "session_end" => Some(Self::SessionEnd),
-            "token" => Some(Self::Token),
-            "tool_call_start" => Some(Self::ToolCallStart),
-            "tool_call_end" => Some(Self::ToolCallEnd),
-            "compaction_start" => Some(Self::CompactionStart),
-            "message_pre_send" => Some(Self::MessagePreSend),
-            "context_loaded" => Some(Self::ContextLoaded),
-            "context_compacted" => Some(Self::ContextCompacted),
-            _ => None,
-        }
+    async fn on_hook(&self, _event: &str, data: serde_json::Value) -> anyhow::Result<HookAction> {
+        let value = self
+            .request_with_timeout("event/hook", data, DEFAULT_HOOK_TIMEOUT)
+            .await?;
+        Ok(serde_json::from_value::<HookAction>(value).unwrap_or_default())
     }
 
-    pub fn is_blockable(&self) -> bool {
-        matches!(
-            self,
-            Self::ToolCallStart | Self::ToolCallEnd | Self::CompactionStart | Self::MessagePreSend
-        )
+    fn name(&self) -> &str {
+        PluginHandle::name(self)
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "action")]
-pub enum HookAction {
-    #[default]
-    Allow,
-    Block {
-        reason: String,
-    },
-    Modify {
-        data: serde_json::Value,
-    },
-}
-
-struct PluginSubscription {
-    handle: Arc<PluginHandle>,
+struct HookRegistration {
+    subscriber: Arc<dyn HookSubscriber>,
     subscribe: HashSet<HookEvent>,
     can_block: HashSet<HookEvent>,
 }
 
 pub struct HookDispatcher {
-    plugins: RwLock<Vec<PluginSubscription>>,
+    registrations: RwLock<Vec<HookRegistration>>,
 }
 
 impl HookDispatcher {
     pub fn new() -> Self {
         Self {
-            plugins: RwLock::new(Vec::new()),
+            registrations: RwLock::new(Vec::new()),
         }
     }
 
     pub async fn register(
         &self,
         handle: Arc<PluginHandle>,
+        subscribe: Vec<String>,
+        can_block: Vec<String>,
+    ) {
+        self.register_subscriber(handle as Arc<dyn HookSubscriber>, subscribe, can_block)
+            .await;
+    }
+
+    pub async fn register_subscriber(
+        &self,
+        subscriber: Arc<dyn HookSubscriber>,
         subscribe: Vec<String>,
         can_block: Vec<String>,
     ) {
@@ -105,26 +78,29 @@ impl HookDispatcher {
             .filter_map(|s| HookEvent::parse(s))
             .collect();
 
-        let mut plugins = self.plugins.write().await;
-        plugins.push(PluginSubscription {
-            handle,
+        let mut regs = self.registrations.write().await;
+        regs.push(HookRegistration {
+            subscriber,
             subscribe: subscribe_set,
             can_block: block_set,
         });
     }
 
     pub async fn notify(&self, event: HookEvent, data: serde_json::Value) {
-        let plugins = self.plugins.read().await;
-        for sub in plugins.iter() {
-            if !sub.subscribe.contains(&event) {
+        let regs = self.registrations.read().await;
+        for reg in regs.iter() {
+            if !reg.subscribe.contains(&event) {
                 continue;
             }
             let params = serde_json::json!({
                 "event": event.as_str(),
                 "data": data,
             });
-            if let Err(e) = sub.handle.notify("event/notify", params).await {
-                tracing::warn!("plugin '{}' notify failed: {e}", sub.handle.name());
+            if let Err(e) = reg.subscriber.on_notify(event.as_str(), params).await {
+                tracing::warn!(
+                    "hook subscriber '{}' notify failed: {e}",
+                    reg.subscriber.name()
+                );
             }
         }
     }
@@ -135,17 +111,17 @@ impl HookDispatcher {
             return HookAction::Allow;
         }
 
-        let plugins = self.plugins.read().await;
+        let regs = self.registrations.read().await;
         let mut current_data = data;
 
-        for sub in plugins.iter() {
-            if !sub.can_block.contains(&event) {
-                if sub.subscribe.contains(&event) {
+        for reg in regs.iter() {
+            if !reg.can_block.contains(&event) {
+                if reg.subscribe.contains(&event) {
                     let params = serde_json::json!({
                         "event": event.as_str(),
                         "data": current_data,
                     });
-                    let _ = sub.handle.notify("event/notify", params).await;
+                    let _ = reg.subscriber.on_notify(event.as_str(), params).await;
                 }
                 continue;
             }
@@ -155,27 +131,18 @@ impl HookDispatcher {
                 "data": current_data,
             });
 
-            let result = sub
-                .handle
-                .request_with_timeout("event/hook", params, DEFAULT_HOOK_TIMEOUT)
-                .await;
-
-            match result {
-                Ok(value) => {
-                    if let Ok(action) = serde_json::from_value::<HookAction>(value) {
-                        match &action {
-                            HookAction::Block { .. } => return action,
-                            HookAction::Modify { data } => {
-                                current_data = data.clone();
-                            }
-                            HookAction::Allow => {}
-                        }
+            match reg.subscriber.on_hook(event.as_str(), params).await {
+                Ok(action) => match &action {
+                    HookAction::Block { .. } => return action,
+                    HookAction::Modify { data } => {
+                        current_data = data.clone();
                     }
-                }
+                    HookAction::Allow => {}
+                },
                 Err(e) => {
                     tracing::warn!(
-                        "plugin '{}' hook timed out or failed: {e}, allowing",
-                        sub.handle.name()
+                        "hook subscriber '{}' timed out or failed: {e}, allowing",
+                        reg.subscriber.name()
                     );
                 }
             }
@@ -185,8 +152,8 @@ impl HookDispatcher {
     }
 
     pub async fn has_subscribers(&self, event: &HookEvent) -> bool {
-        let plugins = self.plugins.read().await;
-        plugins.iter().any(|s| s.subscribe.contains(event))
+        let regs = self.registrations.read().await;
+        regs.iter().any(|r| r.subscribe.contains(event))
     }
 }
 
@@ -199,49 +166,6 @@ impl Default for HookDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hook_event_roundtrip() {
-        for event in [
-            HookEvent::SessionStart,
-            HookEvent::ToolCallStart,
-            HookEvent::CompactionStart,
-            HookEvent::MessagePreSend,
-        ] {
-            let s = event.as_str();
-            let back = HookEvent::parse(s).unwrap();
-            assert_eq!(back, event);
-        }
-    }
-
-    #[test]
-    fn blockable_events() {
-        assert!(HookEvent::ToolCallStart.is_blockable());
-        assert!(HookEvent::ToolCallEnd.is_blockable());
-        assert!(HookEvent::CompactionStart.is_blockable());
-        assert!(HookEvent::MessagePreSend.is_blockable());
-        assert!(!HookEvent::Token.is_blockable());
-        assert!(!HookEvent::SessionStart.is_blockable());
-    }
-
-    #[test]
-    fn unknown_event_returns_none() {
-        assert!(HookEvent::parse("bogus").is_none());
-    }
-
-    #[test]
-    fn hook_action_deserialize() {
-        let allow: HookAction = serde_json::from_str(r#"{"action": "allow"}"#).unwrap();
-        assert!(matches!(allow, HookAction::Allow));
-
-        let block: HookAction =
-            serde_json::from_str(r#"{"action": "block", "reason": "dangerous"}"#).unwrap();
-        assert!(matches!(block, HookAction::Block { .. }));
-
-        let modify: HookAction =
-            serde_json::from_str(r#"{"action": "modify", "data": {"args": {}}}"#).unwrap();
-        assert!(matches!(modify, HookAction::Modify { .. }));
-    }
 
     #[tokio::test]
     async fn empty_dispatcher_allows() {

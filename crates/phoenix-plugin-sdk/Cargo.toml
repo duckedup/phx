@@ -7,3 +7,4 @@ description = "SDK for building Phoenix WASM skill plugins"
 
 [dependencies]
 wit-bindgen = "0.41"
+phoenix-shared = { path = "../phoenix-shared" }

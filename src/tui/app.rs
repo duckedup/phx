@@ -53,7 +53,7 @@ pub struct App {
     pub pending_skill_message: Option<String>,
     pub plugin_manager: PluginManager,
     pub extra_plugin_dirs: Vec<std::path::PathBuf>,
-    pub wasm_runtime: Option<WasmRuntime>,
+    pub wasm_runtime: Option<Arc<parking_lot::Mutex<WasmRuntime>>>,
     pub command_items: Vec<PickerItem>,
     pub display_lines: Vec<DisplayLine>,
     pub chat_area_height: u16,
@@ -61,6 +61,14 @@ pub struct App {
     pub frame_tick: u64,
     pub selection: Option<Selection>,
     pub toast: Option<toast::Toast>,
+    pub is_reloading: bool,
+    pub reload_task: Option<tokio::task::JoinHandle<ReloadOutput>>,
+}
+
+pub struct ReloadOutput {
+    pub wasm_result: Option<crate::plugin::wasm_runtime::ReloadResult>,
+    pub tool_schemas: Vec<(String, crate::plugin::wasm_runtime::WasmToolMeta)>,
+    pub skill_tool_commands: Vec<(String, String)>,
 }
 
 impl App {
@@ -91,6 +99,8 @@ impl App {
             &crate::config::paths::user_home(),
             &config.skills.dirs,
         );
+        let mut tool_registry = tool_registry;
+        crate::tools::skill_tool::register_skill_tools(&skills, &mut tool_registry);
         let command_list = crate::commands::dispatcher::list_commands(&skills);
         let command_items: Vec<PickerItem> = command_list
             .iter()
@@ -98,6 +108,7 @@ impl App {
                 id: cmd.name.clone(),
                 label: cmd.name.clone(),
                 description: cmd.summary.clone(),
+                source_tag: command_source_tag(&cmd.source),
             })
             .collect();
 
@@ -138,6 +149,8 @@ impl App {
             frame_tick: 0,
             selection: None,
             toast: None,
+            is_reloading: false,
+            reload_task: None,
         }
     }
 
@@ -187,6 +200,12 @@ impl App {
                 }));
         }
         if !result.context.is_empty() {
+            if let Some(tab) = self.current_tab_mut() {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                    role: crate::session::message::Role::Assistant,
+                    content: result.context.clone(),
+                }));
+            }
             self.pending_skill_message = Some(result.context);
         }
     }
@@ -294,14 +313,16 @@ impl App {
 
         match key.code {
             KeyCode::BackTab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                let cmd = self
-                    .wasm_runtime
-                    .as_ref()
-                    .and_then(|rt| rt.command_for_keybind("shift+tab").map(|s| s.to_string()));
+                let rt_clone = self.wasm_runtime.as_ref().map(Arc::clone);
+                let cmd = rt_clone.as_ref().and_then(|rt| {
+                    rt.lock()
+                        .command_for_keybind("shift+tab")
+                        .map(|s| s.to_string())
+                });
                 if let Some(cmd) = cmd
-                    && let Some(rt) = &mut self.wasm_runtime
+                    && let Some(rt) = rt_clone
                 {
-                    match rt.toggle(&cmd, "") {
+                    match rt.lock().toggle(&cmd, "") {
                         Ok(result) => self.apply_skill_result(result),
                         Err(e) => self.show_toast(format!("Plugin error: {e}")),
                     }
@@ -508,7 +529,29 @@ impl App {
             }
         }
 
-        if let Some(ref t) = self.toast
+        if self.is_reloading {
+            use crate::tui::rendering::helpers::spinner_frame;
+            let frame_idx = (self.frame_tick / 4) as usize;
+            let spin = spinner_frame(frame_idx);
+            let msg = "reloading";
+            let text = format!("  {spin} {msg}  ");
+            let width = text.chars().count().min(chunks[1].width as usize) as u16;
+            let x = chunks[1].x + (chunks[1].width.saturating_sub(width)) / 2;
+            let y = chunks[1].y.saturating_sub(1);
+            let bg = self.theme.status_bar_bg();
+            let fg = self.theme.status_bar_fg();
+            let line = ratatui::text::Line::from(ratatui::text::Span::styled(
+                text,
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            ));
+            let area = Rect {
+                x,
+                y,
+                width,
+                height: 1,
+            };
+            frame.render_widget(ratatui::widgets::Paragraph::new(line), area);
+        } else if let Some(ref t) = self.toast
             && !t.is_expired()
         {
             toast::render_toast(frame, chunks[1], t, &self.theme);
@@ -690,6 +733,16 @@ impl App {
 
 // ─── Main loop ───────────────────────────────────────────────────────────────
 
+pub fn command_source_tag(source: &crate::commands::dispatcher::CommandSource) -> Option<String> {
+    use crate::commands::dispatcher::CommandSource;
+    match source {
+        CommandSource::Builtin => None,
+        CommandSource::Skill => Some("skill".into()),
+        CommandSource::Plugin => Some("plugin".into()),
+        CommandSource::WasmPlugin => Some("plugin".into()),
+    }
+}
+
 pub fn resolve_extra_plugin_dirs(
     extras: &[std::path::PathBuf],
     project: &std::path::Path,
@@ -747,11 +800,15 @@ pub async fn run(
             .await;
     }
 
-    if let Ok(mut rt) = WasmRuntime::new() {
+    if let Ok(mut rt) = WasmRuntime::new_with_project(std::env::current_dir().unwrap_or_default()) {
         let wasm_dirs =
             WasmRuntime::discover_dirs(Some(&app.project), &crate::config::paths::user_home());
         for dir in &wasm_dirs {
             let _ = rt.load_from_dir(dir);
+        }
+        let workspace_wasm = app.project.join("target/wasm32-wasip2/release");
+        if workspace_wasm.is_dir() {
+            let _ = rt.load_from_dir(&workspace_wasm);
         }
         let mut source_dirs = WasmRuntime::discover_source_dirs(Some(&app.project));
         resolve_extra_plugin_dirs(&app.extra_plugin_dirs, &app.project, &mut source_dirs);
@@ -761,13 +818,15 @@ pub async fn run(
                 let _ = rt.load_from_dir(&release_dir);
             }
         }
-        app.wasm_runtime = Some(rt);
+        let rt_arc = Arc::new(parking_lot::Mutex::new(rt));
+        crate::plugin::wasm_tool_adapter::register_wasm_tools(&rt_arc, &mut app.tools);
+        app.wasm_runtime = Some(rt_arc);
     }
 
     if app
         .wasm_runtime
         .as_ref()
-        .is_some_and(|rt| rt.skill_count() > 0)
+        .is_some_and(|rt| rt.lock().skill_count() > 0)
         || app.plugin_manager.plugin_count() > 0
     {
         let skills = crate::session::skills::discover_layered(
@@ -775,10 +834,11 @@ pub async fn run(
             &crate::config::paths::user_home(),
             &app.config.skills.dirs,
         );
+        let rt_ref = app.wasm_runtime.as_ref().map(|rt| rt.lock());
         let command_list = crate::commands::dispatcher::list_commands_with_plugins(
             &skills,
             Some(&app.plugin_manager),
-            app.wasm_runtime.as_ref(),
+            rt_ref.as_deref(),
         );
         app.command_items = command_list
             .iter()
@@ -786,6 +846,7 @@ pub async fn run(
                 id: cmd.name.clone(),
                 label: cmd.name.clone(),
                 description: cmd.summary.clone(),
+                source_tag: command_source_tag(&cmd.source),
             })
             .collect();
     }
@@ -927,6 +988,16 @@ async fn run_loop(
             while let Ok(event) = tab.events_rx.try_recv() {
                 tab.apply_event(event);
             }
+        }
+
+        if let Some(ref task) = app.reload_task
+            && task.is_finished()
+        {
+            let task = app.reload_task.take().unwrap();
+            if let Ok(output) = task.await {
+                message_handler::apply_reload(app, output);
+            }
+            app.is_reloading = false;
         }
 
         if let Some(session_id) = app.pending_session_resume.take() {

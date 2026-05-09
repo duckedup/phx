@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::traits::{Tool, ToolError, ToolResult, ToolSchema};
+use super::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 
 pub struct WriteTool;
 
@@ -9,9 +9,10 @@ pub struct WriteTool;
 impl Tool for WriteTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "write",
+            name: "write".into(),
             description: "Write content to a file. Creates the file if it doesn't exist, \
-                          overwrites if it does. Automatically creates parent directories.",
+                          overwrites if it does. Automatically creates parent directories."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -29,7 +30,11 @@ impl Tool for WriteTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let file_path = args
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -80,6 +85,7 @@ impl Tool for WriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::traits::NoopInputRequester;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -89,7 +95,10 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         let result = WriteTool
-            .invoke(json!({"file_path": path_str, "content": "hello world"}))
+            .invoke(
+                json!({"file_path": path_str, "content": "hello world"}),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
 
@@ -106,7 +115,10 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         let result = WriteTool
-            .invoke(json!({"file_path": path_str, "content": "nested"}))
+            .invoke(
+                json!({"file_path": path_str, "content": "nested"}),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
 
@@ -122,7 +134,10 @@ mod tests {
         let path_str = path.to_str().unwrap();
 
         let result = WriteTool
-            .invoke(json!({"file_path": path_str, "content": "new"}))
+            .invoke(
+                json!({"file_path": path_str, "content": "new"}),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
 
@@ -132,7 +147,9 @@ mod tests {
 
     #[tokio::test]
     async fn write_missing_content() {
-        let result = WriteTool.invoke(json!({"file_path": "/tmp/x"})).await;
+        let result = WriteTool
+            .invoke(json!({"file_path": "/tmp/x"}), &NoopInputRequester)
+            .await;
         match result {
             Err(ToolError::InvalidArgs(msg)) => {
                 assert!(msg.contains("content"), "msg was: {msg}");
@@ -143,7 +160,9 @@ mod tests {
 
     #[tokio::test]
     async fn write_missing_path() {
-        let result = WriteTool.invoke(json!({"content": "data"})).await;
+        let result = WriteTool
+            .invoke(json!({"content": "data"}), &NoopInputRequester)
+            .await;
         match result {
             Err(ToolError::InvalidArgs(msg)) => {
                 assert!(msg.contains("file_path"), "msg was: {msg}");

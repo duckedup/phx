@@ -16,6 +16,9 @@ pub struct SkillMetadata {
     pub license: Option<String>,
     pub metadata: BTreeMap<String, String>,
     pub allowed_tools: Option<String>,
+    pub is_tool: bool,
+    pub hooks: Vec<String>,
+    pub can_block: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,9 @@ pub struct Skill {
     pub license: Option<String>,
     pub metadata: BTreeMap<String, String>,
     pub allowed_tools: Option<String>,
+    pub is_tool: bool,
+    pub hooks: Vec<String>,
+    pub can_block: Vec<String>,
 }
 
 fn find_skill_md(dir: &Path) -> Option<PathBuf> {
@@ -136,6 +142,23 @@ pub fn parse_skill_frontmatter(content: &str) -> (SkillMetadata, String) {
             "compatibility" => meta.compatibility = Some(value.to_string()),
             "license" => meta.license = Some(value.to_string()),
             "allowed-tools" => meta.allowed_tools = Some(value.to_string()),
+            "isTool" | "is-tool" | "is_tool" => {
+                meta.is_tool = value.eq_ignore_ascii_case("true");
+            }
+            "hooks" => {
+                meta.hooks = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
+            "can-block" | "can_block" | "canBlock" => {
+                meta.can_block = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
             "metadata" => {
                 in_metadata = true;
             }
@@ -187,6 +210,9 @@ fn scan_skills_dir(dir: &Path, source: SkillSource) -> Vec<Skill> {
                 license: meta.license,
                 metadata: meta.metadata,
                 allowed_tools: meta.allowed_tools,
+                is_tool: meta.is_tool,
+                hooks: meta.hooks,
+                can_block: meta.can_block,
             });
         }
     }
@@ -271,7 +297,7 @@ pub fn build_skill_catalog(skills: &[Skill]) -> String {
          <available_skills>\n",
     );
 
-    for skill in skills {
+    for skill in skills.iter().filter(|s| !s.is_tool) {
         catalog.push_str("  <skill>\n");
         catalog.push_str(&format!("    <name>{}</name>\n", skill.name));
         catalog.push_str(&format!(

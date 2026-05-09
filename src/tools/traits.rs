@@ -40,11 +40,11 @@ impl ToolResult {
 // ToolSchema
 // ---------------------------------------------------------------------------
 
-/// Static metadata about a tool, including its JSON Schema for parameters.
+/// Metadata about a tool, including its JSON Schema for parameters.
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub parameters: Value,
 }
 
@@ -66,17 +66,89 @@ pub enum ToolError {
 }
 
 // ---------------------------------------------------------------------------
+// InputRequester
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, thiserror::Error)]
+pub enum InputError {
+    #[error("user cancelled")]
+    Cancelled,
+    #[error("input not available in this context")]
+    NotAvailable,
+}
+
+#[async_trait]
+pub trait InputRequester: Send + Sync {
+    async fn confirm(
+        &self,
+        title: &str,
+        message: &str,
+        options: &[(&str, &str)],
+    ) -> Result<String, InputError>;
+
+    async fn pick(
+        &self,
+        title: &str,
+        items: &[(String, String, String)],
+    ) -> Result<String, InputError>;
+
+    async fn text_input(
+        &self,
+        title: &str,
+        prompt: &str,
+        default: &str,
+        masked: bool,
+    ) -> Result<String, InputError>;
+}
+
+pub struct NoopInputRequester;
+
+#[async_trait]
+impl InputRequester for NoopInputRequester {
+    async fn confirm(&self, _: &str, _: &str, _: &[(&str, &str)]) -> Result<String, InputError> {
+        Err(InputError::NotAvailable)
+    }
+    async fn pick(&self, _: &str, _: &[(String, String, String)]) -> Result<String, InputError> {
+        Err(InputError::NotAvailable)
+    }
+    async fn text_input(&self, _: &str, _: &str, _: &str, _: bool) -> Result<String, InputError> {
+        Err(InputError::NotAvailable)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool trait
 // ---------------------------------------------------------------------------
 
 /// Every built-in tool implements this trait.
 #[async_trait]
 pub trait Tool: Send + Sync {
-    /// Returns the JSON Schema description of this tool.
     fn schema(&self) -> ToolSchema;
 
-    /// Execute the tool with the given JSON arguments.
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError>;
+    async fn invoke(
+        &self,
+        args: Value,
+        input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError>;
+
+    fn needs_context(&self) -> bool {
+        false
+    }
+
+    async fn invoke_with_context(
+        &self,
+        args: Value,
+        _context: &phoenix_shared::context_types::SessionContext,
+        input: &dyn InputRequester,
+    ) -> Result<
+        (
+            ToolResult,
+            Vec<phoenix_shared::context_types::ContextMutation>,
+        ),
+        ToolError,
+    > {
+        self.invoke(args, input).await.map(|r| (r, vec![]))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +185,27 @@ impl ToolRegistry {
     /// Return the schemas for every registered tool (in arbitrary order).
     pub fn list_schemas(&self) -> Vec<ToolSchema> {
         self.tools.values().map(|t| t.schema()).collect()
+    }
+
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.tools.remove(name).is_some()
+    }
+
+    pub fn retain_builtins(&mut self) {
+        self.tools.retain(|name, _| {
+            matches!(
+                name.as_str(),
+                "bash"
+                    | "read"
+                    | "write"
+                    | "edit"
+                    | "spawn_agent"
+                    | "check_agents"
+                    | "collect_agent"
+                    | "cancel_agent"
+                    | "merge_agent"
+            )
+        });
     }
 }
 

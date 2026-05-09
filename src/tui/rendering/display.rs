@@ -218,14 +218,30 @@ fn build_chat_display_lines(
             lines.push(DisplayLine::empty());
         }
         Role::System => {
-            let msg = &cl.content;
-            let text = format!("{indent}  ── {msg} ──");
-            lines.push(DisplayLine::styled(
-                &text,
-                Style::default()
-                    .fg(theme.dim())
-                    .add_modifier(Modifier::ITALIC),
-            ));
+            let sys_style = Style::default()
+                .fg(theme.dim())
+                .add_modifier(Modifier::ITALIC);
+            let wrap_width = content_width.saturating_sub(4);
+            let content_lines: Vec<&str> = cl.content.split('\n').collect();
+            if content_lines.len() <= 1 {
+                let text = format!("{indent}  ── {} ──", cl.content);
+                lines.push(DisplayLine::styled(&text, sys_style));
+            } else {
+                lines.push(DisplayLine::styled(&format!("{indent}  ──────"), sys_style));
+                for content_line in &content_lines {
+                    if content_line.is_empty() {
+                        lines.push(DisplayLine::empty());
+                    } else {
+                        for wl in wrap_text(content_line, wrap_width) {
+                            lines.push(DisplayLine::styled(
+                                &format!("{body_indent}{wl}"),
+                                sys_style,
+                            ));
+                        }
+                    }
+                }
+                lines.push(DisplayLine::styled(&format!("{indent}  ──────"), sys_style));
+            }
             lines.push(DisplayLine::empty());
         }
     }

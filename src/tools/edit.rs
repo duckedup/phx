@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::traits::{Tool, ToolError, ToolResult, ToolSchema};
+use super::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 
 pub struct EditTool;
 
@@ -9,10 +9,11 @@ pub struct EditTool;
 impl Tool for EditTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "edit",
+            name: "edit".into(),
             description: "Edit a file by replacing exact text. The old_string must match exactly \
                           (including whitespace). Fails if old_string is not unique unless \
-                          replace_all is true.",
+                          replace_all is true."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -39,7 +40,11 @@ impl Tool for EditTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let file_path = args
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -115,6 +120,7 @@ impl Tool for EditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::traits::NoopInputRequester;
     use tempfile::TempDir;
 
     fn write_temp(dir: &TempDir, name: &str, content: &str) -> String {
@@ -129,11 +135,14 @@ mod tests {
         let path = write_temp(&dir, "test.txt", "hello world");
 
         let result = EditTool
-            .invoke(json!({
-                "file_path": path,
-                "old_string": "hello",
-                "new_string": "goodbye"
-            }))
+            .invoke(
+                json!({
+                    "file_path": path,
+                    "old_string": "hello",
+                    "new_string": "goodbye"
+                }),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
 
@@ -147,11 +156,14 @@ mod tests {
         let path = write_temp(&dir, "dup.txt", "aaa bbb aaa");
 
         let result = EditTool
-            .invoke(json!({
-                "file_path": path,
-                "old_string": "aaa",
-                "new_string": "zzz"
-            }))
+            .invoke(
+                json!({
+                    "file_path": path,
+                    "old_string": "aaa",
+                    "new_string": "zzz"
+                }),
+                &NoopInputRequester,
+            )
             .await;
 
         match result {
@@ -171,12 +183,15 @@ mod tests {
         let path = write_temp(&dir, "all.txt", "aaa bbb aaa ccc aaa");
 
         let result = EditTool
-            .invoke(json!({
-                "file_path": path,
-                "old_string": "aaa",
-                "new_string": "zzz",
-                "replace_all": true
-            }))
+            .invoke(
+                json!({
+                    "file_path": path,
+                    "old_string": "aaa",
+                    "new_string": "zzz",
+                    "replace_all": true
+                }),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
 
@@ -193,11 +208,14 @@ mod tests {
         let path = write_temp(&dir, "nf.txt", "nothing here");
 
         let result = EditTool
-            .invoke(json!({
-                "file_path": path,
-                "old_string": "absent",
-                "new_string": "present"
-            }))
+            .invoke(
+                json!({
+                    "file_path": path,
+                    "old_string": "absent",
+                    "new_string": "present"
+                }),
+                &NoopInputRequester,
+            )
             .await;
 
         match result {
@@ -211,11 +229,14 @@ mod tests {
     #[tokio::test]
     async fn edit_empty_old_string() {
         let result = EditTool
-            .invoke(json!({
-                "file_path": "/tmp/x",
-                "old_string": "",
-                "new_string": "y"
-            }))
+            .invoke(
+                json!({
+                    "file_path": "/tmp/x",
+                    "old_string": "",
+                    "new_string": "y"
+                }),
+                &NoopInputRequester,
+            )
             .await;
 
         match result {
@@ -229,11 +250,14 @@ mod tests {
     #[tokio::test]
     async fn edit_missing_file() {
         let result = EditTool
-            .invoke(json!({
-                "file_path": "/tmp/nonexistent_phoenix_edit_test.txt",
-                "old_string": "a",
-                "new_string": "b"
-            }))
+            .invoke(
+                json!({
+                    "file_path": "/tmp/nonexistent_phoenix_edit_test.txt",
+                    "old_string": "a",
+                    "new_string": "b"
+                }),
+                &NoopInputRequester,
+            )
             .await;
 
         match result {
@@ -250,11 +274,14 @@ mod tests {
         let path = write_temp(&dir, "ws.txt", "  hello  \n  world  \n");
 
         let result = EditTool
-            .invoke(json!({
-                "file_path": path,
-                "old_string": "  hello  ",
-                "new_string": "  goodbye  "
-            }))
+            .invoke(
+                json!({
+                    "file_path": path,
+                    "old_string": "  hello  ",
+                    "new_string": "  goodbye  "
+                }),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
 

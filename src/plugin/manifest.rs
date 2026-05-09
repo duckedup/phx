@@ -33,6 +33,8 @@ pub struct PluginToolDef {
     pub description: String,
     #[serde(default = "default_params")]
     pub parameters: serde_json::Value,
+    #[serde(default)]
+    pub needs_context: bool,
 }
 
 fn default_params() -> serde_json::Value {

@@ -90,12 +90,29 @@ pub fn render_command_completion(
         .enumerate()
         .map(|(i, &idx)| {
             let item = &picker.items[idx];
-            let style = if i == picker.cursor {
+            let is_selected = i == picker.cursor;
+            let base_style = if is_selected {
                 Style::default().fg(theme.background).bg(theme.accent)
             } else {
                 Style::default().fg(theme.foreground)
             };
-            ListItem::new(format!(" /{:<14} {}", item.label, item.description)).style(style)
+            let tag = match item.source_tag.as_deref() {
+                Some("plugin") => " (plugin)",
+                Some("skill") => " (skill)",
+                _ => "",
+            };
+            let dim_style = if is_selected {
+                base_style
+            } else {
+                Style::default().fg(theme.dim())
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!(" /{:<14} {}", item.label, item.description),
+                    base_style,
+                ),
+                Span::styled(tag, dim_style),
+            ]))
         })
         .collect();
 

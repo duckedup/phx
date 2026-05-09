@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 
-use super::traits::{Tool, ToolError, ToolResult, ToolSchema};
+use super::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 
 /// Maximum bytes captured from stdout or stderr.
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
@@ -14,9 +14,10 @@ pub struct BashTool;
 impl Tool for BashTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
-            name: "bash",
+            name: "bash".into(),
             description: "Execute a bash command in the current working directory. \
-                          Returns stdout and stderr. Optionally provide a timeout in seconds.",
+                          Returns stdout and stderr. Optionally provide a timeout in seconds."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -35,7 +36,11 @@ impl Tool for BashTool {
         }
     }
 
-    async fn invoke(&self, args: Value) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -171,11 +176,15 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::traits::NoopInputRequester;
 
     #[tokio::test]
     async fn bash_captures_stdout() {
         let tool = BashTool;
-        let result = tool.invoke(json!({"command": "echo hello"})).await.unwrap();
+        let result = tool
+            .invoke(json!({"command": "echo hello"}), &NoopInputRequester)
+            .await
+            .unwrap();
         assert!(result.output.contains("hello"));
         assert!(result.output.contains("exit code: 0"));
         assert!(!result.is_error);
@@ -184,7 +193,7 @@ mod tests {
     #[tokio::test]
     async fn bash_nonzero_exit() {
         let result = BashTool
-            .invoke(json!({"command": "exit 42"}))
+            .invoke(json!({"command": "exit 42"}), &NoopInputRequester)
             .await
             .unwrap();
         assert!(result.output.contains("exit code: 42"));
@@ -194,7 +203,7 @@ mod tests {
     #[tokio::test]
     async fn bash_captures_stderr() {
         let result = BashTool
-            .invoke(json!({"command": "echo err >&2"}))
+            .invoke(json!({"command": "echo err >&2"}), &NoopInputRequester)
             .await
             .unwrap();
         assert!(result.output.contains("--- stderr ---"));
@@ -205,7 +214,10 @@ mod tests {
     #[tokio::test]
     async fn bash_timeout_kills_command() {
         let result = BashTool
-            .invoke(json!({"command": "sleep 60", "timeout": 1}))
+            .invoke(
+                json!({"command": "sleep 60", "timeout": 1}),
+                &NoopInputRequester,
+            )
             .await;
         match result {
             Err(ToolError::Timeout) => {} // expected
@@ -215,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn bash_missing_command() {
-        let result = BashTool.invoke(json!({})).await;
+        let result = BashTool.invoke(json!({}), &NoopInputRequester).await;
         match result {
             Err(ToolError::InvalidArgs(msg)) => {
                 assert!(msg.contains("command"), "message was: {msg}");
@@ -227,7 +239,10 @@ mod tests {
     #[tokio::test]
     async fn bash_stdout_and_stderr_combined() {
         let result = BashTool
-            .invoke(json!({"command": "echo out; echo err >&2"}))
+            .invoke(
+                json!({"command": "echo out; echo err >&2"}),
+                &NoopInputRequester,
+            )
             .await
             .unwrap();
         assert!(result.output.contains("--- stdout ---"));
@@ -244,7 +259,10 @@ mod tests {
             "dd if=/dev/zero bs=1024 count={} 2>/dev/null | tr '\\0' 'A'",
             (MAX_OUTPUT_BYTES / 1024) + 1
         );
-        let result = BashTool.invoke(json!({"command": cmd})).await.unwrap();
+        let result = BashTool
+            .invoke(json!({"command": cmd}), &NoopInputRequester)
+            .await
+            .unwrap();
         assert!(result.truncated);
     }
 }

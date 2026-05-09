@@ -13,6 +13,8 @@ pub struct PickerItem {
     pub id: String,
     pub label: String,
     pub description: String,
+    #[serde(default)]
+    pub source_tag: Option<String>,
 }
 
 pub struct PickerState {
@@ -132,16 +134,19 @@ mod tests {
                 id: "a".into(),
                 label: "model".into(),
                 description: "".into(),
+                source_tag: None,
             },
             PickerItem {
                 id: "b".into(),
                 label: "theme".into(),
                 description: "".into(),
+                source_tag: None,
             },
             PickerItem {
                 id: "c".into(),
                 label: "resume".into(),
                 description: "".into(),
+                source_tag: None,
             },
         ]
     }

@@ -41,10 +41,16 @@ pub fn render_markdown(
         }
 
         if in_code_block {
+            let code_width = max_width.saturating_sub(4);
+            let display_line = if line.len() > code_width && code_width > 3 {
+                format!("{}...", &line[..code_width - 3])
+            } else {
+                line.to_string()
+            };
             lines.push(DisplayLine::multi(vec![
                 (format!("{indent}│ "), Style::default().fg(theme.dim())),
                 (
-                    line.to_string(),
+                    display_line,
                     Style::default().fg(theme.code_fg()).bg(code_bg),
                 ),
             ]));
@@ -84,21 +90,39 @@ pub fn render_markdown(
 
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
             let item = &trimmed[2..];
-            let mut parts = vec![(format!("{indent}  • "), Style::default().fg(theme.dim()))];
-            parts.extend(parse_inline_md(item, theme));
-            lines.push(DisplayLine::multi(parts));
+            let bullet_indent = format!("{indent}  • ");
+            let cont_indent = format!("{indent}    ");
+            let item_width = max_width.saturating_sub(4);
+            let wrapped = wrap_text(item, item_width);
+            for (i, wl) in wrapped.iter().enumerate() {
+                let prefix = if i == 0 {
+                    bullet_indent.clone()
+                } else {
+                    cont_indent.clone()
+                };
+                let mut parts = vec![(prefix, Style::default().fg(theme.dim()))];
+                parts.extend(parse_inline_md(wl, theme));
+                lines.push(DisplayLine::multi(parts));
+            }
             continue;
         }
 
         if let Some(rest) = strip_numbered_list(trimmed) {
-            let mut parts = vec![(format!("{indent}  "), Style::default())];
             let prefix_end = trimmed.len() - rest.len();
-            parts.push((
-                trimmed[..prefix_end].to_string(),
-                Style::default().fg(theme.dim()),
-            ));
-            parts.extend(parse_inline_md(rest, theme));
-            lines.push(DisplayLine::multi(parts));
+            let num_prefix = &trimmed[..prefix_end];
+            let cont_indent = format!("{indent}    ");
+            let item_width = max_width.saturating_sub(4);
+            let wrapped = wrap_text(rest, item_width);
+            for (i, wl) in wrapped.iter().enumerate() {
+                let mut parts = vec![(format!("{indent}  "), Style::default())];
+                if i == 0 {
+                    parts.push((num_prefix.to_string(), Style::default().fg(theme.dim())));
+                } else {
+                    parts.push((cont_indent.clone(), Style::default()));
+                }
+                parts.extend(parse_inline_md(wl, theme));
+                lines.push(DisplayLine::multi(parts));
+            }
             continue;
         }
 

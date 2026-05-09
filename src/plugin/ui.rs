@@ -1,4 +1,10 @@
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
+
+pub struct InputRequest {
+    pub widget: PluginWidget,
+    pub response_tx: oneshot::Sender<PluginWidgetResponse>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "widget")]

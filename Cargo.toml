@@ -1,3 +1,13 @@
+[workspace]
+members = [
+    ".",
+    "crates/phoenix-shared",
+    "crates/phoenix-plugin-sdk",
+    "examples/plugins/now",
+    "examples/plugins/plan",
+    "examples/plugins/review",
+]
+
 [package]
 name = "phoenix"
 version = "0.1.0"
@@ -36,6 +46,7 @@ base64 = "0.22.1"
 wasmtime = { version = "44", features = ["component-model"] }
 wasmtime-wasi = "44"
 worktrunk = { version = "0.48.0", default-features = false }
+phoenix-shared = { path = "crates/phoenix-shared" }
 
 [dev-dependencies]
 tempfile = "3"

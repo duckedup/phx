@@ -5,6 +5,7 @@ skill! {
     command: "plan",
     description: "Enter plan mode — research and formulate a plan without changing files",
     keybind: "shift+tab",
+    is_tool: true,
     execute(arguments) {
         Ok(phoenix_plugin_sdk::SkillResult::with_toast(
             format!(
