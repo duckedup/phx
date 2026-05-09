@@ -5,7 +5,7 @@ use crate::session::message::Role;
 use crate::tui::rendering::diff::{is_diff_content, render_side_by_side_diff};
 use crate::tui::rendering::helpers::wrap_text;
 use crate::tui::rendering::markdown::render_markdown;
-use crate::tui::tabs::{ChatItem, ChatLine, WidgetKind};
+use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine, WidgetKind};
 use crate::tui::theme::Theme;
 
 pub struct DisplayLine {
@@ -46,6 +46,9 @@ pub fn build_item_display_lines(
 ) {
     match item {
         ChatItem::Line(cl) => build_chat_display_lines(lines, cl, theme, content_width, pad),
+        ChatItem::Assistant(al) => {
+            build_assistant_display_lines(lines, al, theme, content_width, pad)
+        }
         ChatItem::Widget(w) => build_widget_display_lines(lines, w, theme, content_width, pad),
     }
 }
@@ -64,6 +67,40 @@ fn build_widget_display_lines(
         content_width,
         pad,
     );
+}
+
+fn build_assistant_display_lines(
+    lines: &mut Vec<DisplayLine>,
+    al: &AssistantLine,
+    theme: &Theme,
+    content_width: usize,
+    pad: u16,
+) {
+    let indent = " ".repeat(pad as usize);
+    let body_indent = format!("{}  ", indent);
+
+    let mut label_spans = vec![
+        (format!("{}  ", indent), Style::default()),
+        ("✦ ".to_string(), Style::default().fg(theme.warning)),
+        (
+            "phoenix".to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if al.turn > 0 {
+        label_spans.push((format!(" · T{}", al.turn), Style::default().fg(theme.dim())));
+    }
+    lines.push(DisplayLine::multi(label_spans));
+    let md_lines = render_markdown(
+        &al.content,
+        theme,
+        &body_indent,
+        content_width.saturating_sub(2),
+    );
+    lines.extend(md_lines);
+    lines.push(DisplayLine::empty());
 }
 
 fn build_chat_display_lines(
@@ -115,23 +152,14 @@ fn build_chat_display_lines(
             lines.push(DisplayLine::empty());
         }
         Role::Assistant => {
-            lines.push(DisplayLine::multi(vec![
-                (format!("{}  ", indent), Style::default()),
-                ("✦ ".to_string(), Style::default().fg(theme.warning)),
-                (
-                    "phoenix".to_string(),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            let md_lines = render_markdown(
+            // Assistant messages should use ChatItem::Assistant; this is a fallback.
+            let body_md = render_markdown(
                 &cl.content,
                 theme,
                 &body_indent,
                 content_width.saturating_sub(2),
             );
-            lines.extend(md_lines);
+            lines.extend(body_md);
             lines.push(DisplayLine::empty());
         }
         Role::ToolCall => {

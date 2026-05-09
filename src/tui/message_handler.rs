@@ -10,7 +10,7 @@ use crate::store::session_store::SessionId;
 use crate::tui::app::App;
 use crate::tui::layout;
 use crate::tui::rendering::helpers::tool_call_summary;
-use crate::tui::tabs::{ChatItem, ChatLine};
+use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine};
 
 pub fn default_system_prompt() -> &'static str {
     "You are Phoenix, a fast and capable coding assistant running in a terminal.\n\
@@ -45,12 +45,19 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
             for val in &raw_messages {
                 if let Ok(msg) = serde_json::from_value::<Message>(val.clone()) {
                     match msg.role {
-                        crate::session::message::Role::User
-                        | crate::session::message::Role::Assistant => {
+                        crate::session::message::Role::User => {
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                                 tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: msg.role.clone(),
                                     content: msg.content.clone(),
+                                }));
+                            }
+                        }
+                        crate::session::message::Role::Assistant => {
+                            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                                tab.chat_lines.push(ChatItem::Assistant(AssistantLine {
+                                    content: msg.content.clone(),
+                                    turn: 0,
                                 }));
                             }
                         }
@@ -485,9 +492,9 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
 
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::Assistant,
+                tab.chat_lines.push(ChatItem::Assistant(AssistantLine {
                     content: lines.join("\n"),
+                    turn: 0,
                 }));
             }
         }
@@ -551,6 +558,8 @@ pub async fn send_message(
     let mut term_events = EventStream::new();
 
     loop {
+        session.turn_count += 1;
+
         let tool_schemas: Vec<ToolSchema> = app
             .tools
             .list_schemas()
@@ -809,9 +818,9 @@ pub async fn send_message(
             session.add_message(asst_msg);
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 let text = std::mem::take(&mut tab.streaming_text);
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::Assistant,
+                tab.chat_lines.push(ChatItem::Assistant(AssistantLine {
                     content: text,
+                    turn: session.turn_count,
                 }));
             }
         }

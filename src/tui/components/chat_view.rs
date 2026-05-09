@@ -33,6 +33,7 @@ pub fn compute_display_lines(
     is_running: bool,
     frame_tick: u64,
     width: u16,
+    turn_count: u32,
 ) -> Vec<DisplayLine> {
     let pad = CHAT_PADDING;
     let content_width = (width as usize).saturating_sub(pad as usize * 2);
@@ -60,7 +61,7 @@ pub fn compute_display_lines(
     }
 
     if !tab.streaming_text.is_empty() {
-        lines.push(DisplayLine::multi(vec![
+        let mut label_spans = vec![
             (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
             ("✦ ".to_string(), Style::default().fg(theme.warning)),
             (
@@ -69,7 +70,14 @@ pub fn compute_display_lines(
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]));
+        ];
+        if turn_count > 0 {
+            label_spans.push((
+                format!(" · T{turn_count}"),
+                Style::default().fg(theme.dim()),
+            ));
+        }
+        lines.push(DisplayLine::multi(label_spans));
         let body_indent = format!("{}  ", " ".repeat(pad as usize));
         for wl in wrap_text(&tab.streaming_text, content_width.saturating_sub(2)) {
             lines.push(DisplayLine::styled(

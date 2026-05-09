@@ -41,6 +41,7 @@ pub struct Session {
     pub cache_read_tokens: u64,
     /// Input tokens from the most recent API call (current context size)
     pub last_turn_input: u64,
+    pub turn_count: u32,
     pub profile: SessionProfile,
     pub persist: bool,
     pub provider_name: String,
@@ -64,6 +65,7 @@ impl Session {
             cache_creation_tokens: 0,
             cache_read_tokens: 0,
             last_turn_input: 0,
+            turn_count: 0,
             profile,
             persist,
             provider_name: String::new(),
@@ -205,6 +207,8 @@ impl Session {
                 let _ = self.events_tx.send(SessionEvent::Error("cancelled".into()));
                 return;
             }
+
+            self.turn_count += 1;
 
             let tool_schemas = self.tool_schemas(tools);
             let base_prompt = self

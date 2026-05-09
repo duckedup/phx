@@ -10,6 +10,12 @@ pub struct ChatLine {
 }
 
 #[derive(Debug, Clone)]
+pub struct AssistantLine {
+    pub content: String,
+    pub turn: u32,
+}
+
+#[derive(Debug, Clone)]
 pub struct WidgetKind {
     pub json: String,
 }
@@ -17,6 +23,7 @@ pub struct WidgetKind {
 #[derive(Debug, Clone)]
 pub enum ChatItem {
     Line(ChatLine),
+    Assistant(AssistantLine),
     Widget(WidgetKind),
 }
 
@@ -76,9 +83,11 @@ impl Tab {
             }
             SessionEvent::Done => {
                 if !self.streaming_text.is_empty() {
-                    self.chat_lines.push(ChatItem::Line(ChatLine {
-                        role: Role::Assistant,
+                    // turn is set to 0 here; the TUI message_handler path
+                    // uses AssistantLine directly with the real turn count.
+                    self.chat_lines.push(ChatItem::Assistant(AssistantLine {
                         content: std::mem::take(&mut self.streaming_text),
+                        turn: 0,
                     }));
                 }
             }

@@ -208,22 +208,25 @@ impl App {
         }
         if !result.context.is_empty() {
             if let Some(tab) = self.current_tab_mut() {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::Assistant,
-                    content: result.context.clone(),
-                }));
+                tab.chat_lines
+                    .push(ChatItem::Assistant(crate::tui::tabs::AssistantLine {
+                        content: result.context.clone(),
+                        turn: 0,
+                    }));
             }
             self.pending_skill_message = Some(result.context);
         }
     }
 
     pub fn recompute_display_lines(&mut self, width: u16) {
+        let turn_count = self.session.as_ref().map_or(0, |s| s.turn_count);
         self.display_lines = chat_view::compute_display_lines(
             self.current_tab(),
             &self.theme,
             self.is_running,
             self.frame_tick,
             width,
+            turn_count,
         );
     }
 
