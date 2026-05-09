@@ -46,6 +46,51 @@ pub fn save_provider(
     Ok(())
 }
 
+/// Load config from `path`, set the active provider and model, and re-save.
+///
+/// Deactivates all other providers so only the chosen one is active.
+pub fn save_active_model(path: &Path, provider_name: &str, model: &str) -> Result<(), ConfigError> {
+    let mut cfg = if path.exists() {
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::io(path, e))?;
+        serde_json::from_str::<Config>(&text).map_err(ConfigError::Parse)?
+    } else {
+        Config::default()
+    };
+
+    for (_, p) in cfg.providers.iter_mut() {
+        p.active = false;
+    }
+    if let Some(profile) = cfg.providers.get_mut(provider_name) {
+        profile.model = model.to_string();
+        profile.active = true;
+    }
+
+    save(&cfg, path)?;
+    debug!(
+        "saved active model '{}' for provider '{}' to {}",
+        model,
+        provider_name,
+        path.display()
+    );
+    Ok(())
+}
+
+/// Load config from `path`, remove a provider entry, and re-save atomically.
+pub fn delete_provider(path: &Path, name: &str) -> Result<(), ConfigError> {
+    let mut cfg = if path.exists() {
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::io(path, e))?;
+        serde_json::from_str::<Config>(&text).map_err(ConfigError::Parse)?
+    } else {
+        return Ok(());
+    };
+
+    cfg.providers.remove(name);
+
+    save(&cfg, path)?;
+    debug!("deleted provider '{}' from {}", name, path.display());
+    Ok(())
+}
+
 /// Load config from `path`, set the theme, and re-save atomically.
 pub fn save_theme(path: &Path, theme_id: &str) -> Result<(), ConfigError> {
     let mut cfg = if path.exists() {

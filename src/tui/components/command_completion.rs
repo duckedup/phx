@@ -7,6 +7,7 @@ use crate::tui::theme::Theme;
 
 pub enum CompletionAction {
     None,
+    Handled,
     Dismiss,
     Complete(String),
     Accept(String),
@@ -16,11 +17,11 @@ pub fn handle_key(picker: &mut PickerState, key: KeyEvent) -> CompletionAction {
     match key.code {
         KeyCode::Up => {
             picker.move_up();
-            CompletionAction::None
+            CompletionAction::Handled
         }
         KeyCode::Down => {
             picker.move_down();
-            CompletionAction::None
+            CompletionAction::Handled
         }
         KeyCode::Tab => {
             let cmd = picker.selected().map(|s| format!("/{}", s.id));

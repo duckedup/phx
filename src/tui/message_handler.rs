@@ -229,28 +229,7 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
         }
         crate::commands::CommandResult::ModelsPage => {
-            let choices = crate::commands::model::list_model_entries(&app.config);
-            if choices.is_empty() {
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatItem::Line(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: "No models configured. Use /connect to add a provider.".into(),
-                    }));
-                }
-            } else {
-                let items: Vec<PickerItem> = choices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| PickerItem {
-                        id: i.to_string(),
-                        label: c.display.clone(),
-                        description: c.provider_name.clone(),
-                        source_tag: None,
-                    })
-                    .collect();
-                app.model_choices = choices;
-                app.picker = Some(PickerState::new(items, PickerMode::Model));
-            }
+            app.models_page = Some(crate::tui::models_page::ModelsPageState::new(&app.config));
         }
         crate::commands::CommandResult::SessionPicker(choices) => {
             if choices.is_empty() {
@@ -950,7 +929,7 @@ pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::S
     let sz_rect = Rect::new(0, 0, sz.width, sz.height);
     let input_lines = app
         .current_tab()
-        .map(|t| t.input.lines.len() as u16)
+        .map(|t| t.input.line_count() as u16)
         .unwrap_or(1);
     let chunks = layout::main_layout(sz_rect, input_lines);
     app.chat_area_height = chunks[0].height;

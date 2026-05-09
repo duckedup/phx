@@ -21,6 +21,7 @@ use crate::tui::components::{
 };
 use crate::tui::layout;
 use crate::tui::message_handler;
+use crate::tui::models_page::{self, ModelsPageState};
 use crate::tui::onboarding;
 use crate::tui::picker::{PickerItem, PickerMode, PickerState};
 use crate::tui::rendering::display::DisplayLine;
@@ -58,11 +59,14 @@ pub struct App {
     pub display_lines: Vec<DisplayLine>,
     pub chat_area_height: u16,
     pub chat_area: Rect,
+    pub input_area: Rect,
     pub frame_tick: u64,
     pub selection: Option<Selection>,
     pub toast: Option<toast::Toast>,
     pub is_reloading: bool,
     pub reload_task: Option<tokio::task::JoinHandle<ReloadOutput>>,
+    pub pending_model_selection: Option<usize>,
+    pub models_page: Option<ModelsPageState>,
 }
 
 pub struct ReloadOutput {
@@ -146,11 +150,14 @@ impl App {
             display_lines: Vec::new(),
             chat_area_height: 0,
             chat_area: Rect::default(),
+            input_area: Rect::default(),
             frame_tick: 0,
             selection: None,
             toast: None,
             is_reloading: false,
             reload_task: None,
+            pending_model_selection: None,
+            models_page: None,
         }
     }
 
@@ -223,15 +230,75 @@ impl App {
     // ─── Key handling ────────────────────────────────────────────────────
 
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        // Cmd+C (macOS) — copy only, never clear/quit
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::SUPER) {
+            if let Some(tab) = self.current_tab_mut()
+                && tab.input.textarea.is_selecting()
+            {
+                let selected = tab.input.selected_text();
+                if !selected.is_empty() {
+                    crate::tui::selection::copy_to_clipboard_osc52(&selected);
+                }
+                tab.input.textarea.cancel_selection();
+            }
+            return true;
+        }
+
+        // Cmd+X (macOS) — cut selection to clipboard
+        if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::SUPER) {
+            if let Some(tab) = self.current_tab_mut()
+                && tab.input.textarea.is_selecting()
+            {
+                let selected = tab.input.selected_text();
+                if !selected.is_empty() {
+                    crate::tui::selection::copy_to_clipboard_osc52(&selected);
+                }
+                tab.input.textarea.cut();
+            }
+            return true;
+        }
+
+        // Cmd+V (macOS) — paste from clipboard
+        if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::SUPER) {
+            if let Some(text) = crate::tui::selection::paste_from_clipboard()
+                && let Some(tab) = self.current_tab_mut()
+            {
+                tab.input.insert_paste(&text);
+            }
+            return true;
+        }
+
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.onboarding.is_some() {
                 self.should_quit = true;
+                return true;
+            }
+            if self.models_page.is_some() {
+                self.models_page = None;
                 return true;
             }
             if self.picker.is_some() {
                 self.restore_theme();
                 self.picker = None;
                 return true;
+            }
+            if let Some(tab) = self.current_tab_mut() {
+                if tab.input.textarea.is_selecting() {
+                    let selected = tab.input.selected_text();
+                    if !selected.is_empty() {
+                        crate::tui::selection::copy_to_clipboard_osc52(&selected);
+                    }
+                    tab.input.textarea.cancel_selection();
+                    self.ctrl_c_count = 0;
+                    self.ctrl_c_time = None;
+                    return true;
+                }
+                if !tab.input.is_empty() {
+                    tab.input.clear();
+                    self.ctrl_c_count = 0;
+                    self.ctrl_c_time = None;
+                    return true;
+                }
             }
             if let Some(t) = self.ctrl_c_time
                 && t.elapsed() > Duration::from_secs(2)
@@ -262,12 +329,22 @@ impl App {
                     env_hint,
                 } => {
                     self.complete_onboarding(name, kind, model, api_key, env_hint);
+                    if let Some(idx) = self.pending_model_selection.take() {
+                        self.apply_model_selection(&idx.to_string());
+                    }
                 }
                 onboarding::Action::Cancelled => {
                     self.onboarding = None;
+                    self.pending_model_selection = None;
                 }
                 onboarding::Action::None => {}
             }
+            return true;
+        }
+
+        if self.models_page.is_some() {
+            let action = self.models_page.as_mut().unwrap().handle_key(key);
+            self.apply_models_page_action(action);
             return true;
         }
 
@@ -290,6 +367,9 @@ impl App {
             let action = command_completion::handle_key(self.picker.as_mut().unwrap(), key);
             match action {
                 command_completion::CompletionAction::None => {}
+                command_completion::CompletionAction::Handled => {
+                    return true;
+                }
                 command_completion::CompletionAction::Dismiss => {
                     self.picker = None;
                     return true;
@@ -343,42 +423,20 @@ impl App {
             }
             KeyCode::Up => {
                 if let Some(tab) = self.current_tab_mut() {
-                    tab.input.history_up();
+                    if tab.input.history_idx.is_some() || tab.input.line_count() == 1 {
+                        tab.input.history_up();
+                    } else {
+                        tab.input.handle_key_event(key);
+                    }
                 }
             }
             KeyCode::Down => {
                 if let Some(tab) = self.current_tab_mut() {
-                    tab.input.history_down();
-                }
-            }
-            KeyCode::Left => {
-                if let Some(tab) = self.current_tab_mut() {
-                    tab.input.move_left();
-                }
-            }
-            KeyCode::Right => {
-                if let Some(tab) = self.current_tab_mut() {
-                    tab.input.move_right();
-                }
-            }
-            KeyCode::Home => {
-                if let Some(tab) = self.current_tab_mut() {
-                    tab.input.home();
-                }
-            }
-            KeyCode::End => {
-                if let Some(tab) = self.current_tab_mut() {
-                    tab.input.end();
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(tab) = self.current_tab_mut() {
-                    tab.input.backspace();
-                }
-            }
-            KeyCode::Delete => {
-                if let Some(tab) = self.current_tab_mut() {
-                    tab.input.delete();
+                    if tab.input.history_idx.is_some() || tab.input.line_count() == 1 {
+                        tab.input.history_down();
+                    } else {
+                        tab.input.handle_key_event(key);
+                    }
                 }
             }
             KeyCode::Enter => {
@@ -401,10 +459,16 @@ impl App {
                     tab.scroll_down(10, total, visible);
                 }
             }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(text) = crate::tui::selection::paste_from_clipboard()
+                    && let Some(tab) = self.current_tab_mut()
+                {
+                    tab.input.insert_paste(&text);
+                }
+            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                let half = (self.chat_area_height as usize) / 2;
                 if let Some(tab) = self.current_tab_mut() {
-                    tab.scroll_up(half);
+                    tab.input.clear();
                 }
             }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -415,12 +479,11 @@ impl App {
                     tab.scroll_down(half, total, visible);
                 }
             }
-            KeyCode::Char(c) => {
+            _ => {
                 if let Some(tab) = self.current_tab_mut() {
-                    tab.input.insert_char(c);
+                    tab.input.handle_key_event(key);
                 }
             }
-            _ => {}
         }
 
         self.update_command_completion();
@@ -429,9 +492,19 @@ impl App {
 
     // ─── Rendering ───────────────────────────────────────────────────────
 
+    fn input_text_rect(&self) -> Rect {
+        let prompt_len = 4u16; // "  > "
+        Rect {
+            x: self.input_area.x + prompt_len,
+            y: self.input_area.y + 1, // skip separator
+            width: self.input_area.width.saturating_sub(prompt_len),
+            height: self.input_area.height.saturating_sub(1),
+        }
+    }
+
     fn input_line_count(&self) -> u16 {
         self.current_tab()
-            .map(|t| t.input.lines.len() as u16)
+            .map(|t| t.input.line_count() as u16)
             .unwrap_or(1)
     }
 
@@ -557,6 +630,10 @@ impl App {
             toast::render_toast(frame, chunks[1], t, &self.theme);
         }
 
+        if let Some(ref page) = self.models_page {
+            models_page::render_models_page(frame, page, &self.theme);
+        }
+
         if let Some(ref ob) = self.onboarding {
             ob.render(frame, &self.theme);
         }
@@ -599,6 +676,95 @@ impl App {
         }
     }
 
+    fn apply_models_page_action(&mut self, action: models_page::ModelsPageAction) {
+        match action {
+            models_page::ModelsPageAction::None => {}
+            models_page::ModelsPageAction::Close => {
+                self.models_page = None;
+            }
+            models_page::ModelsPageAction::AddProvider => {
+                self.onboarding = Some(onboarding::OnboardingState::new());
+            }
+            models_page::ModelsPageAction::DeleteProvider { name } => {
+                let config_path = crate::config::paths::user_config_file();
+                if let Err(e) = crate::config::writer::delete_provider(&config_path, &name) {
+                    self.show_toast(format!("Failed to delete: {e}"));
+                } else {
+                    self.config.providers.remove(&name);
+                    if let Some(page) = &mut self.models_page {
+                        page.refresh(&self.config);
+                    }
+                    let was_active = !self.config.providers.values().any(|p| p.active);
+                    if was_active {
+                        if let Some((pname, pprofile)) =
+                            crate::config::loader::active_provider(&self.config)
+                        {
+                            if let Ok(p) = providers::create_provider(pname, pprofile) {
+                                self.provider = Some(Arc::from(p));
+                            }
+                        } else {
+                            self.provider = None;
+                        }
+                    }
+                    self.show_toast(format!("Deleted provider '{name}'"));
+                }
+            }
+            models_page::ModelsPageAction::SwitchTo { name, model } => {
+                if let Some(cfg_profile) = self.config.providers.get(&name) {
+                    let mut profile = cfg_profile.clone();
+                    profile.model.clone_from(&model);
+                    match providers::create_provider(&name, &profile) {
+                        Ok(p) => {
+                            self.provider = Some(Arc::from(p));
+                            for (_, pp) in self.config.providers.iter_mut() {
+                                pp.active = false;
+                            }
+                            if let Some(cp) = self.config.providers.get_mut(&name) {
+                                cp.active = true;
+                            }
+                            if let Some(session) = &mut self.session {
+                                session.provider_name.clone_from(&name);
+                                session.model_name.clone_from(&model);
+                            }
+                            let config_path = crate::config::paths::user_config_file();
+                            let _ = crate::config::writer::save_active_model(
+                                &config_path,
+                                &name,
+                                &model,
+                            );
+                            if let Some(page) = &mut self.models_page {
+                                page.refresh(&self.config);
+                            }
+                            self.show_toast(format!("Switched to {name}/{model}"));
+                        }
+                        Err(crate::providers::traits::ProviderError::MissingCredential) => {
+                            let kind = profile.kind;
+                            if let Some(preset_idx) =
+                                onboarding::PRESETS.iter().position(|p| p.kind == kind)
+                            {
+                                self.onboarding =
+                                    Some(onboarding::OnboardingState::new_for_api_key(preset_idx));
+                            } else {
+                                self.show_toast("API key required. Use 'e' to edit.");
+                            }
+                        }
+                        Err(e) => {
+                            self.show_toast(format!("Error: {e}"));
+                        }
+                    }
+                }
+            }
+            models_page::ModelsPageAction::EditApiKey { name: _, kind } => {
+                if let Some(preset_idx) = onboarding::PRESETS.iter().position(|p| p.kind == kind) {
+                    self.onboarding =
+                        Some(onboarding::OnboardingState::new_for_api_key(preset_idx));
+                } else {
+                    self.show_toast("No preset for this provider type.");
+                }
+            }
+        }
+    }
+
     fn preview_selected_theme(&mut self) {
         if let Some(selected) = self.picker.as_ref().and_then(|p| p.selected())
             && let Some(t) = theme::get_by_name(&selected.id)
@@ -617,15 +783,66 @@ impl App {
         if let Ok(idx) = id.parse::<usize>()
             && let Some(choice) = self.model_choices.get(idx)
         {
-            match providers::create_provider(&choice.provider_name, &choice.profile) {
+            let mut profile = choice.profile.clone();
+            if profile.resolve_credential().is_none()
+                && let Some(cfg_profile) = self.config.providers.get(&choice.provider_name)
+            {
+                profile.auth = cfg_profile.auth.clone();
+            }
+            match providers::create_provider(&choice.provider_name, &profile) {
                 Ok(p) => {
                     self.provider = Some(Arc::from(p));
+
+                    let provider_name = choice.provider_name.clone();
+                    let new_model = profile.model.clone();
                     let display = choice.display.clone();
+
+                    for (_, p) in self.config.providers.iter_mut() {
+                        p.active = false;
+                    }
+                    if let Some(cfg_profile) = self.config.providers.get_mut(&provider_name) {
+                        cfg_profile.model.clone_from(&new_model);
+                        cfg_profile.active = true;
+                    }
+
+                    if let Some(session) = &mut self.session {
+                        session.provider_name.clone_from(&provider_name);
+                        session.model_name.clone_from(&new_model);
+                    }
+
+                    let config_path = crate::config::paths::user_config_file();
+                    if let Err(e) = crate::config::writer::save_active_model(
+                        &config_path,
+                        &provider_name,
+                        &new_model,
+                    ) {
+                        tracing::warn!("failed to persist model choice: {e}");
+                    }
+
                     if let Some(tab) = self.current_tab_mut() {
                         tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
                             content: format!("Model: {display}"),
                         }));
+                    }
+                }
+                Err(crate::providers::traits::ProviderError::MissingCredential) => {
+                    let kind = profile.kind;
+                    if let Some(preset_idx) =
+                        onboarding::PRESETS.iter().position(|p| p.kind == kind)
+                    {
+                        self.pending_model_selection = Some(idx);
+                        self.onboarding =
+                            Some(onboarding::OnboardingState::new_for_api_key(preset_idx));
+                    } else {
+                        if let Some(tab) = self.current_tab_mut() {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content:
+                                    "API key required. Use /connect to configure this provider."
+                                        .into(),
+                            }));
+                        }
                     }
                 }
                 Err(e) => {
@@ -692,6 +909,10 @@ impl App {
         }
 
         self.onboarding = None;
+
+        if let Some(page) = &mut self.models_page {
+            page.refresh(&self.config);
+        }
 
         if let Some(tab) = self.current_tab_mut() {
             tab.chat_lines.push(ChatItem::Line(ChatLine {
@@ -781,6 +1002,9 @@ pub async fn run(
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableBracketedPaste,
         crossterm::event::EnableMouseCapture,
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        ),
     )?;
 
     let backend = CrosstermBackend::new(stdout);
@@ -862,6 +1086,7 @@ pub async fn run(
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),
+        crossterm::event::PopKeyboardEnhancementFlags,
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::event::DisableBracketedPaste,
         crossterm::event::DisableMouseCapture,
@@ -880,11 +1105,12 @@ async fn run_loop(
         let area = Rect::new(0, 0, size.width, size.height);
         let input_lines = app
             .current_tab()
-            .map(|t| t.input.lines.len() as u16)
+            .map(|t| t.input.line_count() as u16)
             .unwrap_or(1);
         let chunks = layout::main_layout(area, input_lines);
         app.chat_area_height = chunks[0].height;
         app.chat_area = chunks[0];
+        app.input_area = chunks[1];
         app.frame_tick = app.frame_tick.wrapping_add(1);
         if app.toast.as_ref().is_some_and(|t| t.is_expired()) {
             app.toast = None;
@@ -937,18 +1163,59 @@ async fn run_loop(
                             }
                         }
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                            let r = mouse.row;
-                            let c = mouse.column;
-                            app.selection = Some(Selection {
-                                start_row: r,
-                                start_col: c,
-                                end_row: r,
-                                end_col: c,
-                                active: true,
-                            });
+                            if let Some(ref picker) = app.picker {
+                                match picker.mode {
+                                    PickerMode::Theme | PickerMode::Model | PickerMode::Session => {
+                                        let action = modal_picker::handle_click(
+                                            picker,
+                                            area,
+                                            mouse.row,
+                                            mouse.column,
+                                        );
+                                        app.apply_picker_action(action);
+                                        continue;
+                                    }
+                                    PickerMode::CommandComplete => {}
+                                }
+                            }
+                            let input_text_area = app.input_text_rect();
+                            if mouse.row >= input_text_area.y
+                                && mouse.row < input_text_area.y + input_text_area.height
+                                && mouse.column >= input_text_area.x
+                                && mouse.column < input_text_area.x + input_text_area.width
+                            {
+                                let row = (mouse.row - input_text_area.y) as usize;
+                                let col = (mouse.column - input_text_area.x) as usize;
+                                let tw = input_text_area.width as usize;
+                                if let Some(tab) = app.current_tab_mut() {
+                                    tab.input.click_at(row, col, tw);
+                                }
+                                app.selection = None;
+                            } else {
+                                let r = mouse.row;
+                                let c = mouse.column;
+                                app.selection = Some(Selection {
+                                    start_row: r,
+                                    start_col: c,
+                                    end_row: r,
+                                    end_col: c,
+                                    active: true,
+                                });
+                            }
                         }
                         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-                            if let Some(ref mut sel) = app.selection {
+                            let input_text_area = app.input_text_rect();
+                            if app.selection.is_none()
+                                && mouse.row >= input_text_area.y
+                                && mouse.row < input_text_area.y + input_text_area.height
+                            {
+                                let row = (mouse.row - input_text_area.y) as usize;
+                                let col = (mouse.column.saturating_sub(input_text_area.x)) as usize;
+                                let tw = input_text_area.width as usize;
+                                if let Some(tab) = app.current_tab_mut() {
+                                    tab.input.drag_to(row, col, tw);
+                                }
+                            } else if let Some(ref mut sel) = app.selection {
                                 sel.end_row = mouse.row;
                                 sel.end_col = mouse.column;
                             }
@@ -976,6 +1243,22 @@ async fn run_loop(
                             } else {
                                 app.selection = None;
                             }
+                        }
+                        MouseEventKind::Moved
+                            if app.picker.as_ref().is_some_and(|p| {
+                                matches!(
+                                    p.mode,
+                                    PickerMode::Theme | PickerMode::Model | PickerMode::Session
+                                )
+                            }) =>
+                        {
+                            let action = modal_picker::handle_hover(
+                                app.picker.as_mut().unwrap(),
+                                area,
+                                mouse.row,
+                                mouse.column,
+                            );
+                            app.apply_picker_action(action);
                         }
                         _ => {}
                     }

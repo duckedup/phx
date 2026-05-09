@@ -153,7 +153,54 @@ pub fn extract_selected_text(
 }
 
 pub fn copy_to_clipboard_osc52(text: &str) {
+    if copy_to_clipboard_native(text) {
+        return;
+    }
     let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-    // OSC 52: set system clipboard
-    print!("\x1b]52;c;{encoded}\x07");
+    let _ = std::io::Write::write_all(
+        &mut std::io::stdout(),
+        format!("\x1b]52;c;{encoded}\x07").as_bytes(),
+    );
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+}
+
+pub fn paste_from_clipboard() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        Command::new("pbpaste")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+fn copy_to_clipboard_native(text: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        if let Ok(mut child) = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(ref mut stdin) = child.stdin {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            return child.wait().is_ok();
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = text;
+        false
+    }
 }

@@ -64,6 +64,7 @@ pub struct OnboardingState {
     key_cursor: usize,
     model_buf: String,
     model_cursor: usize,
+    skip_model: bool,
 }
 
 pub enum Action {
@@ -87,6 +88,20 @@ impl OnboardingState {
             key_cursor: 0,
             model_buf: String::new(),
             model_cursor: 0,
+            skip_model: false,
+        }
+    }
+
+    pub fn new_for_api_key(provider_idx: usize) -> Self {
+        let preset = &PRESETS[provider_idx];
+        Self {
+            step: Step::ApiKey,
+            selected: provider_idx,
+            key_buf: String::new(),
+            key_cursor: 0,
+            model_buf: preset.default_model.to_string(),
+            model_cursor: preset.default_model.len(),
+            skip_model: true,
         }
     }
 
@@ -192,6 +207,9 @@ impl OnboardingState {
     fn handle_apikey_key(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Enter if !self.key_buf.trim().is_empty() => {
+                if self.skip_model {
+                    return self.finish();
+                }
                 self.advance_to_model();
             }
             KeyCode::Char(c) => {

@@ -46,6 +46,7 @@ base64 = "0.22.1"
 wasmtime = { version = "44", features = ["component-model"] }
 wasmtime-wasi = "44"
 worktrunk = { version = "0.48.0", default-features = false }
+ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }
 phoenix-shared = { path = "crates/phoenix-shared" }
 
 [dev-dependencies]
