@@ -110,6 +110,7 @@ pub struct SpawnConfig {
     pub worktree: Option<WorktreeInfo>,
     pub context_files: Vec<String>,
     pub config: Config,
+    pub system_prompt_override: Option<String>,
 }
 
 pub struct AgentSpawned {
@@ -163,6 +164,7 @@ impl SessionPool {
             worktree,
             context_files,
             config,
+            system_prompt_override,
         } = cfg;
         let id = SessionId::new();
         let (events_tx, _) = broadcast::channel(256);
@@ -246,6 +248,7 @@ impl SessionPool {
                 store: (*store).clone(),
                 project: work_dir,
                 config,
+                system_prompt_override,
             };
             let conv_rx = crate::session::conversation::spawn_conversation(
                 session,

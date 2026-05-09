@@ -50,6 +50,7 @@ pub fn start_conversation(app: &mut App, text: String) {
         store: app.store.clone(),
         project: app.project.clone(),
         config: app.config.clone(),
+        system_prompt_override: None,
     };
 
     let rx =
@@ -713,6 +714,11 @@ fn toggle_conductor_mode(app: &mut App, activate: bool) {
     app.conductor_mode = activate;
 
     if activate {
+        let custom_agents = crate::session::agents::discover_agents(
+            Some(&app.project),
+            &crate::config::paths::user_home(),
+        );
+
         if app.session_pool.is_none() {
             let max_agents = app.config.conductor.max_agents;
             let worktree_mgr = crate::worktree::WorktreeManager::new(app.project.clone()).ok();
@@ -736,6 +742,7 @@ fn toggle_conductor_mode(app: &mut App, activate: bool) {
                     project: project.clone(),
                     parent_provider: parent_provider.clone(),
                     parent_tools: app.tools.clone(),
+                    agents: custom_agents.clone(),
                 }));
             app.tools
                 .register(Arc::new(crate::tools::orchestration::CheckAgentsTool {
@@ -762,6 +769,10 @@ fn toggle_conductor_mode(app: &mut App, activate: bool) {
             }
             if let Some(model_ctx) = conductor_model_context(&app.config) {
                 session.add_message(Message::system(&model_ctx));
+            }
+            let agent_catalog = crate::session::agents::build_agent_catalog(&custom_agents);
+            if !agent_catalog.is_empty() {
+                session.add_message(Message::system(&agent_catalog));
             }
         }
     } else {

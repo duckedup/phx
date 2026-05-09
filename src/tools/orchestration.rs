@@ -21,6 +21,7 @@ pub struct SpawnAgentTool {
     pub project: PathBuf,
     pub parent_provider: String,
     pub parent_tools: super::traits::ToolRegistry,
+    pub agents: Vec<crate::session::agents::AgentDefinition>,
 }
 
 #[async_trait]
@@ -58,6 +59,10 @@ impl Tool for SpawnAgentTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "File paths to pre-load into the child's conversation."
+                    },
+                    "agent": {
+                        "type": "string",
+                        "description": "Name of a custom agent definition to use. Overrides system prompt, tools, and optionally provider/model with the agent's configuration."
                     }
                 },
                 "required": ["prompt"]
@@ -87,11 +92,23 @@ impl Tool for SpawnAgentTool {
                     .collect()
             })
             .unwrap_or_default();
+        let agent_name = args["agent"].as_str();
+
+        let agent_def = if let Some(name) = agent_name {
+            let def = crate::session::agents::find_agent(&self.agents, name)
+                .ok_or_else(|| ToolError::InvalidArgs(format!("unknown custom agent: {name}")))?;
+            Some(def.clone())
+        } else {
+            None
+        };
 
         let effective_provider = provider_name
+            .or(agent_def.as_ref().and_then(|d| d.provider.as_deref()))
             .or(self.config.conductor.agent_provider.as_deref())
             .unwrap_or(&self.parent_provider);
-        let effective_model = model_override.or(self.config.conductor.agent_model.as_deref());
+        let effective_model = model_override
+            .or(agent_def.as_ref().and_then(|d| d.model.as_deref()))
+            .or(self.config.conductor.agent_model.as_deref());
 
         let (provider, prov_name, model_name) = SessionPool::resolve_provider(
             &self.config,
@@ -108,7 +125,27 @@ impl Tool for SpawnAgentTool {
             .cloned()
             .unwrap_or_default();
 
-        let tools = self.parent_tools.clone();
+        let tools = if let Some(ref def) = agent_def {
+            if def.tools.is_empty() {
+                self.parent_tools.clone()
+            } else {
+                let mut reg = super::traits::ToolRegistry::new();
+                for tool_name in &def.tools {
+                    if let Some(tool) = self.parent_tools.get(tool_name) {
+                        reg.register(tool);
+                    } else if let Some(tool) = super::lookup(tool_name) {
+                        reg.register(tool);
+                    } else {
+                        tracing::warn!("custom agent '{}': unknown tool '{}'", def.name, tool_name);
+                    }
+                }
+                reg
+            }
+        } else {
+            self.parent_tools.clone()
+        };
+
+        let system_prompt_override = agent_def.as_ref().map(|d| d.system_prompt.clone());
 
         let worktree = if use_worktree {
             self.pool.worktrees.as_ref().and_then(|mgr| {
@@ -134,6 +171,7 @@ impl Tool for SpawnAgentTool {
                 worktree: worktree.clone(),
                 context_files,
                 config: (*self.config).clone(),
+                system_prompt_override,
             })
             .await;
 
@@ -141,6 +179,7 @@ impl Tool for SpawnAgentTool {
             "session_id": id.0,
             "provider": prov_name,
             "model": model_name,
+            "agent": agent_name,
             "status": "queued",
             "worktree": worktree.as_ref().map(|w| w.path.to_string_lossy().to_string()),
             "branch": worktree.as_ref().map(|w| &w.branch),

@@ -34,6 +34,7 @@ pub struct ConvConfig {
     pub store: SessionStore,
     pub project: PathBuf,
     pub config: crate::config::schema::Config,
+    pub system_prompt_override: Option<String>,
 }
 
 pub fn spawn_conversation(
@@ -54,6 +55,7 @@ pub fn spawn_conversation(
             store,
             project,
             config,
+            system_prompt_override,
         } = cfg;
 
         loop {
@@ -72,29 +74,33 @@ pub fn spawn_conversation(
                 })
                 .collect();
 
-            let base_prompt = session
-                .profile
-                .system_prompt_path
-                .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .or_else(|| {
-                    Some(
-                        "You are Phoenix, a fast and capable coding assistant running in a terminal.\n\
-                         \n\
-                         You have access to tools for reading files, writing files, editing files, and \
-                         running shell commands. Use them to help the user with software engineering tasks.\n\
-                         \n\
-                         Guidelines:\n\
-                         - Be concise. The user is in a terminal — respect their screen space.\n\
-                         - When editing code, preserve existing style and conventions.\n\
-                         - Prefer editing existing files over creating new ones.\n\
-                         - Use the bash tool for commands; use read/write/edit tools for files.\n\
-                         - Show your work: explain what you're doing briefly, then do it.\n\
-                         - If a task is ambiguous, make a reasonable assumption and proceed.\n\
-                         - When you encounter errors, diagnose the root cause before retrying."
-                            .to_string(),
-                    )
-                });
+            let base_prompt = if let Some(ref override_prompt) = system_prompt_override {
+                Some(override_prompt.clone())
+            } else {
+                session
+                    .profile
+                    .system_prompt_path
+                    .as_ref()
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .or_else(|| {
+                        Some(
+                            "You are Phoenix, a fast and capable coding assistant running in a terminal.\n\
+                             \n\
+                             You have access to tools for reading files, writing files, editing files, and \
+                             running shell commands. Use them to help the user with software engineering tasks.\n\
+                             \n\
+                             Guidelines:\n\
+                             - Be concise. The user is in a terminal — respect their screen space.\n\
+                             - When editing code, preserve existing style and conventions.\n\
+                             - Prefer editing existing files over creating new ones.\n\
+                             - Use the bash tool for commands; use read/write/edit tools for files.\n\
+                             - Show your work: explain what you're doing briefly, then do it.\n\
+                             - If a task is ambiguous, make a reasonable assumption and proceed.\n\
+                             - When you encounter errors, diagnose the root cause before retrying."
+                                .to_string(),
+                        )
+                    })
+            };
 
             let home = crate::config::paths::config_dir()
                 .parent()

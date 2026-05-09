@@ -95,6 +95,17 @@ pub fn history_file() -> PathBuf {
     config_dir().join("history")
 }
 
+/// Returns the user-level agents directory: `~/.phoenix/agents`.
+pub fn user_agents_dir() -> PathBuf {
+    config_dir().join("agents")
+}
+
+/// Returns the project-level agents directory: `.phoenix/agents` relative to
+/// the given project root.
+pub fn project_agents_dir(project: &Path) -> PathBuf {
+    project.join(".phoenix/agents")
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
