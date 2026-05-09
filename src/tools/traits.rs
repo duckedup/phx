@@ -177,6 +177,11 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    /// Remove a tool by name. Returns true if it was present.
+    pub fn unregister(&mut self, name: &str) -> bool {
+        self.tools.remove(name).is_some()
+    }
+
     /// Number of registered tools.
     pub fn count(&self) -> usize {
         self.tools.len()
@@ -185,10 +190,6 @@ impl ToolRegistry {
     /// Return the schemas for every registered tool (in arbitrary order).
     pub fn list_schemas(&self) -> Vec<ToolSchema> {
         self.tools.values().map(|t| t.schema()).collect()
-    }
-
-    pub fn unregister(&mut self, name: &str) -> bool {
-        self.tools.remove(name).is_some()
     }
 
     pub fn retain_builtins(&mut self) {

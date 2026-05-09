@@ -57,6 +57,38 @@ fn load_and_execute_plan_plugin() {
 }
 
 #[test]
+fn load_bundled_plugins() {
+    let mut rt = WasmRuntime::new_with_project(std::path::PathBuf::from(".")).unwrap();
+    let loaded = rt.load_bundled();
+    assert!(!loaded.is_empty(), "bundled plugins should load");
+    assert!(rt.has_command("conductor"));
+
+    let result = rt.execute("conductor", "").unwrap();
+    assert!(result.context.contains("CONDUCTOR"));
+    assert!(!result.toast.is_empty());
+
+    let exit = rt.execute_exit("conductor").unwrap();
+    assert!(exit.context.contains("OFF"));
+}
+
+#[test]
+fn conductor_toggle() {
+    let mut rt = WasmRuntime::new_with_project(std::path::PathBuf::from(".")).unwrap();
+    rt.load_bundled();
+
+    assert!(!rt.is_active("conductor"));
+
+    let r1 = rt.toggle("conductor", "build a thing").unwrap();
+    assert!(rt.is_active("conductor"));
+    assert!(r1.context.contains("CONDUCTOR"));
+    assert!(r1.context.contains("build a thing"));
+
+    let r2 = rt.toggle("conductor", "").unwrap();
+    assert!(!rt.is_active("conductor"));
+    assert!(r2.context.contains("OFF"));
+}
+
+#[test]
 fn load_and_execute_now_tool_plugin() {
     let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples/plugins/now/target/wasm32-wasip2/release/phoenix_plugin_now.wasm");

@@ -128,12 +128,12 @@ pub fn extract_selected_text(
 
         let chars: Vec<char> = line_text.chars().collect();
         let col_start = if abs_row == sr {
-            (sc - chat_area.x) as usize
+            sc.saturating_sub(chat_area.x) as usize
         } else {
             0
         };
         let col_end = if abs_row == er {
-            (ec - chat_area.x) as usize
+            ec.saturating_sub(chat_area.x) as usize
         } else {
             chars.len()
         };

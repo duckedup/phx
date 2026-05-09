@@ -2313,6 +2313,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoenix-plugin-conductor"
+version = "0.1.0"
+dependencies = [
+ "phoenix-plugin-sdk",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
 name = "phoenix-plugin-now"
 version = "0.1.0"
 dependencies = [

@@ -71,8 +71,9 @@ pub fn tool_call_summary(name: &str, args_json: &str) -> String {
     match name {
         "bash" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let display = if cmd.len() > 120 {
-                format!("{}...", &cmd[..117])
+            let display = if cmd.chars().count() > 120 {
+                let truncated: String = cmd.chars().take(117).collect();
+                format!("{truncated}...")
             } else {
                 cmd.to_string()
             };

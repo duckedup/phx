@@ -312,6 +312,57 @@ pub struct PluginsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// ConductorConfig
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentModelEntry {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub use_for: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConductorConfig {
+    #[serde(default)]
+    pub tracker: Option<String>,
+    #[serde(default = "default_max_agents")]
+    pub max_agents: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductor_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conductor_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pool: Vec<AgentModelEntry>,
+}
+
+fn default_max_agents() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    cpus * 2
+}
+
+impl Default for ConductorConfig {
+    fn default() -> Self {
+        Self {
+            tracker: None,
+            max_agents: default_max_agents(),
+            conductor_provider: None,
+            conductor_model: None,
+            agent_provider: None,
+            agent_model: None,
+            pool: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Config (top-level)
 // ---------------------------------------------------------------------------
 
@@ -327,6 +378,8 @@ pub struct Config {
     pub skills: SkillsConfig,
     #[serde(default)]
     pub plugins: PluginsConfig,
+    #[serde(default)]
+    pub conductor: ConductorConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// Tracks which files contributed to this config (populated by the loader).
@@ -434,6 +487,9 @@ impl Config {
         }
         if other.plugins != PluginsConfig::default() {
             self.plugins = other.plugins;
+        }
+        if other.conductor != ConductorConfig::default() {
+            self.conductor = other.conductor;
         }
         if other.theme.is_some() {
             self.theme = other.theme;

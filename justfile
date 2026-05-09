@@ -37,6 +37,12 @@ package:
 clean:
     cargo clean
 
+# Build bundled WASM plugins and copy to bundled/
+build-plugins:
+    cargo build -p phoenix-plugin-conductor --target wasm32-wasip2 --release
+    cp target/wasm32-wasip2/release/phoenix_plugin_conductor.wasm bundled/
+    @echo "Bundled plugins updated"
+
 # Initialize beads issue tracking for this project
 bd-init:
     bd init --reinit-local --prefix PHX

@@ -44,6 +44,15 @@ impl SkillResult {
         }
     }
 
+    /// Create a result that only shows a toast (no context sent to LLM).
+    pub fn toast_only(toast: impl Into<String>) -> Self {
+        Self {
+            context: String::new(),
+            toast: toast.into(),
+            widget: None,
+        }
+    }
+
     /// Empty result (no-op).
     pub fn empty() -> Self {
         Self {

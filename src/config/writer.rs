@@ -107,6 +107,25 @@ pub fn save_theme(path: &Path, theme_id: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Save the full conductor config section.
+pub fn save_conductor_config(
+    path: &Path,
+    conductor: &super::schema::ConductorConfig,
+) -> Result<(), ConfigError> {
+    let mut cfg = if path.exists() {
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::io(path, e))?;
+        serde_json::from_str::<Config>(&text).map_err(ConfigError::Parse)?
+    } else {
+        Config::default()
+    };
+
+    cfg.conductor = conductor.clone();
+
+    save(&cfg, path)?;
+    debug!("saved conductor config to {}", path.display());
+    Ok(())
+}
+
 /// Write `data` to a temp file next to `target`, then atomically rename.
 fn atomic_write(target: &Path, data: &[u8]) -> Result<(), ConfigError> {
     // Ensure parent directory exists.

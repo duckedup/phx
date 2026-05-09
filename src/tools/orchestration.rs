@@ -20,6 +20,7 @@ pub struct SpawnAgentTool {
     pub store: Arc<SessionStore>,
     pub project: PathBuf,
     pub parent_provider: String,
+    pub parent_tools: super::traits::ToolRegistry,
 }
 
 #[async_trait]
@@ -87,10 +88,15 @@ impl Tool for SpawnAgentTool {
             })
             .unwrap_or_default();
 
+        let effective_provider = provider_name
+            .or(self.config.conductor.agent_provider.as_deref())
+            .unwrap_or(&self.parent_provider);
+        let effective_model = model_override.or(self.config.conductor.agent_model.as_deref());
+
         let (provider, prov_name, model_name) = SessionPool::resolve_provider(
             &self.config,
-            provider_name,
-            model_override,
+            Some(effective_provider),
+            effective_model,
             &self.parent_provider,
         )
         .map_err(ToolError::ExecutionFailed)?;
@@ -102,9 +108,7 @@ impl Tool for SpawnAgentTool {
             .cloned()
             .unwrap_or_default();
 
-        let tools = crate::tools::build_registry(
-            &profile.tools.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        );
+        let tools = self.parent_tools.clone();
 
         let worktree = if use_worktree {
             self.pool.worktrees.as_ref().and_then(|mgr| {
@@ -129,6 +133,7 @@ impl Tool for SpawnAgentTool {
                 project: self.project.clone(),
                 worktree: worktree.clone(),
                 context_files,
+                config: (*self.config).clone(),
             })
             .await;
 

@@ -12,6 +12,58 @@ use crate::tui::layout;
 use crate::tui::rendering::helpers::tool_call_summary;
 use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine};
 
+pub fn start_conversation(app: &mut App, text: String) {
+    let provider = match &app.provider {
+        Some(p) => Arc::clone(p),
+        None => {
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: "No provider configured. Use /connect to add one.".into(),
+                }));
+            }
+            return;
+        }
+    };
+
+    let session = app.session.take().unwrap_or_else(|| {
+        let mut s = Session::new(
+            SessionId::new(),
+            crate::config::schema::SessionProfile::default(),
+        );
+        if let Some((name, profile)) = crate::config::loader::active_provider(&app.config) {
+            s.provider_name = name.to_string();
+            s.model_name = profile.model.clone();
+        }
+        s
+    });
+
+    if let Some(tab) = app.current_tab_mut() {
+        tab.add_user_message(text.clone());
+    }
+
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let cfg = crate::session::conversation::ConvConfig {
+        provider,
+        tools: app.tools.clone(),
+        store: app.store.clone(),
+        project: app.project.clone(),
+        config: app.config.clone(),
+    };
+
+    let rx =
+        crate::session::conversation::spawn_conversation(session, text, cfg, Arc::clone(&cancel));
+
+    app.is_running = true;
+    app.agent_receivers.push(crate::tui::app::AgentReceiver {
+        tab_index: app.active_tab,
+        session_id: None,
+        rx,
+        cancel: Some(cancel),
+    });
+}
+
 pub fn default_system_prompt() -> &'static str {
     "You are Phoenix, a fast and capable coding assistant running in a terminal.\n\
      \n\
@@ -174,8 +226,9 @@ pub fn handle_command(app: &mut App, input: &str) {
                     }
                 } else {
                     session.add_message(Message::system(&content));
-                    let preview = if content.len() > 80 {
-                        format!("{}...", &content[..77])
+                    let preview = if content.chars().count() > 80 {
+                        let truncated: String = content.chars().take(77).collect();
+                        format!("{truncated}...")
                     } else {
                         content.clone()
                     };
@@ -333,7 +386,9 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
         }
         crate::commands::CommandResult::WasmSkillCommand { command, args } => {
-            if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
+            if command == "conductor" {
+                handle_conductor_command(app);
+            } else if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
                 match rt.lock().execute(&command, &args) {
                     Ok(result) => {
                         app.apply_skill_result(result);
@@ -507,6 +562,291 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
         }
     }
+}
+
+fn handle_conductor_command(app: &mut App) {
+    let is_active = app
+        .wasm_runtime
+        .as_ref()
+        .is_some_and(|rt| rt.lock().is_active("conductor"));
+
+    if !is_active {
+        let git_check = std::process::Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .current_dir(&app.project)
+            .output();
+        if !git_check.is_ok_and(|o| o.status.success()) {
+            app.show_toast("Conductor requires a git repository");
+            return;
+        }
+    }
+
+    if is_active {
+        if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
+            match rt.lock().toggle("conductor", "") {
+                Ok(result) if !result.toast.is_empty() => app.show_toast(result.toast),
+                Err(e) => app.show_toast(format!("Plugin error: {e}")),
+                _ => {}
+            }
+        }
+        deactivate_conductor_mode(app);
+        return;
+    }
+
+    let orch = &app.config.conductor;
+    let needs_onboarding = orch.conductor_provider.is_none() || orch.agent_provider.is_none();
+
+    if needs_onboarding {
+        let items = build_conductor_picker_items(&app.config);
+        if items.is_empty() {
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: "No providers configured. Use /connect first.".into(),
+                }));
+            }
+            return;
+        }
+
+        if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
+            let _ = rt.lock().toggle("conductor", "");
+        }
+
+        use crate::tui::picker::{PickerItem, PickerMode, PickerState};
+        let picker_items: Vec<PickerItem> = items
+            .into_iter()
+            .map(|(id, label, desc)| PickerItem {
+                id,
+                label,
+                description: desc,
+                source_tag: None,
+            })
+            .collect();
+        app.picker = Some(PickerState::new(
+            picker_items,
+            PickerMode::ConductorModelPick,
+        ));
+    } else {
+        if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
+            match rt.lock().toggle("conductor", "") {
+                Ok(result) if !result.toast.is_empty() => app.show_toast(result.toast),
+                Err(e) => app.show_toast(format!("Plugin error: {e}")),
+                _ => {}
+            }
+        }
+        activate_conductor(app);
+    }
+}
+
+pub fn build_conductor_picker_items(
+    config: &crate::config::schema::Config,
+) -> Vec<(String, String, String)> {
+    let catalog = crate::providers::model_info::known_models();
+    let mut items = Vec::new();
+
+    for (name, profile) in &config.providers {
+        let mut models_for_provider: Vec<&crate::providers::model_info::ModelInfo> = catalog
+            .iter()
+            .filter(|m| m.provider_kind == profile.kind)
+            .collect();
+        models_for_provider.sort_by(|a, b| {
+            a.input_cost_per_mtok
+                .partial_cmp(&b.input_cost_per_mtok)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        if models_for_provider.is_empty() {
+            let id = format!("{name}/{}", profile.model);
+            items.push((id.clone(), id, format!("{:?}", profile.kind)));
+        } else {
+            for model in models_for_provider {
+                let id = format!("{name}/{}", model.id);
+                let cost = if model.input_cost_per_mtok > 0.0 {
+                    format!(
+                        "${:.0}/{:.0} per Mtok",
+                        model.input_cost_per_mtok, model.output_cost_per_mtok
+                    )
+                } else {
+                    "free/local".to_string()
+                };
+                items.push((id, format!("{name}/{}", model.display_name), cost));
+            }
+        }
+    }
+
+    items
+}
+
+const CONDUCTOR_SYSTEM_PROMPT: &str = "\
+You are now the CONDUCTOR.\n\
+\n\
+You have access to these orchestration tools:\n\
+- spawn_agent: Spawn a child agent on any configured provider. Each child runs in an isolated git worktree.\n\
+- check_agents: Poll the status of all child agents (running, done, error, queued).\n\
+- collect_agent: Retrieve the final output and worktree diff from a completed child agent.\n\
+- cancel_agent: Cancel a running or queued child agent.\n\
+- merge_agent: Merge a completed child's worktree branch back into the parent branch.\n\
+\n\
+Workflow:\n\
+1. Understand the task and break it into independent sub-tasks.\n\
+2. Spawn an agent for each sub-task with a clear, self-contained prompt.\n\
+3. Monitor progress with check_agents.\n\
+4. Collect results when agents complete.\n\
+5. Merge successful worktrees back, resolve conflicts if needed.\n\
+6. Synthesize the results and report back to the user.\n\
+\n\
+Guidelines:\n\
+- Give each agent enough context to work independently.\n\
+- Choose the right provider/model for each task (use cheaper models for simple tasks).\n\
+- Keep the user informed about progress.\n\
+- If an agent fails, diagnose and retry or reassign.";
+
+pub fn activate_conductor(app: &mut App) {
+    toggle_conductor_mode(app, true);
+}
+
+fn deactivate_conductor_mode(app: &mut App) {
+    toggle_conductor_mode(app, false);
+}
+
+fn toggle_conductor_mode(app: &mut App, activate: bool) {
+    app.conductor_mode = activate;
+
+    if activate {
+        if app.session_pool.is_none() {
+            let max_agents = app.config.conductor.max_agents;
+            let worktree_mgr = crate::worktree::WorktreeManager::new(app.project.clone()).ok();
+            let pool = crate::session::orchestration::SessionPool::new(max_agents, worktree_mgr);
+            app.session_pool = Some(Arc::new(pool));
+        }
+
+        if let Some(pool) = &app.session_pool {
+            let config = Arc::new(app.config.clone());
+            let store = Arc::new(app.store.clone());
+            let project = app.project.clone();
+            let parent_provider = crate::config::loader::active_provider(&app.config)
+                .map(|(name, _)| name.to_string())
+                .unwrap_or_default();
+
+            app.tools
+                .register(Arc::new(crate::tools::orchestration::SpawnAgentTool {
+                    pool: Arc::clone(pool),
+                    config: Arc::clone(&config),
+                    store: Arc::clone(&store),
+                    project: project.clone(),
+                    parent_provider: parent_provider.clone(),
+                    parent_tools: app.tools.clone(),
+                }));
+            app.tools
+                .register(Arc::new(crate::tools::orchestration::CheckAgentsTool {
+                    pool: Arc::clone(pool),
+                }));
+            app.tools
+                .register(Arc::new(crate::tools::orchestration::CollectAgentTool {
+                    pool: Arc::clone(pool),
+                }));
+            app.tools
+                .register(Arc::new(crate::tools::orchestration::CancelAgentTool {
+                    pool: Arc::clone(pool),
+                }));
+            app.tools
+                .register(Arc::new(crate::tools::orchestration::MergeAgentTool {
+                    pool: Arc::clone(pool),
+                }));
+        }
+
+        if let Some(session) = &mut app.session {
+            session.add_message(Message::system(CONDUCTOR_SYSTEM_PROMPT));
+            if let Some(tracker_ctx) = conductor_tracker_context(&app.config) {
+                session.add_message(Message::system(&tracker_ctx));
+            }
+            if let Some(model_ctx) = conductor_model_context(&app.config) {
+                session.add_message(Message::system(&model_ctx));
+            }
+        }
+    } else {
+        app.tools.unregister("spawn_agent");
+        app.tools.unregister("check_agents");
+        app.tools.unregister("collect_agent");
+        app.tools.unregister("cancel_agent");
+        app.tools.unregister("merge_agent");
+    }
+}
+
+fn conductor_tracker_context(config: &crate::config::schema::Config) -> Option<String> {
+    match config.conductor.tracker.as_deref() {
+        Some("beads") => Some(
+            "Ticketing: This project uses beads (bd) for issue tracking.\n\
+             - Run `bd ready` to find available issues\n\
+             - Run `bd show <id>` to see issue details\n\
+             - Run `bd update <id> --claim` before starting work\n\
+             - Run `bd close <id>` when work is complete\n\
+             Sub-agents should claim their assigned issue before starting and close it when done."
+                .to_string(),
+        ),
+        Some("linear") => Some(
+            "Ticketing: This project uses Linear for issue tracking.\n\
+             Use the Linear MCP tools to find, claim, and update issues.\n\
+             Sub-agents should update issue status to 'In Progress' when starting \
+             and 'Done' when complete."
+                .to_string(),
+        ),
+        Some("jira") => Some(
+            "Ticketing: This project uses Jira for issue tracking.\n\
+             Sub-agents should transition issues to 'In Progress' when starting \
+             and 'Done' when complete."
+                .to_string(),
+        ),
+        Some(other) => Some(format!(
+            "Ticketing: This project uses {other} for issue tracking.\n\
+             Sub-agents should update issue status appropriately."
+        )),
+        None => None,
+    }
+}
+
+fn conductor_model_context(config: &crate::config::schema::Config) -> Option<String> {
+    let orch = &config.conductor;
+    let has_conductor = orch.conductor_provider.is_some();
+    let has_agent = orch.agent_provider.is_some();
+    let has_pool = !orch.pool.is_empty();
+
+    if !has_conductor && !has_agent && !has_pool {
+        return None;
+    }
+
+    let mut ctx = String::from("Model configuration:\n");
+
+    if let (Some(provider), Some(model)) = (&orch.conductor_provider, &orch.conductor_model) {
+        ctx.push_str(&format!(
+            "- Conductor (you): provider=\"{provider}\", model=\"{model}\"\n"
+        ));
+    }
+
+    if let (Some(provider), Some(model)) = (&orch.agent_provider, &orch.agent_model) {
+        ctx.push_str(&format!(
+            "- Default sub-agent: provider=\"{provider}\", model=\"{model}\"\n\
+             - Use this for sub-agents unless the task warrants a different model.\n"
+        ));
+    }
+
+    if has_pool {
+        ctx.push_str("- Available model pool:\n");
+        for entry in &orch.pool {
+            let use_for = if entry.use_for.is_empty() {
+                "general".to_string()
+            } else {
+                entry.use_for.clone()
+            };
+            ctx.push_str(&format!(
+                "  * {}/{} — {use_for}\n",
+                entry.provider, entry.model
+            ));
+        }
+        ctx.push_str("- Choose the appropriate model based on task complexity.\n");
+    }
+
+    Some(ctx)
 }
 
 pub async fn send_message(
@@ -694,12 +1034,25 @@ pub async fn send_message(
                     }
                 }
                 maybe_term = term_events.next() => {
-                    if let Some(Ok(CEvent::Key(key))) = maybe_term
-                        && key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        cancelled = true;
-                        break futures::stream::empty().boxed();
+                    match maybe_term {
+                        Some(Ok(CEvent::Key(key)))
+                            if key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            app.handle_key(key);
+                            cancelled = true;
+                            break futures::stream::empty().boxed();
+                        }
+                        Some(Ok(CEvent::Key(key)))
+                            if key.code == KeyCode::Esc =>
+                        {
+                            cancelled = true;
+                            break futures::stream::empty().boxed();
+                        }
+                        Some(Ok(CEvent::Mouse(mouse))) => {
+                            handle_sidebar_click(app, mouse);
+                        }
+                        _ => {}
                     }
                 }
                 _ = tick.tick() => {
@@ -773,12 +1126,25 @@ pub async fn send_message(
                     }
                 }
                 maybe_term = term_events.next() => {
-                    if let Some(Ok(CEvent::Key(key))) = maybe_term
-                        && key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        cancelled = true;
-                        break;
+                    match maybe_term {
+                        Some(Ok(CEvent::Key(key)))
+                            if key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            app.handle_key(key);
+                            cancelled = true;
+                            break;
+                        }
+                        Some(Ok(CEvent::Key(key)))
+                            if key.code == KeyCode::Esc =>
+                        {
+                            cancelled = true;
+                            break;
+                        }
+                        Some(Ok(CEvent::Mouse(mouse))) => {
+                            handle_sidebar_click(app, mouse);
+                        }
+                        _ => {}
                     }
                 }
                 _ = tick.tick() => {
@@ -840,6 +1206,7 @@ pub async fn send_message(
                     }));
                 }
 
+                drain_pending_events(app);
                 redraw(app, terminal);
 
                 use crate::plugin::{HookAction, HookEvent};
@@ -912,6 +1279,7 @@ pub async fn send_message(
                     }));
                 }
 
+                drain_pending_events(app);
                 redraw(app, terminal);
                 let tr_msg = Message::tool_result(tr);
                 session
@@ -933,14 +1301,76 @@ pub async fn send_message(
     app.session = Some(session);
 }
 
+fn drain_pending_events(app: &mut App) {
+    use crossterm::event::{self as ct_event, Event as CEvent};
+    while ct_event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        if let Ok(event) = ct_event::read() {
+            match event {
+                CEvent::Mouse(mouse) => handle_sidebar_click(app, mouse),
+                CEvent::Key(key)
+                    if key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+                {
+                    app.handle_key(key);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
+    use crate::tui::components::sidebar::SidebarSelection;
+    use crossterm::event::MouseEventKind;
+    if mouse.kind != MouseEventKind::Down(crossterm::event::MouseButton::Left) {
+        return;
+    }
+    if let Some(sb_area) = app.sidebar_area
+        && let Some(sel) = crate::tui::components::sidebar::hit_test(
+            sb_area,
+            mouse.row,
+            mouse.column,
+            &app.sidebar_state,
+        )
+    {
+        match &sel {
+            SidebarSelection::Conductor => {
+                app.active_tab = 0;
+            }
+            SidebarSelection::Agent(id) => {
+                if let Some(agent) = app
+                    .agent_receivers
+                    .iter()
+                    .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                {
+                    app.active_tab = agent.tab_index;
+                }
+            }
+        }
+        app.sidebar_state.selected = sel;
+    }
+}
+
 pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
+    if app.conductor_mode
+        && let Some(pool) = &app.session_pool
+        && let Some(agents) = pool.try_check()
+    {
+        app.sidebar_state.update(agents);
+    }
     let sz = terminal.size().unwrap_or_default();
     let sz_rect = Rect::new(0, 0, sz.width, sz.height);
     let input_lines = app
         .current_tab()
         .map(|t| t.input.line_count() as u16)
         .unwrap_or(1);
-    let chunks = layout::main_layout(sz_rect, input_lines);
+    let content_area = if app.conductor_mode {
+        layout::split_sidebar(sz_rect).1
+    } else {
+        sz_rect
+    };
+    let chunks = layout::main_layout(content_area, input_lines);
     app.chat_area_height = chunks[0].height;
     app.frame_tick = app.frame_tick.wrapping_add(1);
     app.recompute_display_lines(sz.width);

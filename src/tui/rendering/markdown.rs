@@ -42,8 +42,9 @@ pub fn render_markdown(
 
         if in_code_block {
             let code_width = max_width.saturating_sub(4);
-            let display_line = if line.len() > code_width && code_width > 3 {
-                format!("{}...", &line[..code_width - 3])
+            let display_line = if line.chars().count() > code_width && code_width > 3 {
+                let truncated: String = line.chars().take(code_width - 3).collect();
+                format!("{truncated}...")
             } else {
                 line.to_string()
             };
@@ -136,6 +137,13 @@ pub fn render_markdown(
             parts.extend(parse_inline_md(&wl, theme));
             lines.push(DisplayLine::multi(parts));
         }
+    }
+
+    if in_code_block {
+        lines.push(DisplayLine::multi(vec![(
+            format!("{indent}└"),
+            Style::default().fg(theme.dim()),
+        )]));
     }
 
     lines

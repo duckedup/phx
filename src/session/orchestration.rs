@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, Semaphore, broadcast};
 use crate::config::schema::{Config, SessionProfile};
 use crate::providers::registry::create_provider;
 use crate::providers::traits::Provider;
-use crate::session::agent_loop::{Session, SessionEvent, SessionStatus};
+use crate::session::agent_loop::{Session, SessionEvent};
 use crate::session::message::Message;
 use crate::store::session_store::{SessionId, SessionStore};
 use crate::tools::traits::ToolRegistry;
@@ -62,6 +62,7 @@ pub struct ChildHandle {
     pub worktree: Option<WorktreeInfo>,
     pub cancel_flag: Arc<AtomicBool>,
     pub events_tx: broadcast::Sender<SessionEvent>,
+    pub inject_tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
 impl ChildHandle {
@@ -79,10 +80,25 @@ impl ChildHandle {
             worktree_branch: self.worktree.as_ref().map(|w| w.branch.clone()),
         }
     }
+
+    fn to_sidebar_info(&self) -> ChildInfo {
+        ChildInfo {
+            session_id: self.id.0.clone(),
+            provider: self.provider_name.clone(),
+            model: self.model_name.clone(),
+            profile: self.profile_name.clone(),
+            status: self.status.clone(),
+            active_tool: self.active_tool.clone(),
+            tokens: self.tokens.clone(),
+            elapsed_s: self.started_at.elapsed().as_secs_f64(),
+            output: None,
+            worktree_branch: None,
+        }
+    }
 }
 
 pub struct SpawnConfig {
-    pub provider: Box<dyn Provider>,
+    pub provider: Arc<dyn Provider>,
     pub provider_name: String,
     pub model_name: String,
     pub profile: SessionProfile,
@@ -93,21 +109,44 @@ pub struct SpawnConfig {
     pub project: PathBuf,
     pub worktree: Option<WorktreeInfo>,
     pub context_files: Vec<String>,
+    pub config: Config,
+}
+
+pub struct AgentSpawned {
+    pub session_id: String,
+    pub provider: String,
+    pub model: String,
+    pub conv_rx: tokio::sync::mpsc::UnboundedReceiver<crate::session::conversation::ConvEvent>,
 }
 
 pub struct SessionPool {
     children: Arc<Mutex<HashMap<String, ChildHandle>>>,
     semaphore: Arc<Semaphore>,
     pub worktrees: Option<WorktreeManager>,
+    spawned_tx: tokio::sync::mpsc::UnboundedSender<AgentSpawned>,
+    spawned_rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<AgentSpawned>>,
 }
 
 impl SessionPool {
     pub fn new(max_concurrent: usize, worktrees: Option<WorktreeManager>) -> Self {
+        let (spawned_tx, spawned_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             children: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             worktrees,
+            spawned_tx,
+            spawned_rx: Mutex::new(spawned_rx),
         }
+    }
+
+    pub fn drain_spawned(&self) -> Vec<AgentSpawned> {
+        let mut result = Vec::new();
+        if let Ok(mut rx) = self.spawned_rx.try_lock() {
+            while let Ok(spawned) = rx.try_recv() {
+                result.push(spawned);
+            }
+        }
+        result
     }
 
     pub async fn spawn(&self, cfg: SpawnConfig) -> SessionId {
@@ -123,10 +162,12 @@ impl SessionPool {
             project,
             worktree,
             context_files,
+            config,
         } = cfg;
         let id = SessionId::new();
         let (events_tx, _) = broadcast::channel(256);
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (inject_tx, _inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         let handle = ChildHandle {
             id: id.clone(),
@@ -142,6 +183,7 @@ impl SessionPool {
             worktree: worktree.clone(),
             cancel_flag: Arc::clone(&cancel_flag),
             events_tx: events_tx.clone(),
+            inject_tx,
         };
 
         self.children.lock().await.insert(id.0.clone(), handle);
@@ -154,6 +196,8 @@ impl SessionPool {
             .as_ref()
             .map(|w| w.path.clone())
             .unwrap_or_else(|| project.clone());
+
+        let spawned_tx = self.spawned_tx.clone();
 
         tokio::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
@@ -175,11 +219,10 @@ impl SessionPool {
             );
 
             let mut session = Session::new(id_for_session, profile);
-            session.provider_name = provider_name;
-            session.model_name = model_name;
-            session.set_cancel_flag(cancel_flag);
+            session.provider_name = provider_name.clone();
+            session.model_name = model_name.clone();
+            session.set_cancel_flag(Arc::clone(&cancel_flag));
 
-            // Pre-load context files
             if !context_files.is_empty() {
                 let mut context_block = String::new();
                 for file_path in &context_files {
@@ -195,81 +238,28 @@ impl SessionPool {
                 }
             }
 
-            session.add_message(Message::user(&prompt));
+            use crate::session::conversation::ConvConfig;
 
-            // Subscribe to session events to track active tool
-            let mut event_rx = session.subscribe();
-            let children_for_events = Arc::clone(&children);
-            let child_id_for_events = child_id.clone();
-            let events_tx_clone = events_tx.clone();
+            let conv_cfg = ConvConfig {
+                provider,
+                tools,
+                store: (*store).clone(),
+                project: work_dir,
+                config,
+            };
+            let conv_rx = crate::session::conversation::spawn_conversation(
+                session,
+                prompt,
+                conv_cfg,
+                cancel_flag,
+            );
 
-            let event_tracker = tokio::spawn(async move {
-                while let Ok(event) = event_rx.recv().await {
-                    match &event {
-                        SessionEvent::ToolCallStart { name, .. } => {
-                            let mut map = children_for_events.lock().await;
-                            if let Some(h) = map.get_mut(&child_id_for_events) {
-                                h.active_tool = Some(name.clone());
-                            }
-                        }
-                        SessionEvent::ToolCallEnd { .. } => {
-                            let mut map = children_for_events.lock().await;
-                            if let Some(h) = map.get_mut(&child_id_for_events) {
-                                h.active_tool = None;
-                            }
-                        }
-                        _ => {}
-                    }
-                    let _ = events_tx_clone.send(event);
-                }
+            let _ = spawned_tx.send(AgentSpawned {
+                session_id: child_id.clone(),
+                provider: provider_name,
+                model: model_name,
+                conv_rx,
             });
-
-            session
-                .run(provider.as_ref(), &tools, &store, &work_dir, &[])
-                .await;
-
-            event_tracker.abort();
-
-            let final_output = session
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == crate::session::message::Role::Assistant)
-                .map(|m| m.content.clone())
-                .unwrap_or_default();
-
-            {
-                let mut map = children.lock().await;
-                if let Some(h) = map.get_mut(&child_id) {
-                    match &session.state {
-                        SessionStatus::Done => {
-                            h.status = ChildStatus::Done;
-                        }
-                        SessionStatus::Error(e) => {
-                            h.status = ChildStatus::Error(e.clone());
-                        }
-                        SessionStatus::Cancelled => {
-                            h.status = ChildStatus::Cancelled;
-                        }
-                        _ => {
-                            h.status = ChildStatus::Done;
-                        }
-                    }
-                    h.output = Some(final_output);
-                    h.tokens = ChildTokens {
-                        input: session.token_input,
-                        output: session.token_output,
-                    };
-                    h.active_tool = None;
-
-                    tracing::info!(
-                        tokens_in = session.token_input,
-                        tokens_out = session.token_output,
-                        status = ?h.status,
-                        "child agent completed",
-                    );
-                }
-            }
 
             drop(_guard);
         });
@@ -286,6 +276,26 @@ impl SessionPool {
             .collect()
     }
 
+    pub fn try_check(&self) -> Option<Vec<ChildInfo>> {
+        let children = self.children.try_lock().ok()?;
+        Some(
+            children
+                .values()
+                .map(|child| child.to_sidebar_info())
+                .collect(),
+        )
+    }
+
+    pub fn try_send_message(&self, session_id: &str, text: &str) -> bool {
+        let Some(children) = self.children.try_lock().ok() else {
+            return false;
+        };
+        let Some(child) = children.get(session_id) else {
+            return false;
+        };
+        child.inject_tx.send(text.to_string()).is_ok()
+    }
+
     pub async fn collect(&self, session_id: &str) -> Result<ChildInfo, String> {
         let children = self.children.lock().await;
         let child = children
@@ -294,6 +304,15 @@ impl SessionPool {
         match &child.status {
             ChildStatus::Done | ChildStatus::Error(_) => Ok(child.to_info()),
             other => Err(format!("session not finished: {other:?}")),
+        }
+    }
+
+    pub fn try_cancel(&self, session_id: &str) {
+        if let Ok(mut children) = self.children.try_lock()
+            && let Some(child) = children.get_mut(session_id)
+        {
+            child.cancel_flag.store(true, Ordering::Relaxed);
+            child.status = ChildStatus::Cancelled;
         }
     }
 
@@ -329,7 +348,7 @@ impl SessionPool {
         provider_name: Option<&str>,
         model_override: Option<&str>,
         fallback_provider: &str,
-    ) -> Result<(Box<dyn Provider>, String, String), String> {
+    ) -> Result<(Arc<dyn Provider>, String, String), String> {
         let name = provider_name.unwrap_or(fallback_provider);
         let mut profile = config
             .providers
@@ -342,8 +361,8 @@ impl SessionPool {
         }
 
         let model_name = profile.model.clone();
-        let provider =
-            create_provider(name, &profile).map_err(|e| format!("provider error: {e}"))?;
+        let provider: Arc<dyn Provider> =
+            Arc::from(create_provider(name, &profile).map_err(|e| format!("provider error: {e}"))?);
         Ok((provider, name.to_string(), model_name))
     }
 }

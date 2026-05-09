@@ -85,6 +85,11 @@ pub fn rpc_socket_path() -> PathBuf {
     runtime_dir().join("phoenix.sock")
 }
 
+/// Returns the logs directory: `~/.phoenix/logs`.
+pub fn logs_dir() -> PathBuf {
+    config_dir().join("logs")
+}
+
 /// Returns the history file path: `~/.phoenix/history`.
 pub fn history_file() -> PathBuf {
     config_dir().join("history")

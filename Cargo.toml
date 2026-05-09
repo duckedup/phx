@@ -6,6 +6,7 @@ members = [
     "examples/plugins/now",
     "examples/plugins/plan",
     "examples/plugins/review",
+    "plugins/conductor",
 ]
 
 [package]

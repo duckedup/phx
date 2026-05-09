@@ -1,9 +1,10 @@
 use ratatui::prelude::*;
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 
 use crate::tui::layout::CHAT_PADDING;
 use crate::tui::rendering::display::{DisplayLine, build_item_display_lines};
-use crate::tui::rendering::helpers::{spinner_frame, wrap_text};
+use crate::tui::rendering::helpers::spinner_frame;
+use crate::tui::rendering::markdown::render_markdown;
 use crate::tui::tabs::Tab;
 use crate::tui::theme::Theme;
 
@@ -14,13 +15,26 @@ pub fn render_chat(
     effective_scroll: usize,
     theme: &Theme,
 ) {
+    frame.render_widget(Clear, area);
+
     let visible = area.height as usize;
+    let width = area.width as usize;
 
     let visible_lines: Vec<Line<'static>> = display_lines
         .iter()
         .skip(effective_scroll)
         .take(visible)
-        .map(|dl| dl.to_line())
+        .map(|dl| {
+            let mut line = dl.to_line();
+            let text_width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            if text_width < width {
+                line.spans.push(Span::styled(
+                    " ".repeat(width - text_width),
+                    Style::default().bg(theme.background),
+                ));
+            }
+            line
+        })
         .collect();
 
     let chat = Paragraph::new(visible_lines).style(Style::default().bg(theme.background));
@@ -79,12 +93,13 @@ pub fn compute_display_lines(
         }
         lines.push(DisplayLine::multi(label_spans));
         let body_indent = format!("{}  ", " ".repeat(pad as usize));
-        for wl in wrap_text(&tab.streaming_text, content_width.saturating_sub(2)) {
-            lines.push(DisplayLine::styled(
-                &format!("{body_indent}{wl}"),
-                Style::default().fg(theme.foreground),
-            ));
-        }
+        let md_lines = render_markdown(
+            &tab.streaming_text,
+            theme,
+            &body_indent,
+            content_width.saturating_sub(2),
+        );
+        lines.extend(md_lines);
     }
 
     let is_thinking = is_running && tab.streaming_text.is_empty() && tab.stream_buffer.is_empty();

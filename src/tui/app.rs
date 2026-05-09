@@ -13,11 +13,12 @@ use crate::plugin::wasm_runtime::WasmRuntime;
 use crate::providers;
 use crate::providers::traits::Provider;
 use crate::session::agent_loop::Session;
+use crate::session::orchestration::SessionPool;
 use crate::store::session_store::SessionStore;
 use crate::tools;
 use crate::tools::traits::ToolRegistry;
 use crate::tui::components::{
-    chat_view, command_completion, input_box, modal_picker, status_bar, toast,
+    chat_view, command_completion, input_box, modal_picker, sidebar, status_bar, toast,
 };
 use crate::tui::layout;
 use crate::tui::message_handler;
@@ -65,8 +66,21 @@ pub struct App {
     pub toast: Option<toast::Toast>,
     pub is_reloading: bool,
     pub reload_task: Option<tokio::task::JoinHandle<ReloadOutput>>,
+    pub conductor_mode: bool,
+    pub session_pool: Option<Arc<SessionPool>>,
+    pub sidebar_state: sidebar::SidebarState,
+    pub sidebar_area: Option<Rect>,
+    pub pending_conductor_activate: bool,
+    pub agent_receivers: Vec<AgentReceiver>,
     pub pending_model_selection: Option<usize>,
     pub models_page: Option<ModelsPageState>,
+}
+
+pub struct AgentReceiver {
+    pub tab_index: usize,
+    pub session_id: Option<String>,
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<crate::session::conversation::ConvEvent>,
+    pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 pub struct ReloadOutput {
@@ -156,6 +170,12 @@ impl App {
             toast: None,
             is_reloading: false,
             reload_task: None,
+            conductor_mode: false,
+            session_pool: None,
+            sidebar_state: sidebar::SidebarState::new(),
+            sidebar_area: None,
+            pending_conductor_activate: false,
+            agent_receivers: Vec::new(),
             pending_model_selection: None,
             models_page: None,
         }
@@ -219,15 +239,121 @@ impl App {
     }
 
     pub fn recompute_display_lines(&mut self, width: u16) {
+        let has_active_agent = self
+            .agent_receivers
+            .iter()
+            .any(|a| a.tab_index == self.active_tab);
         let turn_count = self.session.as_ref().map_or(0, |s| s.turn_count);
         self.display_lines = chat_view::compute_display_lines(
             self.current_tab(),
             &self.theme,
-            self.is_running,
+            self.is_running || has_active_agent,
             self.frame_tick,
             width,
             turn_count,
         );
+    }
+
+    pub fn drain_conversations(&mut self) {
+        use crate::session::conversation::ConvEvent;
+
+        let mut finished = Vec::new();
+
+        for (i, agent) in self.agent_receivers.iter_mut().enumerate() {
+            let tab_idx = agent.tab_index;
+            while let Ok(event) = agent.rx.try_recv() {
+                match event {
+                    ConvEvent::StreamToken(t) => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.stream_buffer.push_str(&t);
+                        }
+                    }
+                    ConvEvent::AssistantMessage(text) => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.streaming_text.clear();
+                            tab.stream_buffer.clear();
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::Assistant,
+                                content: text,
+                            }));
+                        }
+                    }
+                    ConvEvent::ToolCall(summary) => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            crate::tui::rendering::helpers::drain_stream_buffer(tab);
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::ToolCall,
+                                content: summary,
+                            }));
+                        }
+                    }
+                    ConvEvent::ToolResult { output, .. } => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::ToolResult,
+                                content: output,
+                            }));
+                        }
+                    }
+                    ConvEvent::ContextLoaded(names) => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: format!("Context loaded: {}", names.join(", ")),
+                            }));
+                        }
+                    }
+                    ConvEvent::ContextCompacted { removed, remaining } => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: format!(
+                                    "Context compacted: removed {removed} messages ({remaining} remaining)"
+                                ),
+                            }));
+                        }
+                    }
+                    ConvEvent::Error(e) => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.streaming_text.clear();
+                            tab.stream_buffer.clear();
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: e,
+                            }));
+                        }
+                    }
+                    ConvEvent::Cancelled(session) => {
+                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
+                            tab.streaming_text.clear();
+                            tab.stream_buffer.clear();
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: "Cancelled.".into(),
+                            }));
+                        }
+                        if tab_idx == 0 {
+                            self.session = Some(session);
+                            self.is_running = false;
+                        }
+                        finished.push(i);
+                        break;
+                    }
+                    ConvEvent::Done(session) => {
+                        if tab_idx == 0 {
+                            self.session = Some(session);
+                            self.is_running = false;
+                        }
+                        finished.push(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        for i in finished.into_iter().rev() {
+            self.agent_receivers.remove(i);
+        }
     }
 
     // ─── Key handling ────────────────────────────────────────────────────
@@ -353,7 +479,12 @@ impl App {
 
         if let Some(ref picker) = self.picker {
             match picker.mode {
-                PickerMode::Theme | PickerMode::Model | PickerMode::Session => {
+                PickerMode::Theme
+                | PickerMode::Model
+                | PickerMode::Session
+                | PickerMode::ConductorModelPick
+                | PickerMode::ConductorAgent
+                | PickerMode::ConductorTracker => {
                     let action = modal_picker::handle_key(self.picker.as_mut().unwrap(), key);
                     self.apply_picker_action(action);
                     return true;
@@ -519,7 +650,17 @@ impl App {
             area,
         );
 
-        let chunks = layout::main_layout(area, self.input_line_count());
+        let content_area = if self.conductor_mode {
+            let (sb_area, content) = layout::split_sidebar(area);
+            if sb_area.width > 0 {
+                sidebar::render_sidebar(frame, sb_area, &self.sidebar_state, &self.theme);
+            }
+            content
+        } else {
+            area
+        };
+
+        let chunks = layout::main_layout(content_area, self.input_line_count());
 
         let provider_info = crate::config::loader::active_provider(&self.config)
             .map(|(name, p)| format!("{name}/{}", p.model))
@@ -599,7 +740,12 @@ impl App {
                         &self.theme,
                     );
                 }
-                PickerMode::Theme | PickerMode::Model | PickerMode::Session => {
+                PickerMode::Theme
+                | PickerMode::Model
+                | PickerMode::Session
+                | PickerMode::ConductorModelPick
+                | PickerMode::ConductorAgent
+                | PickerMode::ConductorTracker => {
                     modal_picker::render_modal_picker(frame, picker, &self.theme);
                 }
             }
@@ -668,6 +814,80 @@ impl App {
                     }
                     Some(PickerMode::Session) => {
                         self.pending_session_resume = Some(selected.id.clone());
+                    }
+                    Some(PickerMode::ConductorModelPick) => {
+                        if let Some((provider, model)) = selected.id.split_once('/') {
+                            self.config.conductor.conductor_provider = Some(provider.to_string());
+                            self.config.conductor.conductor_model = Some(model.to_string());
+                            self.show_toast(format!("Conductor: {}", selected.label));
+                        }
+                        let items = message_handler::build_conductor_picker_items(&self.config);
+                        let picker_items: Vec<PickerItem> = items
+                            .into_iter()
+                            .map(|(id, label, desc)| PickerItem {
+                                id,
+                                label,
+                                description: desc,
+                                source_tag: None,
+                            })
+                            .collect();
+                        self.picker =
+                            Some(PickerState::new(picker_items, PickerMode::ConductorAgent));
+                        return;
+                    }
+                    Some(PickerMode::ConductorAgent) => {
+                        if let Some((provider, model)) = selected.id.split_once('/') {
+                            self.config.conductor.agent_provider = Some(provider.to_string());
+                            self.config.conductor.agent_model = Some(model.to_string());
+                            self.show_toast(format!("Sub-agents: {}", selected.label));
+                        }
+                        let tracker_items = vec![
+                            PickerItem {
+                                id: "beads".into(),
+                                label: "Beads (bd)".into(),
+                                description: "Local git-native issue tracking".into(),
+                                source_tag: None,
+                            },
+                            PickerItem {
+                                id: "linear".into(),
+                                label: "Linear".into(),
+                                description: "Linear project management (MCP)".into(),
+                                source_tag: None,
+                            },
+                            PickerItem {
+                                id: "jira".into(),
+                                label: "Jira".into(),
+                                description: "Atlassian Jira".into(),
+                                source_tag: None,
+                            },
+                            PickerItem {
+                                id: "none".into(),
+                                label: "None".into(),
+                                description: "No issue tracker — tasks given directly".into(),
+                                source_tag: None,
+                            },
+                        ];
+                        self.picker = Some(PickerState::new(
+                            tracker_items,
+                            PickerMode::ConductorTracker,
+                        ));
+                        return;
+                    }
+                    Some(PickerMode::ConductorTracker) => {
+                        let tracker = if selected.id == "none" {
+                            None
+                        } else {
+                            Some(selected.id.clone())
+                        };
+                        self.config.conductor.tracker = tracker;
+
+                        let config_path = crate::config::paths::user_config_file();
+                        let _ = crate::config::writer::save_conductor_config(
+                            &config_path,
+                            &self.config.conductor,
+                        );
+                        self.show_toast(format!("Tracker: {}", selected.label));
+                        self.pending_conductor_activate = true;
                     }
                     _ => {}
                 }
@@ -1028,6 +1248,7 @@ pub async fn run(
     }
 
     if let Ok(mut rt) = WasmRuntime::new_with_project(std::env::current_dir().unwrap_or_default()) {
+        rt.load_bundled();
         let wasm_dirs =
             WasmRuntime::discover_dirs(Some(&app.project), &crate::config::paths::user_home());
         for dir in &wasm_dirs {
@@ -1110,11 +1331,53 @@ async fn run_loop(
             .current_tab()
             .map(|t| t.input.line_count() as u16)
             .unwrap_or(1);
-        let chunks = layout::main_layout(area, input_lines);
+        let content_area = if app.conductor_mode {
+            let (sb_area, content) = layout::split_sidebar(area);
+            app.sidebar_area = if sb_area.width > 0 {
+                Some(sb_area)
+            } else {
+                None
+            };
+            content
+        } else {
+            app.sidebar_area = None;
+            area
+        };
+        let chunks = layout::main_layout(content_area, input_lines);
         app.chat_area_height = chunks[0].height;
         app.chat_area = chunks[0];
         app.input_area = chunks[1];
         app.frame_tick = app.frame_tick.wrapping_add(1);
+
+        // Pick up newly spawned agents and create tabs for them
+        if let Some(pool) = &app.session_pool {
+            for spawned in pool.drain_spawned() {
+                let rx = app.events_tx.subscribe();
+                let history = crate::config::paths::history_file();
+                let mut tab = Tab::new(spawned.session_id.clone(), rx, history);
+                tab.title = format!("{}/{}", spawned.provider, spawned.model);
+                let tab_index = app.tabs.len();
+                app.tabs.push(tab);
+                app.agent_receivers.push(crate::tui::app::AgentReceiver {
+                    tab_index,
+                    session_id: Some(spawned.session_id),
+                    rx: spawned.conv_rx,
+                    cancel: None,
+                });
+            }
+        }
+
+        app.drain_conversations();
+        for tab in &mut app.tabs {
+            crate::tui::rendering::helpers::drain_stream_buffer(tab);
+        }
+
+        if app.conductor_mode
+            && let Some(pool) = &app.session_pool
+            && let Some(agents) = pool.try_check()
+        {
+            app.sidebar_state.update(agents);
+        }
         if app.toast.as_ref().is_some_and(|t| t.is_expired()) {
             app.toast = None;
         }
@@ -1125,27 +1388,63 @@ async fn run_loop(
         if ct_event::poll(Duration::from_millis(16))? {
             match ct_event::read()? {
                 CEvent::Key(key) => {
+                    if key.code == KeyCode::Esc {
+                        let has_running = app
+                            .agent_receivers
+                            .iter()
+                            .any(|a| a.tab_index == app.active_tab);
+                        if has_running {
+                            for agent in &app.agent_receivers {
+                                if agent.tab_index == app.active_tab
+                                    && let Some(cancel) = &agent.cancel
+                                {
+                                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                            continue;
+                        }
+                        if app.active_tab > 0 {
+                            app.active_tab = 0;
+                            continue;
+                        }
+                    }
+
                     let is_plain_enter = key.code == KeyCode::Enter
                         && !key.modifiers.contains(KeyModifiers::SHIFT)
                         && !key.modifiers.contains(KeyModifiers::ALT);
 
                     let consumed = app.handle_key(key);
 
-                    if is_plain_enter && !app.is_running && !consumed {
+                    let is_agent_tab = app.active_tab > 0;
+                    let can_submit =
+                        is_plain_enter && !consumed && (!app.is_running || is_agent_tab);
+
+                    if can_submit {
                         let input_text = app
                             .current_tab()
                             .map(|t| t.input.buffer_text())
                             .unwrap_or_default();
 
-                        if !input_text.trim().is_empty()
-                            && crate::commands::dispatcher::is_command(input_text.trim())
-                        {
+                        if !input_text.trim().is_empty() {
                             if let Some(tab) = app.current_tab_mut() {
                                 tab.input.submit();
                             }
-                            message_handler::handle_command(app, input_text.trim());
-                        } else if let Some(text) = app.submit_message() {
-                            message_handler::send_message(app, text, terminal).await;
+
+                            if is_agent_tab {
+                                if let Some(agent) = app
+                                    .agent_receivers
+                                    .iter()
+                                    .find(|a| a.tab_index == app.active_tab)
+                                    && let Some(id) = &agent.session_id
+                                    && let Some(pool) = &app.session_pool
+                                {
+                                    pool.try_send_message(id, &input_text);
+                                }
+                            } else if crate::commands::dispatcher::is_command(input_text.trim()) {
+                                message_handler::handle_command(app, input_text.trim());
+                            } else {
+                                message_handler::start_conversation(app, input_text);
+                            }
                         }
                     }
                 }
@@ -1166,9 +1465,46 @@ async fn run_loop(
                             }
                         }
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            let r = mouse.row;
+                            let c = mouse.column;
+
+                            if let Some(sb_area) = app.sidebar_area
+                                && let Some(sel) =
+                                    sidebar::hit_test(sb_area, r, c, &app.sidebar_state)
+                            {
+                                match &sel {
+                                    sidebar::SidebarSelection::Conductor => {
+                                        app.active_tab = 0;
+                                    }
+                                    sidebar::SidebarSelection::Agent(id) => {
+                                        if let Some(agent) = app
+                                            .agent_receivers
+                                            .iter()
+                                            .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                                        {
+                                            app.active_tab = agent.tab_index;
+                                        }
+                                    }
+                                }
+                                app.sidebar_state.selected = sel;
+                                continue;
+                            }
+
+                            app.selection = Some(Selection {
+                                start_row: r,
+                                start_col: c,
+                                end_row: r,
+                                end_col: c,
+                                active: true,
+                            });
                             if let Some(ref picker) = app.picker {
                                 match picker.mode {
-                                    PickerMode::Theme | PickerMode::Model | PickerMode::Session => {
+                                    PickerMode::Theme
+                                    | PickerMode::Model
+                                    | PickerMode::Session
+                                    | PickerMode::ConductorModelPick
+                                    | PickerMode::ConductorAgent
+                                    | PickerMode::ConductorTracker => {
                                         let action = modal_picker::handle_click(
                                             picker,
                                             area,
@@ -1291,7 +1627,12 @@ async fn run_loop(
         }
 
         if let Some(text) = app.pending_skill_message.take() {
-            message_handler::send_message(app, text, terminal).await;
+            message_handler::start_conversation(app, text);
+        }
+
+        if app.pending_conductor_activate {
+            app.pending_conductor_activate = false;
+            message_handler::activate_conductor(app);
         }
 
         if app.should_quit {

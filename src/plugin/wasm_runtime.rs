@@ -176,7 +176,15 @@ impl WasmRuntime {
 
     fn load_skill_plugin(&mut self, path: &Path) -> wasmtime::Result<WasmSkillMeta> {
         let component = Component::from_file(&self.engine, path)?;
+        self.load_skill_component(component)
+    }
 
+    pub fn load_from_bytes(&mut self, bytes: &[u8]) -> wasmtime::Result<WasmSkillMeta> {
+        let component = Component::from_binary(&self.engine, bytes)?;
+        self.load_skill_component(component)
+    }
+
+    fn load_skill_component(&mut self, component: Component) -> wasmtime::Result<WasmSkillMeta> {
         // Try hookable variant first
         if let Ok(ret) = self.try_load_hookable_skill(&component) {
             return Ok(ret);
@@ -364,6 +372,29 @@ impl WasmRuntime {
             }
         }
         out
+    }
+
+    pub fn load_bundled(&mut self) -> Vec<WasmSkillMeta> {
+        let mut loaded = Vec::new();
+
+        let bundled: &[(&str, &[u8])] = &[(
+            "conductor",
+            include_bytes!("../../bundled/phoenix_plugin_conductor.wasm"),
+        )];
+
+        for (name, bytes) in bundled {
+            match self.load_from_bytes(bytes) {
+                Ok(meta) => {
+                    tracing::info!(plugin = name, command = %meta.command, "loaded bundled plugin");
+                    loaded.push(meta);
+                }
+                Err(e) => {
+                    tracing::warn!(plugin = name, error = %e, "failed to load bundled plugin");
+                }
+            }
+        }
+
+        loaded
     }
 
     pub fn execute(&mut self, command: &str, arguments: &str) -> wasmtime::Result<SkillExecResult> {

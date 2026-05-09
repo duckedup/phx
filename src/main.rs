@@ -2,6 +2,7 @@
 
 mod commands;
 mod config;
+mod crash;
 mod otel;
 mod plugin;
 mod providers;
@@ -40,6 +41,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    crash::install_panic_hook();
+
     let cli = Cli::parse();
     let cfg = config::loader::load(cli.config.as_deref())?;
 
