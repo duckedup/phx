@@ -45,6 +45,7 @@ _ensure-wasm-target:
 build-plugins: _ensure-wasm-target
     #!/usr/bin/env bash
     set -euo pipefail
+    shopt -s nullglob
     for manifest in plugins/*/Cargo.toml; do
         name=$(grep '^name' "$manifest" | head -1 | sed 's/.*"\(.*\)".*/\1/')
         cargo build -p "$name" --target wasm32-wasip2 --release

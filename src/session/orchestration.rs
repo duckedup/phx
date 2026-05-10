@@ -28,6 +28,7 @@ pub enum ChildStatus {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChildInfo {
     pub session_id: String,
+    pub task: String,
     pub provider: String,
     pub model: String,
     pub profile: String,
@@ -40,6 +41,17 @@ pub struct ChildInfo {
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+}
+
+fn task_label(prompt: &str, max_len: usize) -> String {
+    let first_line = prompt.lines().next().unwrap_or(prompt);
+    let trimmed = first_line.trim();
+    if trimmed.chars().count() <= max_len {
+        trimmed.to_string()
+    } else {
+        let truncated: String = trimmed.chars().take(max_len - 1).collect();
+        format!("{truncated}…")
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -69,6 +81,7 @@ impl ChildHandle {
     fn to_info(&self) -> ChildInfo {
         ChildInfo {
             session_id: self.id.0.clone(),
+            task: task_label(&self.prompt, 14),
             provider: self.provider_name.clone(),
             model: self.model_name.clone(),
             profile: self.profile_name.clone(),
@@ -84,6 +97,7 @@ impl ChildHandle {
     fn to_sidebar_info(&self) -> ChildInfo {
         ChildInfo {
             session_id: self.id.0.clone(),
+            task: task_label(&self.prompt, 14),
             provider: self.provider_name.clone(),
             model: self.model_name.clone(),
             profile: self.profile_name.clone(),
@@ -115,6 +129,7 @@ pub struct SpawnConfig {
 
 pub struct AgentSpawned {
     pub session_id: String,
+    pub task: String,
     pub provider: String,
     pub model: String,
     pub conv_rx: tokio::sync::mpsc::UnboundedReceiver<crate::session::conversation::ConvEvent>,
@@ -200,6 +215,7 @@ impl SessionPool {
             .unwrap_or_else(|| project.clone());
 
         let spawned_tx = self.spawned_tx.clone();
+        let task = task_label(&prompt, 24);
 
         tokio::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
@@ -259,6 +275,7 @@ impl SessionPool {
 
             let _ = spawned_tx.send(AgentSpawned {
                 session_id: child_id.clone(),
+                task,
                 provider: provider_name,
                 model: model_name,
                 conv_rx,

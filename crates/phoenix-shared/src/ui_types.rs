@@ -35,6 +35,18 @@ pub enum UiNode {
     },
     #[serde(rename = "spacer")]
     Spacer,
+    #[serde(rename = "selectable_list")]
+    SelectableList {
+        #[serde(default)]
+        items: Vec<SelectableItem>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectableItem {
+    pub id: String,
+    #[serde(default)]
+    pub content: Vec<UiNode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -93,6 +105,15 @@ impl UiNode {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PanelState {
+    pub panel_id: String,
+    pub position: String,
+    pub content: UiNode,
+    #[serde(default)]
+    pub selected_index: usize,
 }
 
 impl TextStyle {

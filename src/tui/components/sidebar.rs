@@ -57,14 +57,8 @@ fn status_label(status: &ChildStatus) -> &str {
     }
 }
 
-fn agent_display_name(info: &ChildInfo) -> String {
-    let model_short = info.model.rsplit('/').next().unwrap_or(&info.model);
-    let model_short: String = if model_short.chars().count() > 14 {
-        model_short.chars().take(14).collect()
-    } else {
-        model_short.to_string()
-    };
-    format!("{}/{}", info.provider, model_short)
+fn agent_display_name(info: &ChildInfo) -> &str {
+    &info.task
 }
 
 pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &SidebarState, theme: &Theme) {

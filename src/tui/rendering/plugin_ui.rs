@@ -58,6 +58,13 @@ fn render_node(lines: &mut Vec<DisplayLine>, node: &UiNode, theme: &Theme, width
         UiNode::Spacer => {
             lines.push(DisplayLine::empty());
         }
+        UiNode::SelectableList { items } => {
+            for item in items {
+                for child in &item.content {
+                    render_node(lines, child, theme, width, pad);
+                }
+            }
+        }
     }
 }
 
@@ -144,6 +151,13 @@ fn render_node_flat(out: &mut Vec<(String, Style)>, node: &UiNode, theme: &Theme
         }
         UiNode::Spacer => {
             out.push((String::new(), Style::default()));
+        }
+        UiNode::SelectableList { items } => {
+            for item in items {
+                for child in &item.content {
+                    render_node_flat(out, child, theme, width);
+                }
+            }
         }
     }
 }

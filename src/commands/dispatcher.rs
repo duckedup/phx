@@ -60,6 +60,7 @@ pub enum CommandResult {
         command: String,
         args: String,
     },
+    Conductor,
     ReloadPlugins,
     ClearSession,
     CompactSession,
@@ -116,6 +117,7 @@ pub fn dispatch_with_plugins(
         "sessions" => session_cmd::handle_resume(store, project),
         "clear" => session_cmd::handle_clear(),
         "compact" => session_cmd::handle_compact(),
+        "conductor" => CommandResult::Conductor,
         "reload" => CommandResult::ReloadPlugins,
         "context" => CommandResult::ContextInfo,
         "help" => CommandResult::Message(help_text(skills, plugins, wasm_runtime)),
@@ -215,6 +217,12 @@ pub fn list_commands_with_plugins(
         CommandInfo {
             name: "context".into(),
             summary: "List tools and skills".into(),
+            is_skill: false,
+            source: CommandSource::Builtin,
+        },
+        CommandInfo {
+            name: "conductor".into(),
+            summary: "Toggle conductor mode".into(),
             is_skill: false,
             source: CommandSource::Builtin,
         },

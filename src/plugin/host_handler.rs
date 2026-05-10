@@ -8,11 +8,24 @@ use crate::config::schema::Config;
 use crate::session::orchestration::SessionPool;
 use crate::tools::traits::ToolRegistry;
 
+#[derive(Debug, Clone)]
+pub enum PanelUpdate {
+    Set {
+        panel_id: String,
+        position: String,
+        content: phoenix_shared::ui_types::UiNode,
+    },
+    Remove {
+        panel_id: String,
+    },
+}
+
 pub struct HostHandler {
     tools: Arc<ToolRegistry>,
     pool: Option<Arc<SessionPool>>,
     config: Arc<Config>,
     input_tx: Option<mpsc::Sender<InputRequest>>,
+    panel_tx: Option<mpsc::UnboundedSender<PanelUpdate>>,
 }
 
 impl HostHandler {
@@ -22,6 +35,7 @@ impl HostHandler {
             pool: None,
             config,
             input_tx: None,
+            panel_tx: None,
         }
     }
 
@@ -33,11 +47,18 @@ impl HostHandler {
         self.input_tx = Some(tx);
     }
 
+    pub fn set_panel_channel(&mut self, tx: mpsc::UnboundedSender<PanelUpdate>) {
+        self.panel_tx = Some(tx);
+    }
+
     pub async fn handle(&self, method: &str, params: Value) -> Result<Value, String> {
         match method {
             "host/tool_call" => self.handle_tool_call(params).await,
             "host/get_config" => self.handle_get_config(params),
             "host/request_input" => self.handle_request_input(params).await,
+            "host/set_panel" => self.handle_set_panel(params),
+            "host/update_panel" => self.handle_set_panel(params),
+            "host/remove_panel" => self.handle_remove_panel(params),
             _ => Err(format!("unknown host method: {method}")),
         }
     }
@@ -83,6 +104,10 @@ impl HostHandler {
                     result["sessions"] =
                         serde_json::to_value(&self.config.sessions).unwrap_or_default();
                 }
+                "conductor" => {
+                    result["conductor"] =
+                        serde_json::to_value(&self.config.conductor).unwrap_or_default();
+                }
                 _ => {}
             }
         }
@@ -114,6 +139,40 @@ impl HostHandler {
             .map_err(|_| "input response cancelled".to_string())?;
 
         serde_json::to_value(&response).map_err(|e| format!("failed to serialize response: {e}"))
+    }
+
+    fn handle_set_panel(&self, params: Value) -> Result<Value, String> {
+        let panel_id = params["panel_id"]
+            .as_str()
+            .ok_or("missing 'panel_id'")?
+            .to_string();
+        let position = params["position"].as_str().unwrap_or("right").to_string();
+        let content: phoenix_shared::ui_types::UiNode =
+            serde_json::from_value(params["content"].clone())
+                .map_err(|e| format!("invalid panel content: {e}"))?;
+
+        if let Some(tx) = &self.panel_tx {
+            let _ = tx.send(PanelUpdate::Set {
+                panel_id,
+                position,
+                content,
+            });
+        }
+
+        Ok(json!({"ok": true}))
+    }
+
+    fn handle_remove_panel(&self, params: Value) -> Result<Value, String> {
+        let panel_id = params["panel_id"]
+            .as_str()
+            .ok_or("missing 'panel_id'")?
+            .to_string();
+
+        if let Some(tx) = &self.panel_tx {
+            let _ = tx.send(PanelUpdate::Remove { panel_id });
+        }
+
+        Ok(json!({"ok": true}))
     }
 }
 

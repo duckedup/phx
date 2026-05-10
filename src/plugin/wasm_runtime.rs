@@ -382,10 +382,7 @@ impl WasmRuntime {
     pub fn load_bundled(&mut self) -> Vec<UnifiedToolMeta> {
         let mut loaded = Vec::new();
 
-        let bundled: &[(&str, &[u8])] = &[(
-            "conductor",
-            include_bytes!("../../bundled/phoenix_plugin_conductor.wasm"),
-        )];
+        let bundled: &[(&str, &[u8])] = &[];
 
         for (name, bytes) in bundled {
             match self.load_from_bytes(bytes, name) {

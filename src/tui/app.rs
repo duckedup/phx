@@ -68,9 +68,13 @@ pub struct App {
     pub is_reloading: bool,
     pub reload_task: Option<tokio::task::JoinHandle<ReloadOutput>>,
     pub conductor_mode: bool,
-    pub session_pool: Option<Arc<SessionPool>>,
+    pub session_pool: Arc<SessionPool>,
+    pub orch_ctx: Arc<crate::tools::orchestration::OrchestrationContext>,
     pub sidebar_state: sidebar::SidebarState,
     pub sidebar_area: Option<Rect>,
+    pub panels: std::collections::HashMap<String, phoenix_shared::ui_types::PanelState>,
+    pub panel_rx:
+        Option<tokio::sync::mpsc::UnboundedReceiver<crate::plugin::host_handler::PanelUpdate>>,
     pub pending_conductor_activate: bool,
     pub agent_receivers: Vec<AgentReceiver>,
     pub pending_model_selection: Option<usize>,
@@ -112,6 +116,13 @@ impl App {
                 },
             );
 
+        let max_agents = config.conductor.max_agents;
+        let worktree_mgr = crate::worktree::WorktreeManager::new(project.clone()).ok();
+        let pool = Arc::new(SessionPool::new(max_agents, worktree_mgr));
+        let parent_provider = crate::config::loader::active_provider(&config)
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_default();
+
         let skills = crate::session::skills::discover_layered(
             Some(&project),
             &crate::config::paths::user_home(),
@@ -119,6 +130,20 @@ impl App {
         );
         let mut tool_registry = tool_registry;
         crate::tools::skill_tool::register_skill_tools(&skills, &mut tool_registry);
+
+        let orch_ctx = Arc::new(crate::tools::orchestration::OrchestrationContext {
+            pool: Arc::clone(&pool),
+            config: Arc::new(parking_lot::RwLock::new(config.clone())),
+            store: Arc::new(store.clone()),
+            project: project.clone(),
+            parent_provider: parking_lot::RwLock::new(parent_provider),
+            parent_tools: parking_lot::RwLock::new(tool_registry.clone()),
+            agents: parking_lot::RwLock::new(Vec::new()),
+        });
+        crate::tools::orchestration::register_orchestration_tools(
+            &mut tool_registry,
+            Arc::clone(&orch_ctx),
+        );
         let command_list = crate::commands::dispatcher::list_commands(&skills);
         let command_items: Vec<PickerItem> = command_list
             .iter()
@@ -171,9 +196,12 @@ impl App {
             is_reloading: false,
             reload_task: None,
             conductor_mode: false,
-            session_pool: None,
+            session_pool: pool,
+            orch_ctx,
             sidebar_state: sidebar::SidebarState::new(),
             sidebar_area: None,
+            panels: std::collections::HashMap::new(),
+            panel_rx: None,
             pending_conductor_activate: false,
             agent_receivers: Vec::new(),
             pending_model_selection: None,
@@ -253,6 +281,33 @@ impl App {
             width,
             turn_count,
         );
+    }
+
+    pub fn drain_panels(&mut self) {
+        if let Some(rx) = &mut self.panel_rx {
+            while let Ok(update) = rx.try_recv() {
+                match update {
+                    crate::plugin::host_handler::PanelUpdate::Set {
+                        panel_id,
+                        position,
+                        content,
+                    } => {
+                        self.panels.insert(
+                            panel_id.clone(),
+                            phoenix_shared::ui_types::PanelState {
+                                panel_id,
+                                position,
+                                content,
+                                selected_index: 0,
+                            },
+                        );
+                    }
+                    crate::plugin::host_handler::PanelUpdate::Remove { panel_id } => {
+                        self.panels.remove(&panel_id);
+                    }
+                }
+            }
+        }
     }
 
     pub fn drain_conversations(&mut self) {
@@ -1424,31 +1479,29 @@ async fn run_loop(
         app.frame_tick = app.frame_tick.wrapping_add(1);
 
         // Pick up newly spawned agents and create tabs for them
-        if let Some(pool) = &app.session_pool {
-            for spawned in pool.drain_spawned() {
-                let rx = app.events_tx.subscribe();
-                let history = crate::config::paths::history_file();
-                let mut tab = Tab::new(spawned.session_id.clone(), rx, history);
-                tab.title = format!("{}/{}", spawned.provider, spawned.model);
-                let tab_index = app.tabs.len();
-                app.tabs.push(tab);
-                app.agent_receivers.push(crate::tui::app::AgentReceiver {
-                    tab_index,
-                    session_id: Some(spawned.session_id),
-                    rx: spawned.conv_rx,
-                    cancel: None,
-                });
-            }
+        for spawned in app.session_pool.drain_spawned() {
+            let rx = app.events_tx.subscribe();
+            let history = crate::config::paths::history_file();
+            let mut tab = Tab::new(spawned.session_id.clone(), rx, history);
+            tab.title = spawned.task.clone();
+            let tab_index = app.tabs.len();
+            app.tabs.push(tab);
+            app.agent_receivers.push(crate::tui::app::AgentReceiver {
+                tab_index,
+                session_id: Some(spawned.session_id),
+                rx: spawned.conv_rx,
+                cancel: None,
+            });
         }
 
+        app.drain_panels();
         app.drain_conversations();
         for tab in &mut app.tabs {
             crate::tui::rendering::helpers::drain_stream_buffer(tab);
         }
 
         if app.conductor_mode
-            && let Some(pool) = &app.session_pool
-            && let Some(agents) = pool.try_check()
+            && let Some(agents) = app.session_pool.try_check()
         {
             app.sidebar_state.update(agents);
         }
@@ -1463,6 +1516,21 @@ async fn run_loop(
             match ct_event::read()? {
                 CEvent::Key(key) => {
                     if key.code == KeyCode::Esc {
+                        if app.conductor_mode
+                            && app.active_tab == 0
+                            && let Some(agents) = app.session_pool.try_check()
+                        {
+                            let has_running = agents.iter().any(|a| {
+                                a.status == crate::session::orchestration::ChildStatus::Running
+                                    || a.status
+                                        == crate::session::orchestration::ChildStatus::Queued
+                            });
+                            if has_running {
+                                futures::executor::block_on(app.session_pool.cancel_all());
+                                app.show_toast("All agents cancelled");
+                                continue;
+                            }
+                        }
                         let has_running = app
                             .agent_receivers
                             .iter()
@@ -1510,9 +1578,8 @@ async fn run_loop(
                                     .iter()
                                     .find(|a| a.tab_index == app.active_tab)
                                     && let Some(id) = &agent.session_id
-                                    && let Some(pool) = &app.session_pool
                                 {
-                                    pool.try_send_message(id, &input_text);
+                                    app.session_pool.try_send_message(id, &input_text);
                                 }
                             } else if crate::commands::dispatcher::is_command(input_text.trim()) {
                                 message_handler::handle_command(app, input_text.trim());

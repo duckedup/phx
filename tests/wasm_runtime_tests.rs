@@ -61,27 +61,7 @@ fn load_and_invoke_plan_plugin() {
 fn load_bundled_plugins() {
     let mut rt = WasmRuntime::new_with_project(std::path::PathBuf::from(".")).unwrap();
     let loaded = rt.load_bundled();
-    assert!(!loaded.is_empty(), "bundled plugins should load");
-    assert!(rt.has_command("conductor"));
-
-    let result = rt.invoke_tool("conductor", "{}").unwrap();
-    assert!(!result.toast.is_empty());
-}
-
-#[test]
-fn conductor_toggle() {
-    let mut rt = WasmRuntime::new_with_project(std::path::PathBuf::from(".")).unwrap();
-    rt.load_bundled();
-
-    assert!(!rt.is_active("conductor"));
-
-    let r1 = rt.toggle_tool("conductor", "{}").unwrap();
-    assert!(rt.is_active("conductor"));
-    assert!(!r1.toast.is_empty());
-
-    let r2 = rt.toggle_tool("conductor", "{}").unwrap();
-    assert!(!rt.is_active("conductor"));
-    assert!(!r2.toast.is_empty());
+    assert!(loaded.is_empty(), "no bundled plugins expected");
 }
 
 #[test]

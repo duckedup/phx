@@ -353,6 +353,9 @@ pub fn handle_command(app: &mut App, input: &str) {
         crate::commands::CommandResult::ConnectWizard => {
             app.onboarding = Some(crate::tui::onboarding::OnboardingState::new());
         }
+        crate::commands::CommandResult::Conductor => {
+            handle_conductor_command(app);
+        }
         crate::commands::CommandResult::PluginCommand {
             plugin_command,
             args,
@@ -387,9 +390,7 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
         }
         crate::commands::CommandResult::WasmSkillCommand { command, args } => {
-            if command == "conductor" {
-                handle_conductor_command(app);
-            } else if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
+            if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
                 let rt_guard = rt.lock();
                 let ui_config = rt_guard.tool_ui(&command).cloned();
                 let description = rt_guard
@@ -558,31 +559,18 @@ pub fn handle_command(app: &mut App, input: &str) {
 }
 
 fn handle_conductor_command(app: &mut App) {
-    let is_active = app
-        .wasm_runtime
-        .as_ref()
-        .is_some_and(|rt| rt.lock().is_active("conductor"));
-
-    if !is_active {
-        let git_check = std::process::Command::new("git")
-            .args(["rev-parse", "--git-dir"])
-            .current_dir(&app.project)
-            .output();
-        if !git_check.is_ok_and(|o| o.status.success()) {
-            app.show_toast("Conductor requires a git repository");
-            return;
-        }
+    if app.conductor_mode {
+        deactivate_conductor_mode(app);
+        app.show_toast("Conductor mode deactivated");
+        return;
     }
 
-    if is_active {
-        if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
-            match rt.lock().toggle_tool("conductor", "{}") {
-                Ok(result) if !result.toast.is_empty() => app.show_toast(result.toast),
-                Err(e) => app.show_toast(format!("Plugin error: {e}")),
-                _ => {}
-            }
-        }
-        deactivate_conductor_mode(app);
+    let git_check = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&app.project)
+        .output();
+    if !git_check.is_ok_and(|o| o.status.success()) {
+        app.show_toast("Conductor requires a git repository");
         return;
     }
 
@@ -601,10 +589,6 @@ fn handle_conductor_command(app: &mut App) {
             return;
         }
 
-        if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
-            let _ = rt.lock().toggle_tool("conductor", "{}");
-        }
-
         use crate::tui::picker::{PickerItem, PickerMode, PickerState};
         let picker_items: Vec<PickerItem> = items
             .into_iter()
@@ -620,14 +604,8 @@ fn handle_conductor_command(app: &mut App) {
             PickerMode::ConductorModelPick,
         ));
     } else {
-        if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
-            match rt.lock().toggle_tool("conductor", "{}") {
-                Ok(result) if !result.toast.is_empty() => app.show_toast(result.toast),
-                Err(e) => app.show_toast(format!("Plugin error: {e}")),
-                _ => {}
-            }
-        }
         activate_conductor(app);
+        app.show_toast("Conductor mode activated");
     }
 }
 
@@ -711,54 +689,38 @@ fn toggle_conductor_mode(app: &mut App, activate: bool) {
             &crate::config::paths::user_home(),
         );
 
-        if app.session_pool.is_none() {
-            let max_agents = app.config.conductor.max_agents;
-            let worktree_mgr = crate::worktree::WorktreeManager::new(app.project.clone()).ok();
-            let pool = crate::session::orchestration::SessionPool::new(max_agents, worktree_mgr);
-            app.session_pool = Some(Arc::new(pool));
-        }
+        *app.orch_ctx.agents.write() = custom_agents.clone();
+        *app.orch_ctx.config.write() = app.config.clone();
+        let parent_provider = crate::config::loader::active_provider(&app.config)
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_default();
+        *app.orch_ctx.parent_provider.write() = parent_provider;
+        *app.orch_ctx.parent_tools.write() = app.tools.clone();
 
-        if let Some(pool) = &app.session_pool {
-            let config = Arc::new(app.config.clone());
-            let store = Arc::new(app.store.clone());
-            let project = app.project.clone();
-            let parent_provider = crate::config::loader::active_provider(&app.config)
-                .map(|(name, _)| name.to_string())
-                .unwrap_or_default();
+        let tracker_result =
+            validate_and_build_tracker_context(&app.config, &app.project, &app.tools);
 
-            app.tools
-                .register(Arc::new(crate::tools::orchestration::SpawnAgentTool {
-                    pool: Arc::clone(pool),
-                    config: Arc::clone(&config),
-                    store: Arc::clone(&store),
-                    project: project.clone(),
-                    parent_provider: parent_provider.clone(),
-                    parent_tools: app.tools.clone(),
-                    agents: custom_agents.clone(),
-                }));
-            app.tools
-                .register(Arc::new(crate::tools::orchestration::CheckAgentsTool {
-                    pool: Arc::clone(pool),
-                }));
-            app.tools
-                .register(Arc::new(crate::tools::orchestration::CollectAgentTool {
-                    pool: Arc::clone(pool),
-                }));
-            app.tools
-                .register(Arc::new(crate::tools::orchestration::CancelAgentTool {
-                    pool: Arc::clone(pool),
-                }));
-            app.tools
-                .register(Arc::new(crate::tools::orchestration::MergeAgentTool {
-                    pool: Arc::clone(pool),
-                }));
+        if let TrackerStatus::Broken(ref msg) = tracker_result
+            && let Some(tab) = app.tabs.get_mut(app.active_tab)
+        {
+            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                role: crate::session::message::Role::System,
+                content: format!("⚠ Tracker issue: {msg}"),
+            }));
         }
 
         if let Some(session) = &mut app.session {
             session.add_message(Message::system(CONDUCTOR_SYSTEM_PROMPT));
-            if let Some(tracker_ctx) = conductor_tracker_context(&app.config) {
-                session.add_message(Message::system(&tracker_ctx));
+
+            match tracker_result {
+                TrackerStatus::Ready(ctx) | TrackerStatus::SpecMode(ctx) => {
+                    session.add_message(Message::system(&ctx));
+                }
+                TrackerStatus::Broken(_) => {
+                    session.add_message(Message::system(spec_mode_context()));
+                }
             }
+
             if let Some(model_ctx) = conductor_model_context(&app.config) {
                 session.add_message(Message::system(&model_ctx));
             }
@@ -767,18 +729,42 @@ fn toggle_conductor_mode(app: &mut App, activate: bool) {
                 session.add_message(Message::system(&agent_catalog));
             }
         }
-    } else {
-        app.tools.unregister("spawn_agent");
-        app.tools.unregister("check_agents");
-        app.tools.unregister("collect_agent");
-        app.tools.unregister("cancel_agent");
-        app.tools.unregister("merge_agent");
     }
 }
 
-fn conductor_tracker_context(config: &crate::config::schema::Config) -> Option<String> {
+enum TrackerStatus {
+    Ready(String),
+    Broken(String),
+    SpecMode(String),
+}
+
+fn validate_and_build_tracker_context(
+    config: &crate::config::schema::Config,
+    project: &std::path::Path,
+    tools: &crate::tools::traits::ToolRegistry,
+) -> TrackerStatus {
     match config.conductor.tracker.as_deref() {
-        Some("beads") => Some(
+        Some("beads") => validate_beads_tracker(project),
+        Some("linear") => validate_linear_tracker(tools),
+        Some("jira") => validate_jira_tracker(),
+        Some(other) => TrackerStatus::Ready(format!(
+            "Ticketing: This project uses {other} for issue tracking.\n\
+             Sub-agents should update issue status appropriately."
+        )),
+        None => TrackerStatus::SpecMode(spec_mode_context()),
+    }
+}
+
+fn validate_beads_tracker(project: &std::path::Path) -> TrackerStatus {
+    let bd_check = std::process::Command::new("bd")
+        .arg("ready")
+        .current_dir(project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    match bd_check {
+        Ok(output) if output.status.success() => TrackerStatus::Ready(
             "Ticketing: This project uses beads (bd) for issue tracking.\n\
              - Run `bd ready` to find available issues\n\
              - Run `bd show <id>` to see issue details\n\
@@ -787,25 +773,89 @@ fn conductor_tracker_context(config: &crate::config::schema::Config) -> Option<S
              Sub-agents should claim their assigned issue before starting and close it when done."
                 .to_string(),
         ),
-        Some("linear") => Some(
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            TrackerStatus::Broken(format!(
+                "Beads tracker configured but `bd ready` failed: {stderr}"
+            ))
+        }
+        Err(_) => TrackerStatus::Broken(
+            "Beads tracker configured but `bd` command not found. Install beads or remove \
+             tracker from conductor config."
+                .to_string(),
+        ),
+    }
+}
+
+fn validate_linear_tracker(tools: &crate::tools::traits::ToolRegistry) -> TrackerStatus {
+    let has_linear_tools = tools.get("linear_list_issues").is_some()
+        || tools.get("mcp__linear__list_issues").is_some()
+        || tools
+            .list_schemas()
+            .iter()
+            .any(|s| s.name.contains("linear") || s.name.contains("Linear"));
+    let has_api_key = std::env::var("LINEAR_API_KEY").is_ok();
+
+    if has_linear_tools || has_api_key {
+        TrackerStatus::Ready(
             "Ticketing: This project uses Linear for issue tracking.\n\
              Use the Linear MCP tools to find, claim, and update issues.\n\
              Sub-agents should update issue status to 'In Progress' when starting \
              and 'Done' when complete."
                 .to_string(),
-        ),
-        Some("jira") => Some(
+        )
+    } else {
+        TrackerStatus::Broken(
+            "Linear tracker configured but no Linear tools or API key found. \
+             Enable the Linear MCP extension or set LINEAR_API_KEY."
+                .to_string(),
+        )
+    }
+}
+
+fn validate_jira_tracker() -> TrackerStatus {
+    let has_api = std::env::var("JIRA_API_TOKEN").is_ok() || std::env::var("JIRA_TOKEN").is_ok();
+
+    if has_api {
+        TrackerStatus::Ready(
             "Ticketing: This project uses Jira for issue tracking.\n\
              Sub-agents should transition issues to 'In Progress' when starting \
              and 'Done' when complete."
                 .to_string(),
-        ),
-        Some(other) => Some(format!(
-            "Ticketing: This project uses {other} for issue tracking.\n\
-             Sub-agents should update issue status appropriately."
-        )),
-        None => None,
+        )
+    } else {
+        TrackerStatus::Broken(
+            "Jira tracker configured but no JIRA_API_TOKEN or JIRA_TOKEN found.".to_string(),
+        )
     }
+}
+
+fn spec_mode_context() -> String {
+    "Task coordination: No ticket system configured — using spec file mode.\n\
+     When decomposing work, the conductor will create a spec file for each sub-task \
+     in the project directory (e.g. `.phoenix/specs/task-name.md`). Each spec file \
+     contains the task description, acceptance criteria, and status.\n\
+     \n\
+     Spec file format:\n\
+     ```\n\
+     # Task: <title>\n\
+     Status: unclaimed | in_progress | done\n\
+     Agent: <session_id>\n\
+     \n\
+     ## Description\n\
+     <task details>\n\
+     \n\
+     ## Acceptance Criteria\n\
+     - [ ] criterion 1\n\
+     - [ ] criterion 2\n\
+     ```\n\
+     \n\
+     Sub-agents should:\n\
+     1. Read their assigned spec file at the path given in the prompt.\n\
+     2. Update Status to `in_progress` when starting.\n\
+     3. Check off acceptance criteria as they complete them.\n\
+     4. Update Status to `done` when finished."
+        .to_string()
 }
 
 fn conductor_model_context(config: &crate::config::schema::Config) -> Option<String> {
@@ -1357,8 +1407,7 @@ fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
 
 pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
     if app.conductor_mode
-        && let Some(pool) = &app.session_pool
-        && let Some(agents) = pool.try_check()
+        && let Some(agents) = app.session_pool.try_check()
     {
         app.sidebar_state.update(agents);
     }
