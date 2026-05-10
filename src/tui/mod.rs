@@ -12,5 +12,6 @@ pub mod rendering;
 pub mod selection;
 pub mod tabs;
 pub mod theme;
+pub mod ui;
 
 pub use app::run;

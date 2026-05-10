@@ -29,6 +29,7 @@ use crate::tui::rendering::display::DisplayLine;
 use crate::tui::selection::Selection;
 use crate::tui::tabs::{ChatItem, ChatLine, Tab};
 use crate::tui::theme::{self, Theme};
+use crate::tui::ui::tool_form;
 
 // ─── App ─────────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,7 @@ pub struct App {
     pub agent_receivers: Vec<AgentReceiver>,
     pub pending_model_selection: Option<usize>,
     pub models_page: Option<ModelsPageState>,
+    pub tool_form: Option<tool_form::ToolFormState>,
 }
 
 pub struct AgentReceiver {
@@ -85,8 +87,6 @@ pub struct AgentReceiver {
 
 pub struct ReloadOutput {
     pub wasm_result: Option<crate::plugin::wasm_runtime::ReloadResult>,
-    pub tool_schemas: Vec<(String, crate::plugin::wasm_runtime::WasmToolMeta)>,
-    pub skill_tool_commands: Vec<(String, String)>,
 }
 
 impl App {
@@ -178,6 +178,7 @@ impl App {
             agent_receivers: Vec::new(),
             pending_model_selection: None,
             models_page: None,
+            tool_form: None,
         }
     }
 
@@ -214,7 +215,7 @@ impl App {
         self.toast = Some(toast::Toast::new(message.into(), Duration::from_secs(3)));
     }
 
-    pub fn apply_skill_result(&mut self, result: crate::plugin::wasm_runtime::SkillExecResult) {
+    pub fn apply_tool_result(&mut self, result: crate::plugin::wasm_runtime::ToolExecResult) {
         if !result.toast.is_empty() {
             self.show_toast(result.toast);
         }
@@ -226,15 +227,15 @@ impl App {
                     json: result.widget,
                 }));
         }
-        if !result.context.is_empty() {
+        if !result.output.is_empty() {
             if let Some(tab) = self.current_tab_mut() {
                 tab.chat_lines
                     .push(ChatItem::Assistant(crate::tui::tabs::AssistantLine {
-                        content: result.context.clone(),
+                        content: result.output.clone(),
                         turn: 0,
                     }));
             }
-            self.pending_skill_message = Some(result.context);
+            self.pending_skill_message = Some(result.output);
         }
     }
 
@@ -358,7 +359,64 @@ impl App {
 
     // ─── Key handling ────────────────────────────────────────────────────
 
+    pub fn invoke_tool_command(&mut self, tool_name: &str, args_json: &str) {
+        if tool_name == "conductor" {
+            message_handler::handle_command(self, "/conductor");
+            return;
+        }
+        if let Some(rt) = self.wasm_runtime.as_ref().map(Arc::clone) {
+            match rt.lock().toggle_tool(tool_name, args_json) {
+                Ok(result) => self.apply_tool_result(result),
+                Err(e) => self.show_toast(format!("Plugin error: {e}")),
+            }
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if let Some(ref mut form) = self.tool_form
+            && key.modifiers.contains(KeyModifiers::SUPER)
+        {
+            match key.code {
+                KeyCode::Char('c') => {
+                    if let Some(text) = tool_form::handle_copy(form) {
+                        crate::tui::selection::copy_to_clipboard_osc52(&text);
+                    }
+                    tool_form::cancel_selection(form);
+                    return true;
+                }
+                KeyCode::Char('x') => {
+                    if let Some(text) = tool_form::cut_selection(form) {
+                        crate::tui::selection::copy_to_clipboard_osc52(&text);
+                    }
+                    return true;
+                }
+                KeyCode::Char('v') => {
+                    if let Some(text) = crate::tui::selection::paste_from_clipboard() {
+                        tool_form::handle_paste(form, &text);
+                    }
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(ref mut form) = self.tool_form {
+            let action = tool_form::handle_key(form, key);
+            match action {
+                tool_form::FormAction::Submit(args) => {
+                    let name = form.tool_name.clone();
+                    let args_str = args.to_string();
+                    self.tool_form = None;
+                    self.invoke_tool_command(&name, &args_str);
+                }
+                tool_form::FormAction::Cancel => {
+                    self.tool_form = None;
+                }
+                tool_form::FormAction::None => {}
+            }
+            return true;
+        }
+
         // Cmd+C (macOS) — copy only, never clear/quit
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::SUPER) {
             if let Some(tab) = self.current_tab_mut()
@@ -528,16 +586,16 @@ impl App {
         match key.code {
             KeyCode::BackTab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 let rt_clone = self.wasm_runtime.as_ref().map(Arc::clone);
-                let cmd = rt_clone.as_ref().and_then(|rt| {
+                let tool_name = rt_clone.as_ref().and_then(|rt| {
                     rt.lock()
-                        .command_for_keybind("shift+tab")
+                        .tool_for_keybind("shift+tab")
                         .map(|s| s.to_string())
                 });
-                if let Some(cmd) = cmd
+                if let Some(tool_name) = tool_name
                     && let Some(rt) = rt_clone
                 {
-                    match rt.lock().toggle(&cmd, "") {
-                        Ok(result) => self.apply_skill_result(result),
+                    match rt.lock().toggle_tool(&tool_name, "{}") {
+                        Ok(result) => self.apply_tool_result(result),
                         Err(e) => self.show_toast(format!("Plugin error: {e}")),
                     }
                 }
@@ -660,7 +718,12 @@ impl App {
             area
         };
 
-        let chunks = layout::main_layout(content_area, self.input_line_count());
+        let chunks = if let Some(ref form) = self.tool_form {
+            let fh = tool_form::form_height(form);
+            layout::main_layout_with_form(content_area, fh)
+        } else {
+            layout::main_layout(content_area, self.input_line_count())
+        };
 
         let provider_info = crate::config::loader::active_provider(&self.config)
             .map(|(name, p)| format!("{name}/{}", p.model))
@@ -685,7 +748,9 @@ impl App {
             );
         }
 
-        if let Some(tab) = self.current_tab() {
+        if let Some(ref form) = self.tool_form {
+            tool_form::render_tool_form(frame, chunks[1], form, &self.theme);
+        } else if let Some(tab) = self.current_tab() {
             input_box::render_input(frame, chunks[1], &tab.input, &self.theme);
         } else {
             let empty = crate::tui::input::InputState::empty();
@@ -1168,6 +1233,10 @@ impl App {
             ob.handle_paste(text);
             return;
         }
+        if let Some(ref mut form) = self.tool_form {
+            tool_form::handle_paste(form, text);
+            return;
+        }
         if let Some(tab) = self.current_tab_mut() {
             tab.input.insert_paste(text);
         }
@@ -1274,7 +1343,7 @@ pub async fn run(
     if app
         .wasm_runtime
         .as_ref()
-        .is_some_and(|rt| rt.lock().skill_count() > 0)
+        .is_some_and(|rt| rt.lock().tool_count() > 0)
         || app.plugin_manager.plugin_count() > 0
     {
         let skills = crate::session::skills::discover_layered(
@@ -1343,7 +1412,12 @@ async fn run_loop(
             app.sidebar_area = None;
             area
         };
-        let chunks = layout::main_layout(content_area, input_lines);
+        let chunks = if let Some(ref form) = app.tool_form {
+            let fh = tool_form::form_height(form);
+            layout::main_layout_with_form(content_area, fh)
+        } else {
+            layout::main_layout(content_area, input_lines)
+        };
         app.chat_area_height = chunks[0].height;
         app.chat_area = chunks[0];
         app.input_area = chunks[1];

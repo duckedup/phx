@@ -10,24 +10,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 bindgen!({
     path: "src/wit/plugin.wit",
-    world: "skill-plugin",
+    world: "tool-plugin",
 });
-
-mod tool_bindings {
-    use wasmtime::component::bindgen;
-    bindgen!({
-        path: "src/wit/plugin.wit",
-        world: "tool-plugin",
-    });
-}
-
-mod hookable_bindings {
-    use wasmtime::component::bindgen;
-    bindgen!({
-        path: "src/wit/plugin.wit",
-        world: "hookable-skill-plugin",
-    });
-}
 
 struct PluginState {
     wasi: WasiCtx,
@@ -58,50 +42,39 @@ pub struct ReloadResult {
     pub errors: Vec<String>,
 }
 
-pub struct SkillExecResult {
-    pub context: String,
+pub struct ToolExecResult {
+    pub output: String,
+    pub is_error: bool,
     pub toast: String,
     pub widget: String,
 }
 
-pub struct WasmSkillMeta {
-    pub name: String,
-    pub command: String,
-    pub description: String,
-    pub keybind: String,
-    pub is_tool: bool,
-}
+use phoenix_shared::ui_field_types::{
+    ToolUiConfig, UiField as SharedUiField, UiFieldKind as SharedUiFieldKind,
+};
 
-pub struct WasmToolMeta {
+#[derive(Clone)]
+pub struct UnifiedToolMeta {
     pub name: String,
     pub description: String,
     pub parameters_json: String,
+    pub command: String,
+    pub keybind: String,
+    pub ui: ToolUiConfig,
 }
 
-enum SkillVariant {
-    Basic(SkillPlugin),
-    Hookable(hookable_bindings::HookableSkillPlugin),
-}
-
-struct LoadedSkill {
-    variant: SkillVariant,
+struct LoadedPlugin {
+    plugin: ToolPlugin,
     store: Store<PluginState>,
-    meta: WasmSkillMeta,
-    has_hooks: bool,
-}
-
-struct LoadedTool {
-    plugin: tool_bindings::ToolPlugin,
-    store: Store<PluginState>,
-    tools: Vec<WasmToolMeta>,
+    tools: Vec<UnifiedToolMeta>,
 }
 
 pub struct WasmRuntime {
     engine: Arc<Engine>,
     linker: Linker<PluginState>,
-    skills: HashMap<String, LoadedSkill>,
-    tool_plugins: HashMap<String, LoadedTool>,
-    active_skills: std::collections::HashSet<String>,
+    plugins: HashMap<String, LoadedPlugin>,
+    tool_index: HashMap<String, String>,
+    active_tools: std::collections::HashSet<String>,
     project_dir: PathBuf,
 }
 
@@ -143,14 +116,14 @@ impl WasmRuntime {
         Ok(Self {
             engine,
             linker,
-            skills: HashMap::new(),
-            tool_plugins: HashMap::new(),
-            active_skills: std::collections::HashSet::new(),
+            plugins: HashMap::new(),
+            tool_index: HashMap::new(),
+            active_tools: std::collections::HashSet::new(),
             project_dir: project,
         })
     }
 
-    pub fn load_from_dir(&mut self, dir: &Path) -> wasmtime::Result<Vec<WasmSkillMeta>> {
+    pub fn load_from_dir(&mut self, dir: &Path) -> wasmtime::Result<Vec<UnifiedToolMeta>> {
         let mut loaded = Vec::new();
 
         if !dir.is_dir() {
@@ -159,140 +132,40 @@ impl WasmRuntime {
 
         for entry in std::fs::read_dir(dir)?.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("wasm") {
-                // Try skill-plugin first, then tool-plugin
-                if let Ok(meta) = self.load_skill_plugin(&path) {
-                    loaded.push(meta);
-                } else if let Ok(tools) = self.load_tool_plugin(&path) {
-                    for t in &tools {
-                        tracing::info!("loaded WASM tool: {}", t.name);
-                    }
+            if path.is_file()
+                && path.extension().and_then(OsStr::to_str) == Some("wasm")
+                && let Ok(tools) = self.load_plugin(&path)
+            {
+                for t in &tools {
+                    tracing::info!("loaded WASM tool: {}", t.name);
                 }
+                loaded.extend(tools);
             }
         }
 
         Ok(loaded)
     }
 
-    fn load_skill_plugin(&mut self, path: &Path) -> wasmtime::Result<WasmSkillMeta> {
+    pub fn load_plugin(&mut self, path: &Path) -> wasmtime::Result<Vec<UnifiedToolMeta>> {
         let component = Component::from_file(&self.engine, path)?;
-        self.load_skill_component(component)
+        let key = path.to_string_lossy();
+        self.load_plugin_component(component, &key)
     }
 
-    pub fn load_from_bytes(&mut self, bytes: &[u8]) -> wasmtime::Result<WasmSkillMeta> {
-        let component = Component::from_binary(&self.engine, bytes)?;
-        self.load_skill_component(component)
-    }
-
-    fn load_skill_component(&mut self, component: Component) -> wasmtime::Result<WasmSkillMeta> {
-        // Try hookable variant first
-        if let Ok(ret) = self.try_load_hookable_skill(&component) {
-            return Ok(ret);
-        }
-
-        // Fall back to basic skill-plugin
-        let wasi = WasiCtxBuilder::new().build();
-        let state = PluginState {
-            project_dir: self.project_dir.clone(),
-            wasi,
-            table: ResourceTable::new(),
-        };
-        let mut store = Store::new(&self.engine, state);
-        let plugin = SkillPlugin::instantiate(&mut store, &component, &self.linker)?;
-        let metadata = plugin.call_get_metadata(&mut store)?;
-
-        if metadata.name.is_empty() {
-            bail!("plugin metadata 'name' is empty");
-        }
-        if metadata.command.is_empty() {
-            bail!("plugin metadata 'command' is empty");
-        }
-
-        let meta = WasmSkillMeta {
-            name: metadata.name.clone(),
-            command: metadata.command.clone(),
-            description: metadata.description.clone(),
-            keybind: metadata.keybind.clone(),
-            is_tool: metadata.is_tool,
-        };
-        let ret = WasmSkillMeta {
-            name: metadata.name.clone(),
-            command: metadata.command.clone(),
-            description: metadata.description,
-            keybind: metadata.keybind,
-            is_tool: metadata.is_tool,
-        };
-
-        self.skills.insert(
-            meta.command.clone(),
-            LoadedSkill {
-                variant: SkillVariant::Basic(plugin),
-                store,
-                meta,
-                has_hooks: false,
-            },
-        );
-
-        Ok(ret)
-    }
-
-    fn try_load_hookable_skill(
+    pub fn load_from_bytes(
         &mut self,
-        component: &Component,
-    ) -> wasmtime::Result<WasmSkillMeta> {
-        let wasi = WasiCtxBuilder::new().build();
-        let state = PluginState {
-            project_dir: self.project_dir.clone(),
-            wasi,
-            table: ResourceTable::new(),
-        };
-        let mut store = Store::new(&self.engine, state);
-        let plugin = hookable_bindings::HookableSkillPlugin::instantiate(
-            &mut store,
-            component,
-            &self.linker,
-        )?;
-        let metadata = plugin.call_get_metadata(&mut store)?;
-
-        if metadata.name.is_empty() {
-            bail!("plugin metadata 'name' is empty");
-        }
-        if metadata.command.is_empty() {
-            bail!("plugin metadata 'command' is empty");
-        }
-
-        let meta = WasmSkillMeta {
-            name: metadata.name.clone(),
-            command: metadata.command.clone(),
-            description: metadata.description.clone(),
-            keybind: metadata.keybind.clone(),
-            is_tool: metadata.is_tool,
-        };
-        let ret = WasmSkillMeta {
-            name: metadata.name.clone(),
-            command: metadata.command.clone(),
-            description: metadata.description,
-            keybind: metadata.keybind,
-            is_tool: metadata.is_tool,
-        };
-
-        tracing::info!("loaded hookable WASM skill: {}", meta.name);
-
-        self.skills.insert(
-            meta.command.clone(),
-            LoadedSkill {
-                variant: SkillVariant::Hookable(plugin),
-                store,
-                meta,
-                has_hooks: true,
-            },
-        );
-
-        Ok(ret)
+        bytes: &[u8],
+        key: &str,
+    ) -> wasmtime::Result<Vec<UnifiedToolMeta>> {
+        let component = Component::from_binary(&self.engine, bytes)?;
+        self.load_plugin_component(component, key)
     }
 
-    fn load_tool_plugin(&mut self, path: &Path) -> wasmtime::Result<Vec<WasmToolMeta>> {
-        let component = Component::from_file(&self.engine, path)?;
+    fn load_plugin_component(
+        &mut self,
+        component: Component,
+        key: &str,
+    ) -> wasmtime::Result<Vec<UnifiedToolMeta>> {
         let wasi = WasiCtxBuilder::new().build();
         let state = PluginState {
             project_dir: self.project_dir.clone(),
@@ -300,81 +173,213 @@ impl WasmRuntime {
             table: ResourceTable::new(),
         };
         let mut store = Store::new(&self.engine, state);
-        let plugin = tool_bindings::ToolPlugin::instantiate(&mut store, &component, &self.linker)?;
+        let plugin = ToolPlugin::instantiate(&mut store, &component, &self.linker)?;
 
         let raw_tools = plugin.call_get_tool_metadata(&mut store)?;
         if raw_tools.is_empty() {
             bail!("tool plugin exports no tools");
         }
 
-        let tools: Vec<WasmToolMeta> = raw_tools
+        let tools: Vec<UnifiedToolMeta> = raw_tools
             .into_iter()
-            .map(|t| WasmToolMeta {
-                name: t.name,
-                description: t.description,
-                parameters_json: t.parameters_json,
+            .map(|t| {
+                let ui_fields: Vec<SharedUiField> = t
+                    .ui_fields
+                    .into_iter()
+                    .map(|f| {
+                        let kind = match f.field_kind {
+                            UiFieldKind::TextInput => SharedUiFieldKind::TextInput,
+                            UiFieldKind::TextArea => SharedUiFieldKind::TextArea,
+                            UiFieldKind::Toggle => SharedUiFieldKind::Toggle,
+                        };
+                        SharedUiField {
+                            key: f.key,
+                            label: f.label,
+                            field: kind,
+                            required: f.required,
+                            placeholder: f.placeholder,
+                            default_value: String::new(),
+                        }
+                    })
+                    .collect();
+                UnifiedToolMeta {
+                    name: t.name,
+                    description: t.description,
+                    parameters_json: t.parameters_json,
+                    command: t.command,
+                    keybind: t.keybind,
+                    ui: ToolUiConfig::new(ui_fields),
+                }
             })
             .collect();
 
-        let key = path.to_string_lossy().to_string();
-        self.tool_plugins.insert(
-            key,
-            LoadedTool {
+        if tools.iter().any(|t| self.tool_index.contains_key(&t.name)) {
+            tracing::debug!(key, "skipping plugin — tools already registered");
+            return Ok(Vec::new());
+        }
+
+        let result = tools.clone();
+
+        for tool in &tools {
+            self.tool_index.insert(tool.name.clone(), key.to_string());
+        }
+
+        self.plugins.insert(
+            key.to_string(),
+            LoadedPlugin {
                 plugin,
                 store,
-                tools: tools
-                    .iter()
-                    .map(|t| WasmToolMeta {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        parameters_json: t.parameters_json.clone(),
-                    })
-                    .collect(),
+                tools,
             },
         );
 
-        Ok(tools)
+        Ok(result)
     }
 
-    pub fn invoke_wasm_tool(
+    pub fn invoke_tool(
         &mut self,
-        plugin_key: &str,
         tool_name: &str,
         args_json: &str,
-    ) -> wasmtime::Result<(String, bool)> {
+    ) -> wasmtime::Result<ToolExecResult> {
+        let plugin_key = self
+            .tool_index
+            .get(tool_name)
+            .ok_or_else(|| wasmtime::Error::msg(format!("unknown tool: {tool_name}")))?
+            .clone();
+
         let loaded = self
-            .tool_plugins
-            .get_mut(plugin_key)
-            .ok_or_else(|| wasmtime::Error::msg(format!("unknown tool plugin: {plugin_key}")))?;
+            .plugins
+            .get_mut(&plugin_key)
+            .ok_or_else(|| wasmtime::Error::msg(format!("plugin not found: {plugin_key}")))?;
 
         let result = loaded
             .plugin
             .call_invoke_tool(&mut loaded.store, tool_name, args_json)?;
 
         match result {
-            Ok(tr) => Ok((tr.output, tr.is_error)),
-            Err(e) => Err(wasmtime::Error::msg(format!("tool plugin error: {e}"))),
+            Ok(tr) => Ok(ToolExecResult {
+                output: tr.output,
+                is_error: tr.is_error,
+                toast: tr.toast,
+                widget: tr.widget,
+            }),
+            Err(e) => Err(wasmtime::Error::msg(format!("tool error: {e}"))),
         }
     }
 
-    pub fn tool_plugin_schemas(&self) -> Vec<(String, WasmToolMeta)> {
-        let mut out = Vec::new();
-        for (key, loaded) in &self.tool_plugins {
-            for t in &loaded.tools {
-                out.push((
-                    key.clone(),
-                    WasmToolMeta {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        parameters_json: t.parameters_json.clone(),
-                    },
-                ));
+    pub fn exit_tool(&mut self, tool_name: &str) -> wasmtime::Result<ToolExecResult> {
+        let plugin_key = self
+            .tool_index
+            .get(tool_name)
+            .ok_or_else(|| wasmtime::Error::msg(format!("unknown tool: {tool_name}")))?
+            .clone();
+
+        let loaded = self
+            .plugins
+            .get_mut(&plugin_key)
+            .ok_or_else(|| wasmtime::Error::msg(format!("plugin not found: {plugin_key}")))?;
+
+        let result = loaded
+            .plugin
+            .call_on_exit_tool(&mut loaded.store, tool_name)?;
+
+        self.active_tools.remove(tool_name);
+
+        match result {
+            Ok(tr) => Ok(ToolExecResult {
+                output: tr.output,
+                is_error: tr.is_error,
+                toast: tr.toast,
+                widget: tr.widget,
+            }),
+            Err(e) => Err(wasmtime::Error::msg(format!("tool exit error: {e}"))),
+        }
+    }
+
+    pub fn toggle_tool(
+        &mut self,
+        tool_name: &str,
+        args_json: &str,
+    ) -> wasmtime::Result<ToolExecResult> {
+        if self.active_tools.contains(tool_name) {
+            self.exit_tool(tool_name)
+        } else {
+            self.active_tools.insert(tool_name.to_string());
+            self.invoke_tool(tool_name, args_json)
+        }
+    }
+
+    pub fn is_active(&self, tool_name: &str) -> bool {
+        self.active_tools.contains(tool_name)
+    }
+
+    pub fn tool_for_keybind(&self, keybind: &str) -> Option<&str> {
+        for loaded in self.plugins.values() {
+            for tool in &loaded.tools {
+                if !tool.keybind.is_empty() && tool.keybind == keybind {
+                    return Some(&tool.name);
+                }
             }
         }
-        out
+        None
     }
 
-    pub fn load_bundled(&mut self) -> Vec<WasmSkillMeta> {
+    pub fn command_tools(&self) -> Vec<&UnifiedToolMeta> {
+        let mut result = Vec::new();
+        for loaded in self.plugins.values() {
+            for tool in &loaded.tools {
+                if !tool.command.is_empty() {
+                    result.push(tool);
+                }
+            }
+        }
+        result
+    }
+
+    pub fn tool_ui(&self, tool_name: &str) -> Option<&ToolUiConfig> {
+        let plugin_key = self.tool_index.get(tool_name)?;
+        let loaded = self.plugins.get(plugin_key)?;
+        loaded
+            .tools
+            .iter()
+            .find(|t| t.name == tool_name)
+            .filter(|t| !t.ui.is_empty())
+            .map(|t| &t.ui)
+    }
+
+    pub fn all_tool_schemas(&self) -> Vec<&UnifiedToolMeta> {
+        let mut result = Vec::new();
+        for loaded in self.plugins.values() {
+            for tool in &loaded.tools {
+                result.push(tool);
+            }
+        }
+        result
+    }
+
+    pub fn has_command(&self, command: &str) -> bool {
+        self.plugins
+            .values()
+            .any(|p| p.tools.iter().any(|t| t.command == command))
+    }
+
+    pub fn commands(&self) -> Vec<(&str, &str)> {
+        let mut result = Vec::new();
+        for loaded in self.plugins.values() {
+            for tool in &loaded.tools {
+                if !tool.command.is_empty() {
+                    result.push((tool.command.as_str(), tool.description.as_str()));
+                }
+            }
+        }
+        result
+    }
+
+    pub fn tool_count(&self) -> usize {
+        self.plugins.values().map(|p| p.tools.len()).sum()
+    }
+
+    pub fn load_bundled(&mut self) -> Vec<UnifiedToolMeta> {
         let mut loaded = Vec::new();
 
         let bundled: &[(&str, &[u8])] = &[(
@@ -383,10 +388,12 @@ impl WasmRuntime {
         )];
 
         for (name, bytes) in bundled {
-            match self.load_from_bytes(bytes) {
-                Ok(meta) => {
-                    tracing::info!(plugin = name, command = %meta.command, "loaded bundled plugin");
-                    loaded.push(meta);
+            match self.load_from_bytes(bytes, name) {
+                Ok(tools) => {
+                    for tool in &tools {
+                        tracing::info!(plugin = name, tool = %tool.name, "loaded bundled tool");
+                    }
+                    loaded.extend(tools);
                 }
                 Err(e) => {
                     tracing::warn!(plugin = name, error = %e, "failed to load bundled plugin");
@@ -395,149 +402,6 @@ impl WasmRuntime {
         }
 
         loaded
-    }
-
-    pub fn execute(&mut self, command: &str, arguments: &str) -> wasmtime::Result<SkillExecResult> {
-        let skill = self
-            .skills
-            .get_mut(command)
-            .ok_or_else(|| wasmtime::Error::msg(format!("unknown wasm skill: {command}")))?;
-
-        let result = match &mut skill.variant {
-            SkillVariant::Basic(p) => p.call_execute(&mut skill.store, arguments)?,
-            SkillVariant::Hookable(p) => p
-                .call_execute(&mut skill.store, arguments)?
-                .map(|sr| SkillResult {
-                    context: sr.context,
-                    toast: sr.toast,
-                    widget: sr.widget,
-                })
-                .map_err(|e| e.to_string()),
-        };
-
-        match result {
-            Ok(sr) => Ok(SkillExecResult {
-                context: sr.context,
-                toast: sr.toast,
-                widget: sr.widget,
-            }),
-            Err(e) => Err(wasmtime::Error::msg(format!("plugin error: {e}"))),
-        }
-    }
-
-    pub fn execute_exit(&mut self, command: &str) -> wasmtime::Result<SkillExecResult> {
-        let skill = self
-            .skills
-            .get_mut(command)
-            .ok_or_else(|| wasmtime::Error::msg(format!("unknown wasm skill: {command}")))?;
-
-        let result = match &mut skill.variant {
-            SkillVariant::Basic(p) => p.call_on_exit(&mut skill.store)?,
-            SkillVariant::Hookable(p) => p
-                .call_on_exit(&mut skill.store)?
-                .map(|sr| SkillResult {
-                    context: sr.context,
-                    toast: sr.toast,
-                    widget: sr.widget,
-                })
-                .map_err(|e| e.to_string()),
-        };
-
-        self.active_skills.remove(command);
-
-        match result {
-            Ok(sr) => Ok(SkillExecResult {
-                context: sr.context,
-                toast: sr.toast,
-                widget: sr.widget,
-            }),
-            Err(e) => Err(wasmtime::Error::msg(format!("plugin error: {e}"))),
-        }
-    }
-
-    pub fn invoke_hook(
-        &mut self,
-        command: &str,
-        event: &str,
-        data: &str,
-    ) -> wasmtime::Result<Option<String>> {
-        let skill = self
-            .skills
-            .get_mut(command)
-            .ok_or_else(|| wasmtime::Error::msg(format!("unknown wasm skill: {command}")))?;
-
-        match &mut skill.variant {
-            SkillVariant::Basic(_) => Ok(None),
-            SkillVariant::Hookable(p) => {
-                let result = p.call_on_hook(&mut skill.store, event, data)?;
-                match result {
-                    Ok(hr) => {
-                        let json = serde_json::json!({
-                            "action": hr.action,
-                            "reason": hr.reason,
-                            "data": hr.data,
-                        });
-                        Ok(Some(json.to_string()))
-                    }
-                    Err(e) => Err(wasmtime::Error::msg(format!("hook error: {e}"))),
-                }
-            }
-        }
-    }
-
-    pub fn hookable_commands(&self) -> Vec<&str> {
-        self.skills
-            .values()
-            .filter(|s| s.has_hooks)
-            .map(|s| s.meta.command.as_str())
-            .collect()
-    }
-
-    pub fn toggle(&mut self, command: &str, arguments: &str) -> wasmtime::Result<SkillExecResult> {
-        if self.active_skills.contains(command) {
-            self.execute_exit(command)
-        } else {
-            self.active_skills.insert(command.to_string());
-            self.execute(command, arguments)
-        }
-    }
-
-    pub fn is_active(&self, command: &str) -> bool {
-        self.active_skills.contains(command)
-    }
-
-    pub fn command_for_keybind(&self, keybind: &str) -> Option<&str> {
-        self.skills
-            .values()
-            .find(|s| !s.meta.keybind.is_empty() && s.meta.keybind == keybind)
-            .map(|s| s.meta.command.as_str())
-    }
-
-    pub fn has_command(&self, command: &str) -> bool {
-        self.skills.contains_key(command)
-    }
-
-    pub fn commands(&self) -> Vec<(&str, &str)> {
-        self.skills
-            .values()
-            .map(|s| (s.meta.command.as_str(), s.meta.description.as_str()))
-            .collect()
-    }
-
-    pub fn tool_skill_commands(&self) -> Vec<(&str, &str)> {
-        self.skills
-            .values()
-            .filter(|s| s.meta.is_tool)
-            .map(|s| (s.meta.command.as_str(), s.meta.description.as_str()))
-            .collect()
-    }
-
-    pub fn skill_count(&self) -> usize {
-        self.skills.len()
-    }
-
-    pub fn tool_count(&self) -> usize {
-        self.tool_plugins.values().map(|t| t.tools.len()).sum()
     }
 
     pub fn reload(&mut self, wasm_dirs: &[PathBuf], source_dirs: &[PathBuf]) -> ReloadResult {
@@ -558,9 +422,9 @@ impl WasmRuntime {
         source_dirs: &[PathBuf],
         skip_build: bool,
     ) -> ReloadResult {
-        let old_commands: Vec<String> = self.skills.keys().cloned().collect();
-        self.skills.clear();
-        self.tool_plugins.clear();
+        let old_tools: Vec<String> = self.tool_index.keys().cloned().collect();
+        self.plugins.clear();
+        self.tool_index.clear();
 
         let mut added = Vec::new();
         let mut errors = Vec::new();
@@ -597,9 +461,9 @@ impl WasmRuntime {
 
         for dir in all_dirs {
             match self.load_from_dir(dir) {
-                Ok(metas) => {
-                    for m in metas {
-                        added.push(m.command.clone());
+                Ok(tools) => {
+                    for t in tools {
+                        added.push(t.name.clone());
                     }
                 }
                 Err(e) => {
@@ -608,10 +472,10 @@ impl WasmRuntime {
             }
         }
 
-        let new_commands: Vec<String> = self.skills.keys().cloned().collect();
-        let removed: Vec<String> = old_commands
+        let new_tools: Vec<String> = self.tool_index.keys().cloned().collect();
+        let removed: Vec<String> = old_tools
             .iter()
-            .filter(|c| !new_commands.contains(c))
+            .filter(|t| !new_tools.contains(t))
             .cloned()
             .collect();
 
@@ -736,9 +600,6 @@ fn build_plugin(source_dir: &Path) -> BuildOutput {
     }
 }
 
-// Wasmtime Store teardown races with the multi-threaded test harness,
-// causing SIGABRT. Tests that create WasmRuntime live in
-// tests/wasm_runtime_tests.rs (isolated binary).
 #[cfg(test)]
 mod tests {
     use super::*;

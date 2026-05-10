@@ -8,4 +8,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 phoenix-plugin-sdk = { path = "../../../crates/phoenix-plugin-sdk" }
+serde_json = "1"
 wit-bindgen = "0.41"

@@ -14,6 +14,8 @@ pub struct ToolResult {
     pub output: String,
     pub truncated: bool,
     pub is_error: bool,
+    pub toast: Option<String>,
+    pub widget_json: Option<String>,
 }
 
 impl ToolResult {
@@ -23,6 +25,8 @@ impl ToolResult {
             output: output.into(),
             truncated: false,
             is_error: false,
+            toast: None,
+            widget_json: None,
         }
     }
 
@@ -32,6 +36,8 @@ impl ToolResult {
             output: output.into(),
             truncated: false,
             is_error: true,
+            toast: None,
+            widget_json: None,
         }
     }
 }

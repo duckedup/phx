@@ -98,6 +98,8 @@ impl Tool for ReadTool {
             output: out,
             truncated,
             is_error: false,
+            toast: None,
+            widget_json: None,
         })
     }
 }

@@ -328,7 +328,7 @@ impl InputState {
     }
 }
 
-fn key_to_input(key: KeyEvent) -> Input {
+pub fn key_to_input(key: KeyEvent) -> Input {
     if key.kind == crossterm::event::KeyEventKind::Release {
         return Input::default();
     }

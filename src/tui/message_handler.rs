@@ -390,16 +390,41 @@ pub fn handle_command(app: &mut App, input: &str) {
             if command == "conductor" {
                 handle_conductor_command(app);
             } else if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
-                match rt.lock().execute(&command, &args) {
-                    Ok(result) => {
-                        app.apply_skill_result(result);
-                    }
-                    Err(e) => {
-                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: format!("WASM skill error: {e}"),
-                            }));
+                let rt_guard = rt.lock();
+                let ui_config = rt_guard.tool_ui(&command).cloned();
+                let description = rt_guard
+                    .command_tools()
+                    .iter()
+                    .find(|t| t.command == command)
+                    .map(|t| t.description.clone())
+                    .unwrap_or_default();
+                drop(rt_guard);
+
+                if let Some(config) = ui_config
+                    && args.is_empty()
+                {
+                    app.tool_form = Some(crate::tui::ui::tool_form::ToolFormState::from_ui(
+                        command,
+                        description,
+                        &config,
+                    ));
+                } else {
+                    let args_json = if args.is_empty() {
+                        "{}".to_string()
+                    } else {
+                        serde_json::json!({"arguments": args}).to_string()
+                    };
+                    match rt.lock().toggle_tool(&command, &args_json) {
+                        Ok(result) => {
+                            app.apply_tool_result(result);
+                        }
+                        Err(e) => {
+                            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                    role: crate::session::message::Role::System,
+                                    content: format!("WASM tool error: {e}"),
+                                }));
+                            }
                         }
                     }
                 }
@@ -431,17 +456,8 @@ pub fn handle_command(app: &mut App, input: &str) {
 
                 let handle = tokio::task::spawn_blocking(move || {
                     let result = rt_arc.lock().reload(&wasm_dirs, &source_dirs);
-                    let tool_schemas = rt_arc.lock().tool_plugin_schemas();
-                    let skill_tool_commands: Vec<(String, String)> = rt_arc
-                        .lock()
-                        .tool_skill_commands()
-                        .into_iter()
-                        .map(|(c, d)| (c.to_string(), d.to_string()))
-                        .collect();
                     crate::tui::app::ReloadOutput {
                         wasm_result: Some(result),
-                        tool_schemas,
-                        skill_tool_commands,
                     }
                 });
                 app.reload_task = Some(handle);
@@ -479,28 +495,11 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
 
             if !plugin_tools.is_empty() {
-                let rt_guard = app.wasm_runtime.as_ref().map(|rt| rt.lock());
-                let skill_cmds: std::collections::HashSet<String> = rt_guard
-                    .as_ref()
-                    .map(|rt| {
-                        rt.commands()
-                            .into_iter()
-                            .map(|(c, _)| c.to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                drop(rt_guard);
-
                 lines.push(String::new());
                 lines.push("### Plugin tools".to_string());
                 lines.push(String::new());
                 for schema in &plugin_tools {
-                    let tag = if skill_cmds.contains(&schema.name) {
-                        " (s)"
-                    } else {
-                        ""
-                    };
-                    format_bullet(&mut lines, &schema.name, &schema.description, tag);
+                    format_bullet(&mut lines, &schema.name, &schema.description, "");
                 }
             }
 
@@ -521,24 +520,17 @@ pub fn handle_command(app: &mut App, input: &str) {
 
             {
                 let rt_guard2 = app.wasm_runtime.as_ref().map(|rt| rt.lock());
-                let wasm_skill_only: Vec<(&str, &str)> = rt_guard2
+                let wasm_commands: Vec<(&str, &str)> = rt_guard2
                     .as_ref()
-                    .map(|rt| {
-                        rt.commands()
-                            .into_iter()
-                            .filter(|(cmd, _)| {
-                                !rt.tool_skill_commands().iter().any(|(c, _)| c == cmd)
-                            })
-                            .collect()
-                    })
+                    .map(|rt| rt.commands())
                     .unwrap_or_default();
                 let process_cmds = app.plugin_manager.plugin_commands();
 
-                if !wasm_skill_only.is_empty() || !process_cmds.is_empty() {
+                if !wasm_commands.is_empty() || !process_cmds.is_empty() {
                     lines.push(String::new());
                     lines.push("### Plugin commands".to_string());
                     lines.push(String::new());
-                    for (name, desc) in &wasm_skill_only {
+                    for (name, desc) in &wasm_commands {
                         format_bullet(&mut lines, name, desc, "");
                     }
                     for (name, summary) in &process_cmds {
@@ -584,7 +576,7 @@ fn handle_conductor_command(app: &mut App) {
 
     if is_active {
         if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
-            match rt.lock().toggle("conductor", "") {
+            match rt.lock().toggle_tool("conductor", "{}") {
                 Ok(result) if !result.toast.is_empty() => app.show_toast(result.toast),
                 Err(e) => app.show_toast(format!("Plugin error: {e}")),
                 _ => {}
@@ -610,7 +602,7 @@ fn handle_conductor_command(app: &mut App) {
         }
 
         if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
-            let _ = rt.lock().toggle("conductor", "");
+            let _ = rt.lock().toggle_tool("conductor", "{}");
         }
 
         use crate::tui::picker::{PickerItem, PickerMode, PickerState};
@@ -629,7 +621,7 @@ fn handle_conductor_command(app: &mut App) {
         ));
     } else {
         if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
-            match rt.lock().toggle("conductor", "") {
+            match rt.lock().toggle_tool("conductor", "{}") {
                 Ok(result) if !result.toast.is_empty() => app.show_toast(result.toast),
                 Err(e) => app.show_toast(format!("Plugin error: {e}")),
                 _ => {}
@@ -1393,26 +1385,9 @@ pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
 
     app.tools.retain_builtins();
 
-    // Register WASM tool plugins
-    for (plugin_key, meta) in &output.tool_schemas {
-        let adapter = crate::plugin::wasm_tool_adapter::WasmToolAdapter::new(
-            std::sync::Arc::clone(app.wasm_runtime.as_ref().unwrap()),
-            plugin_key.clone(),
-            meta.name.clone(),
-            meta.description.clone(),
-            &meta.parameters_json,
-        );
-        app.tools.register(std::sync::Arc::new(adapter));
-    }
-
-    // Register WASM skill-tools (is_tool only)
-    for (command, description) in &output.skill_tool_commands {
-        let adapter = crate::plugin::wasm_tool_adapter::WasmSkillToolAdapter::new(
-            std::sync::Arc::clone(app.wasm_runtime.as_ref().unwrap()),
-            command.clone(),
-            format!("Toggle skill: {description}"),
-        );
-        app.tools.register(std::sync::Arc::new(adapter));
+    // Register all WASM tools via unified adapter
+    if let Some(rt) = &app.wasm_runtime {
+        crate::plugin::wasm_tool_adapter::register_wasm_tools(rt, &mut app.tools);
     }
 
     // Re-discover markdown skills and register isTool skills

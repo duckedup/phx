@@ -165,6 +165,8 @@ impl Tool for BashTool {
             output: out,
             truncated,
             is_error: exit_code != 0,
+            toast: None,
+            widget_json: None,
         })
     }
 }

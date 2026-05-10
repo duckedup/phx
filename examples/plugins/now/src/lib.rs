@@ -1,4 +1,4 @@
-use phoenix_plugin_sdk::tool;
+use phoenix_plugin_sdk::{tool, ToolOutput};
 
 tool! {
     tools: [
@@ -6,6 +6,9 @@ tool! {
             name: "get_current_time",
             description: "Get the current date and time in UTC. Returns an ISO 8601 timestamp.",
             parameters: r#"{"type":"object","properties":{}}"#,
+            command: "",
+            keybind: "",
+            ui: vec![],
             invoke(_name, _args) {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -48,8 +51,11 @@ tool! {
                     month + 1, day, hours, minutes, seconds
                 );
 
-                Ok((format!("The current date and time is {timestamp} (UTC)."), false))
-            }
+                Ok(ToolOutput::success(
+                    format!("The current date and time is {timestamp} (UTC).")
+                ))
+            },
+            on_exit() { Ok(ToolOutput::empty()) }
         }
     ]
 }

@@ -1,80 +1,45 @@
-package phoenix:plugin@0.1.0;
-
-world skill-plugin {
-    record plugin-metadata {
-        name: string,
-        command: string,
-        description: string,
-        keybind: string,
-        is-tool: bool,
-    }
-
-    record skill-result {
-        context: string,
-        toast: string,
-        widget: string,
-    }
-
-    record command-output {
-        stdout: string,
-        stderr: string,
-        exit-code: s32,
-    }
-
-    import run-command: func(program: string, args: list<string>) -> result<command-output, string>;
-
-    export get-metadata: func() -> plugin-metadata;
-    export execute: func(arguments: string) -> result<skill-result, string>;
-    export on-exit: func() -> result<skill-result, string>;
-}
-
-world hookable-skill-plugin {
-    record plugin-metadata {
-        name: string,
-        command: string,
-        description: string,
-        keybind: string,
-        is-tool: bool,
-    }
-
-    record skill-result {
-        context: string,
-        toast: string,
-        widget: string,
-    }
-
-    record hook-result {
-        action: string,
-        reason: string,
-        data: string,
-    }
-
-    record command-output {
-        stdout: string,
-        stderr: string,
-        exit-code: s32,
-    }
-
-    import run-command: func(program: string, args: list<string>) -> result<command-output, string>;
-
-    export get-metadata: func() -> plugin-metadata;
-    export execute: func(arguments: string) -> result<skill-result, string>;
-    export on-exit: func() -> result<skill-result, string>;
-    export on-hook: func(event: string, data: string) -> result<hook-result, string>;
-}
+package phoenix:plugin@0.2.0;
 
 world tool-plugin {
+    enum ui-field-kind {
+        text-input,
+        text-area,
+        toggle,
+    }
+
+    record ui-field {
+        key: string,
+        label: string,
+        field-kind: ui-field-kind,
+        required: bool,
+        placeholder: string,
+    }
+
     record tool-metadata {
         name: string,
         description: string,
         parameters-json: string,
+        command: string,
+        keybind: string,
+        ui-fields: list<ui-field>,
     }
 
     record tool-result {
         output: string,
         is-error: bool,
+        toast: string,
+        widget: string,
     }
+
+    record command-output {
+        stdout: string,
+        stderr: string,
+        exit-code: s32,
+    }
+
+    import run-command: func(program: string, args: list<string>) -> result<command-output, string>;
 
     export get-tool-metadata: func() -> list<tool-metadata>;
     export invoke-tool: func(name: string, args-json: string) -> result<tool-result, string>;
+    export on-exit-tool: func(name: string) -> result<tool-result, string>;
 }

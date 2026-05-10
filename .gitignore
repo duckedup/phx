@@ -5,6 +5,9 @@
 # Phoenix runtime
 .phoenix/
 
+# Bundled WASM (built from source)
+bundled/*.wasm
+
 # OS
 .DS_Store
 

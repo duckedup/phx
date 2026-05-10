@@ -34,6 +34,8 @@ impl PluginToolAdapter {
             output,
             truncated: false,
             is_error,
+            toast: None,
+            widget_json: None,
         }
     }
 

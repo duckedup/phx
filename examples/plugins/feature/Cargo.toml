@@ -1,5 +1,5 @@
 [package]
-name = "phoenix-plugin-conductor"
+name = "phoenix-plugin-feature"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,6 +7,6 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-phoenix-plugin-sdk = { path = "../../crates/phoenix-plugin-sdk" }
+phoenix-plugin-sdk = { path = "../../../crates/phoenix-plugin-sdk" }
 serde_json = "1"
 wit-bindgen = "0.41"

@@ -1,7 +1,7 @@
-build:
-    cargo build
+build: build-plugins
+    @cargo build
 
-build-release:
+build-release: build-plugins
     cargo build --release
 
 run *ARGS:
@@ -13,7 +13,7 @@ run-plugins *ARGS:
 rpc:
     cargo run -- rpc
 
-test:
+test: build-plugins
     cargo test --all-features
 
 test-ignored:
@@ -22,7 +22,7 @@ test-ignored:
 fmt:
     cargo fmt
 
-clippy:
+clippy: build-plugins
     cargo clippy --all-targets --all-features -- -D warnings
 
 lint: fmt clippy
@@ -37,11 +37,20 @@ package:
 clean:
     cargo clean
 
-# Build bundled WASM plugins and copy to bundled/
-build-plugins:
-    cargo build -p phoenix-plugin-conductor --target wasm32-wasip2 --release
-    cp target/wasm32-wasip2/release/phoenix_plugin_conductor.wasm bundled/
-    @echo "Bundled plugins updated"
+# Ensure wasm32-wasip2 target is installed
+_ensure-wasm-target:
+    @rustup target list --installed | grep -q wasm32-wasip2 || rustup target add wasm32-wasip2
+
+# Build all bundled WASM plugins and copy to bundled/
+build-plugins: _ensure-wasm-target
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for manifest in plugins/*/Cargo.toml; do
+        name=$(grep '^name' "$manifest" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        cargo build -p "$name" --target wasm32-wasip2 --release
+        wasm="target/wasm32-wasip2/release/${name//-/_}.wasm"
+        cp "$wasm" bundled/
+    done
 
 # Initialize beads issue tracking for this project
 bd-init:

@@ -84,14 +84,21 @@ pub fn render_command_completion(
 
     frame.render_widget(Clear, popup_area);
 
+    let scroll = if picker.cursor >= max_visible {
+        picker.cursor - max_visible + 1
+    } else {
+        0
+    };
+
     let items: Vec<ListItem> = picker
         .filtered
         .iter()
+        .skip(scroll)
         .take(max_visible)
         .enumerate()
         .map(|(i, &idx)| {
             let item = &picker.items[idx];
-            let is_selected = i == picker.cursor;
+            let is_selected = (i + scroll) == picker.cursor;
             let base_style = if is_selected {
                 Style::default().fg(theme.background).bg(theme.accent)
             } else {

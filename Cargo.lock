@@ -2317,6 +2317,16 @@ name = "phoenix-plugin-conductor"
 version = "0.1.0"
 dependencies = [
  "phoenix-plugin-sdk",
+ "serde_json",
+ "wit-bindgen 0.41.0",
+]
+
+[[package]]
+name = "phoenix-plugin-feature"
+version = "0.1.0"
+dependencies = [
+ "phoenix-plugin-sdk",
+ "serde_json",
  "wit-bindgen 0.41.0",
 ]
 
@@ -2334,6 +2344,7 @@ name = "phoenix-plugin-plan"
 version = "0.1.0"
 dependencies = [
  "phoenix-plugin-sdk",
+ "serde_json",
  "wit-bindgen 0.41.0",
 ]
 
@@ -2342,14 +2353,16 @@ name = "phoenix-plugin-review"
 version = "0.1.0"
 dependencies = [
  "phoenix-plugin-sdk",
+ "serde_json",
  "wit-bindgen 0.41.0",
 ]
 
 [[package]]
 name = "phoenix-plugin-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "phoenix-shared",
+ "serde_json",
  "wit-bindgen 0.41.0",
 ]
 
