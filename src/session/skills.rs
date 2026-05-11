@@ -42,9 +42,7 @@ fn find_skill_md(dir: &Path) -> Option<PathBuf> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if name_str.eq_ignore_ascii_case("skill.md")
-            && entry.file_type().is_ok_and(|ft| ft.is_file())
-        {
+        if name_str.eq_ignore_ascii_case("skill.md") && entry.path().is_file() {
             return Some(entry.path());
         }
     }
@@ -175,11 +173,12 @@ fn scan_skills_dir(dir: &Path, source: SkillSource) -> Vec<Skill> {
     };
     let mut skills = vec![];
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
         let dir_name = entry.file_name().to_string_lossy().to_string();
-        let dir = entry.path();
+        let dir = path;
         if let Some(skill_md) = find_skill_md(&dir) {
             let content = std::fs::read_to_string(&skill_md).unwrap_or_default();
             let (meta, _body) = parse_skill_frontmatter(&content);
@@ -327,7 +326,7 @@ fn list_skill_resources(skill_dir: &Path) -> Vec<String> {
         let dir = skill_dir.join(subdir);
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|ft| ft.is_file()) {
+                if entry.path().is_file() {
                     resources.push(format!(
                         "{}/{}",
                         subdir,

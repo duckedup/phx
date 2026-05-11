@@ -14,11 +14,7 @@ pub struct InputState {
 
 impl InputState {
     pub fn new(history_file: PathBuf) -> Self {
-        let history = std::fs::read_to_string(&history_file)
-            .unwrap_or_default()
-            .lines()
-            .map(String::from)
-            .collect();
+        let history = load_history(&history_file);
         Self {
             textarea: TextArea::default(),
             history,
@@ -320,11 +316,7 @@ impl InputState {
     }
 
     fn save_history(&self) {
-        if let Some(parent) = self.history_file.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let content: String = self.history.iter().map(|l| format!("{l}\n")).collect();
-        let _ = std::fs::write(&self.history_file, content);
+        save_history(&self.history_file, &self.history);
     }
 }
 
@@ -370,6 +362,57 @@ pub fn key_to_input(key: KeyEvent) -> Input {
         alt,
         shift,
     }
+}
+
+const MAX_HISTORY: usize = 500;
+
+fn load_history(path: &std::path::Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    // Try JSONL first (new format): each line is a JSON string.
+    let mut entries = Vec::new();
+    let mut all_json = true;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(s) = serde_json::from_str::<String>(trimmed) {
+            entries.push(s);
+        } else {
+            all_json = false;
+            break;
+        }
+    }
+
+    if all_json && !entries.is_empty() {
+        return entries;
+    }
+
+    // Fallback: legacy plain-text format (one entry per line, no multiline support).
+    content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn save_history(path: &std::path::Path, history: &[String]) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let start = history.len().saturating_sub(MAX_HISTORY);
+    let content: String = history[start..]
+        .iter()
+        .map(|entry| {
+            let json = serde_json::to_string(entry).unwrap_or_default();
+            format!("{json}\n")
+        })
+        .collect();
+    let _ = std::fs::write(path, content);
 }
 
 #[cfg(test)]
@@ -473,5 +516,41 @@ mod tests {
         input.insert_paste("ab\ncd");
         assert_eq!(input.buffer_text(), "ab\ncd");
         assert!(input.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn history_persists_multiline() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let history = vec![
+            "single line".to_string(),
+            "multi\nline\nentry".to_string(),
+            "another".to_string(),
+        ];
+        save_history(&path, &history);
+        let loaded = load_history(&path);
+        assert_eq!(loaded, history);
+    }
+
+    #[test]
+    fn history_loads_legacy_format() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hello\nworld\n").unwrap();
+        let loaded = load_history(tmp.path());
+        assert_eq!(loaded, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn history_caps_at_max() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        let history: Vec<String> = (0..600).map(|i| format!("entry-{i}")).collect();
+        save_history(&path, &history);
+        let loaded = load_history(&path);
+        assert_eq!(loaded.len(), MAX_HISTORY);
+        assert_eq!(loaded[0], "entry-100");
+        assert_eq!(loaded[MAX_HISTORY - 1], "entry-599");
     }
 }

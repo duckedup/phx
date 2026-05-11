@@ -283,11 +283,7 @@ pub fn spawn_conversation(
                         }
                     };
 
-                    let output_display = if tr.output.len() > 2000 {
-                        format!("{}...", &tr.output[..2000])
-                    } else {
-                        tr.output.clone()
-                    };
+                    let output_display = truncate_str(&tr.output, 2000);
                     let _ = tx.send(ConvEvent::ToolResult {
                         output: output_display,
                         is_error: tr.is_error,
@@ -311,4 +307,14 @@ pub fn spawn_conversation(
     });
 
     rx
+}
+
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    match s.char_indices().nth(max_chars) {
+        Some((byte_pos, _)) => format!("{}...", &s[..byte_pos]),
+        None => s.to_string(),
+    }
 }

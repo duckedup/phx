@@ -209,11 +209,12 @@ impl SessionStore {
             .await
             .map_err(|e| StoreError::io(e, &dir))?
         {
-            let ft = entry
-                .file_type()
-                .await
-                .map_err(|e| StoreError::io(e, entry.path()))?;
-            if !ft.is_dir() {
+            let path = entry.path();
+            let meta = match tokio::fs::metadata(&path).await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !meta.is_dir() {
                 continue;
             }
 

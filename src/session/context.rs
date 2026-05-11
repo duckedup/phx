@@ -144,7 +144,7 @@ fn discover_rules_in(dir: &Path, source: RuleSource) -> Vec<Rule> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
+        if !path.is_file() {
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -212,7 +212,8 @@ fn walk_for_file(dir: &Path, filename: &str, project: &Path, depth: usize) -> Ve
     }
 
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
             continue;
         }
         let name = entry.file_name();
@@ -220,7 +221,7 @@ fn walk_for_file(dir: &Path, filename: &str, project: &Path, depth: usize) -> Ve
         if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
             continue;
         }
-        results.extend(walk_for_file(&entry.path(), filename, project, depth + 1));
+        results.extend(walk_for_file(&entry_path, filename, project, depth + 1));
     }
 
     results

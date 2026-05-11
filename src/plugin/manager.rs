@@ -154,11 +154,9 @@ fn scan_plugins_dir(dir: &Path, out: &mut Vec<PathBuf>) {
         return;
     };
     for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-            let path = entry.path();
-            if path.join("plugin.json").exists() {
-                out.push(path);
-            }
+        let path = entry.path();
+        if path.is_dir() && path.join("plugin.json").exists() {
+            out.push(path);
         }
     }
 }

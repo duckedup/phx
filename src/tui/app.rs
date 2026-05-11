@@ -210,6 +210,18 @@ impl App {
         }
     }
 
+    pub fn show_sidebar(&self) -> bool {
+        if self.conductor_mode {
+            return true;
+        }
+        self.session_pool.try_check().is_some_and(|agents| {
+            agents.iter().any(|a| {
+                a.status == crate::session::orchestration::ChildStatus::Running
+                    || a.status == crate::session::orchestration::ChildStatus::Queued
+            })
+        })
+    }
+
     pub fn current_tab(&self) -> Option<&Tab> {
         self.tabs.get(self.active_tab)
     }
@@ -355,7 +367,9 @@ impl App {
                         if let Some(tab) = self.tabs.get_mut(tab_idx) {
                             tab.chat_lines.push(ChatItem::Line(ChatLine {
                                 role: crate::session::message::Role::System,
-                                content: format!("Context loaded: {}", names.join(", ")),
+                                content: crate::tui::rendering::helpers::format_context_tree(
+                                    &names,
+                                ),
                             }));
                         }
                     }
@@ -660,6 +674,16 @@ impl App {
             {
                 self.active_tab = (self.active_tab + 1) % self.tabs.len();
             }
+            KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.conductor_mode {
+                    message_handler::handle_command(self, "/solo");
+                }
+            }
+            KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.conductor_mode {
+                    message_handler::handle_command(self, "/conductor");
+                }
+            }
             KeyCode::Char('w')
                 if key.modifiers.contains(KeyModifiers::CONTROL) && !self.tabs.is_empty() =>
             {
@@ -763,7 +787,7 @@ impl App {
             area,
         );
 
-        let content_area = if self.conductor_mode {
+        let content_area = if self.show_sidebar() {
             let (sb_area, content) = layout::split_sidebar(area);
             if sb_area.width > 0 {
                 sidebar::render_sidebar(frame, sb_area, &self.sidebar_state, &self.theme);
@@ -1455,7 +1479,7 @@ async fn run_loop(
             .current_tab()
             .map(|t| t.input.line_count() as u16)
             .unwrap_or(1);
-        let content_area = if app.conductor_mode {
+        let content_area = if app.show_sidebar() {
             let (sb_area, content) = layout::split_sidebar(area);
             app.sidebar_area = if sb_area.width > 0 {
                 Some(sb_area)
@@ -1500,9 +1524,7 @@ async fn run_loop(
             crate::tui::rendering::helpers::drain_stream_buffer(tab);
         }
 
-        if app.conductor_mode
-            && let Some(agents) = app.session_pool.try_check()
-        {
+        if let Some(agents) = app.session_pool.try_check() {
             app.sidebar_state.update(agents);
         }
         if app.toast.as_ref().is_some_and(|t| t.is_expired()) {

@@ -127,11 +127,9 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
                         }
                         crate::session::message::Role::ToolResult => {
                             if let Some(tr) = &msg.tool_result {
-                                let output = if tr.output.len() > 2000 {
-                                    format!("{}...", &tr.output[..2000])
-                                } else {
-                                    tr.output.clone()
-                                };
+                                let output = crate::tui::rendering::helpers::truncate_output(
+                                    &tr.output, 2000,
+                                );
                                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                                     tab.chat_lines.push(ChatItem::Line(ChatLine {
                                         role: crate::session::message::Role::ToolResult,
@@ -356,6 +354,13 @@ pub fn handle_command(app: &mut App, input: &str) {
         crate::commands::CommandResult::Conductor => {
             handle_conductor_command(app);
         }
+        crate::commands::CommandResult::Solo => {
+            if app.conductor_mode {
+                deactivate_conductor_mode(app);
+            } else {
+                app.show_toast("Already in solo mode");
+            }
+        }
         crate::commands::CommandResult::PluginCommand {
             plugin_command,
             args,
@@ -561,7 +566,6 @@ pub fn handle_command(app: &mut App, input: &str) {
 fn handle_conductor_command(app: &mut App) {
     if app.conductor_mode {
         deactivate_conductor_mode(app);
-        app.show_toast("Conductor mode deactivated");
         return;
     }
 
@@ -605,7 +609,7 @@ fn handle_conductor_command(app: &mut App) {
         ));
     } else {
         activate_conductor(app);
-        app.show_toast("Conductor mode activated");
+        app.show_toast("Conductor mode");
     }
 }
 
@@ -648,7 +652,10 @@ pub fn build_conductor_picker_items(
     items
 }
 
+const CONDUCTOR_TAG: &str = "[phoenix:conductor]";
+
 const CONDUCTOR_SYSTEM_PROMPT: &str = "\
+[phoenix:conductor]\n\
 You are now the CONDUCTOR.\n\
 \n\
 You have access to these orchestration tools:\n\
@@ -683,6 +690,45 @@ fn deactivate_conductor_mode(app: &mut App) {
 fn toggle_conductor_mode(app: &mut App, activate: bool) {
     app.conductor_mode = activate;
 
+    if !activate {
+        if let Some(session) = &mut app.session {
+            session.messages.retain(|m| {
+                !(m.role == crate::session::message::Role::System
+                    && m.content.contains(CONDUCTOR_TAG))
+            });
+            session.add_message(Message::system(
+                "Mode switched: You are now in solo mode. \
+                 Orchestration tools (spawn_agent, check_agents, etc.) are still available \
+                 but should only be used if the user explicitly requests multi-agent work.",
+            ));
+        }
+
+        let running_count = app
+            .session_pool
+            .try_check()
+            .map(|agents| {
+                agents
+                    .iter()
+                    .filter(|a| {
+                        a.status == crate::session::orchestration::ChildStatus::Running
+                            || a.status == crate::session::orchestration::ChildStatus::Queued
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+
+        if running_count > 0 {
+            app.show_toast(format!(
+                "Solo mode ({running_count} agent{} still running)",
+                if running_count == 1 { "" } else { "s" }
+            ));
+        } else {
+            app.sidebar_area = None;
+            app.show_toast("Solo mode");
+        }
+        return;
+    }
+
     if activate {
         let custom_agents = crate::session::agents::discover_agents(
             Some(&app.project),
@@ -714,19 +760,22 @@ fn toggle_conductor_mode(app: &mut App, activate: bool) {
 
             match tracker_result {
                 TrackerStatus::Ready(ctx) | TrackerStatus::SpecMode(ctx) => {
-                    session.add_message(Message::system(&ctx));
+                    session.add_message(Message::system(format!("{CONDUCTOR_TAG}\n{ctx}")));
                 }
                 TrackerStatus::Broken(_) => {
-                    session.add_message(Message::system(spec_mode_context()));
+                    session.add_message(Message::system(format!(
+                        "{CONDUCTOR_TAG}\n{}",
+                        spec_mode_context()
+                    )));
                 }
             }
 
             if let Some(model_ctx) = conductor_model_context(&app.config) {
-                session.add_message(Message::system(&model_ctx));
+                session.add_message(Message::system(format!("{CONDUCTOR_TAG}\n{model_ctx}")));
             }
             let agent_catalog = crate::session::agents::build_agent_catalog(&custom_agents);
             if !agent_catalog.is_empty() {
-                session.add_message(Message::system(&agent_catalog));
+                session.add_message(Message::system(format!("{CONDUCTOR_TAG}\n{agent_catalog}")));
             }
         }
     }
@@ -1000,7 +1049,7 @@ pub async fn send_message(
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 tab.chat_lines.push(ChatItem::Line(ChatLine {
                     role: crate::session::message::Role::System,
-                    content: format!("Context loaded: {}", ctx.newly_loaded.join(", ")),
+                    content: crate::tui::rendering::helpers::format_context_tree(&ctx.newly_loaded),
                 }));
             }
             redraw(app, terminal);
@@ -1321,11 +1370,7 @@ pub async fn send_message(
                     .await;
 
                 if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    let output = if tr.output.len() > 2000 {
-                        format!("{}...", &tr.output[..2000])
-                    } else {
-                        tr.output.clone()
-                    };
+                    let output = crate::tui::rendering::helpers::truncate_output(&tr.output, 2000);
                     tab.chat_lines.push(ChatItem::Line(ChatLine {
                         role: crate::session::message::Role::ToolResult,
                         content: output,
@@ -1406,9 +1451,7 @@ fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
 }
 
 pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
-    if app.conductor_mode
-        && let Some(agents) = app.session_pool.try_check()
-    {
+    if let Some(agents) = app.session_pool.try_check() {
         app.sidebar_state.update(agents);
     }
     let sz = terminal.size().unwrap_or_default();
@@ -1417,7 +1460,7 @@ pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::S
         .current_tab()
         .map(|t| t.input.line_count() as u16)
         .unwrap_or(1);
-    let content_area = if app.conductor_mode {
+    let content_area = if app.show_sidebar() {
         layout::split_sidebar(sz_rect).1
     } else {
         sz_rect

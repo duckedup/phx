@@ -123,7 +123,7 @@ fn scan_agents_dir(dir: &Path, source: AgentSource) -> Vec<AgentDefinition> {
     };
     let mut agents = vec![];
     for entry in entries.flatten() {
-        if !entry.file_type().is_ok_and(|ft| ft.is_file()) {
+        if !entry.path().is_file() {
             continue;
         }
         let path = entry.path();

@@ -119,3 +119,27 @@ pub fn drain_stream_buffer(tab: &mut Tab) {
     tab.stream_buffer = tab.stream_buffer[byte_pos..].to_string();
     tab.streaming_text.push_str(&chunk);
 }
+
+pub fn truncate_output(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    match s.char_indices().nth(max_chars) {
+        Some((byte_pos, _)) => format!("{}...", &s[..byte_pos]),
+        None => s.to_string(),
+    }
+}
+
+pub fn format_context_tree(names: &[String]) -> String {
+    let mut lines = Vec::with_capacity(names.len() + 1);
+    lines.push("Context loaded".to_string());
+    for (i, name) in names.iter().enumerate() {
+        let connector = if i + 1 < names.len() {
+            "├──"
+        } else {
+            "└──"
+        };
+        lines.push(format!("  {connector} {name}"));
+    }
+    lines.join("\n")
+}
