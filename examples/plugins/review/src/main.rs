@@ -1,9 +1,11 @@
 use phoenix_plugin_sdk::ui_field_types::UiField as ToolUiField;
-use phoenix_plugin_sdk::{tool, ToolOutput};
+use phoenix_plugin_sdk::{run_command, tool, ToolOutput};
 
 const MAX_DIFF_BYTES: usize = 12_500;
 
 tool! {
+    name: "phoenix-plugin-review",
+    version: "0.1.0",
     tools: [
         {
             name: "review",

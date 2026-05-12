@@ -165,7 +165,7 @@ pub fn handle_command(app: &mut App, input: &str) {
         &crate::config::paths::user_home(),
         &app.config.skills.dirs,
     );
-    let rt_guard = app.wasm_runtime.as_ref().map(|rt| rt.lock());
+    let rt_guard = app.plugin_runtime.as_ref().map(|rt| rt.lock());
     let result = crate::commands::dispatcher::dispatch_with_plugins(
         input,
         &app.config,
@@ -394,8 +394,8 @@ pub fn handle_command(app: &mut App, input: &str) {
                 }
             }
         }
-        crate::commands::CommandResult::WasmSkillCommand { command, args } => {
-            if let Some(rt) = app.wasm_runtime.as_ref().map(Arc::clone) {
+        crate::commands::CommandResult::PluginToolCommand { command, args } => {
+            if let Some(rt) = app.plugin_runtime.as_ref().map(Arc::clone) {
                 let rt_guard = rt.lock();
                 let ui_config = rt_guard.tool_ui(&command).cloned();
                 let description = rt_guard
@@ -428,7 +428,7 @@ pub fn handle_command(app: &mut App, input: &str) {
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                                 tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: crate::session::message::Role::System,
-                                    content: format!("WASM tool error: {e}"),
+                                    content: format!("Plugin tool error: {e}"),
                                 }));
                             }
                         }
@@ -442,18 +442,19 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
             app.is_reloading = true;
 
-            if let Some(rt_arc) = app.wasm_runtime.clone() {
-                use crate::plugin::wasm_runtime::WasmRuntime;
+            if let Some(rt_arc) = app.plugin_runtime.clone() {
+                use crate::plugin::plugin_runtime::PluginRuntime;
 
-                let mut wasm_dirs = WasmRuntime::discover_dirs(
+                let mut plugin_dirs = PluginRuntime::discover_dirs(
                     Some(&app.project),
                     &crate::config::paths::user_home(),
                 );
-                let workspace_wasm = app.project.join("target/wasm32-wasip2/release");
-                if workspace_wasm.is_dir() {
-                    wasm_dirs.push(workspace_wasm);
+                // Ensure project plugin dir is included (install may create it)
+                let project_plugin_dir = app.project.join(".phoenix/plugins");
+                if !plugin_dirs.contains(&project_plugin_dir) {
+                    plugin_dirs.push(project_plugin_dir);
                 }
-                let mut source_dirs = WasmRuntime::discover_source_dirs(Some(&app.project));
+                let mut source_dirs = PluginRuntime::discover_source_dirs(Some(&app.project));
                 crate::tui::app::resolve_extra_plugin_dirs(
                     &app.extra_plugin_dirs,
                     &app.project,
@@ -461,15 +462,15 @@ pub fn handle_command(app: &mut App, input: &str) {
                 );
 
                 let handle = tokio::task::spawn_blocking(move || {
-                    let result = rt_arc.lock().reload(&wasm_dirs, &source_dirs);
+                    let result = rt_arc.lock().reload(&plugin_dirs, &source_dirs);
                     crate::tui::app::ReloadOutput {
-                        wasm_result: Some(result),
+                        plugin_result: Some(result),
                     }
                 });
                 app.reload_task = Some(handle);
             } else {
                 app.is_reloading = false;
-                app.show_toast("WASM runtime not available.".to_string());
+                app.show_toast("Plugin runtime not available.".to_string());
             }
         }
         crate::commands::CommandResult::ContextInfo => {
@@ -525,18 +526,18 @@ pub fn handle_command(app: &mut App, input: &str) {
             }
 
             {
-                let rt_guard2 = app.wasm_runtime.as_ref().map(|rt| rt.lock());
-                let wasm_commands: Vec<(&str, &str)> = rt_guard2
+                let rt_guard2 = app.plugin_runtime.as_ref().map(|rt| rt.lock());
+                let plugin_commands: Vec<(&str, &str)> = rt_guard2
                     .as_ref()
                     .map(|rt| rt.commands())
                     .unwrap_or_default();
                 let process_cmds = app.plugin_manager.plugin_commands();
 
-                if !wasm_commands.is_empty() || !process_cmds.is_empty() {
+                if !plugin_commands.is_empty() || !process_cmds.is_empty() {
                     lines.push(String::new());
                     lines.push("### Plugin commands".to_string());
                     lines.push(String::new());
-                    for (name, desc) in &wasm_commands {
+                    for (name, desc) in &plugin_commands {
                         format_bullet(&mut lines, name, desc, "");
                     }
                     for (name, summary) in &process_cmds {
@@ -1477,9 +1478,9 @@ pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
 
     app.tools.retain_builtins();
 
-    // Register all WASM tools via unified adapter
-    if let Some(rt) = &app.wasm_runtime {
-        crate::plugin::wasm_tool_adapter::register_wasm_tools(rt, &mut app.tools);
+    // Register all plugin tools via adapter
+    if let Some(rt) = &app.plugin_runtime {
+        crate::plugin::plugin_tool_adapter::register_plugin_tools(rt, &mut app.tools);
     }
 
     // Re-discover markdown skills and register isTool skills
@@ -1492,7 +1493,7 @@ pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
 
     // Rebuild command items
     {
-        let rt_guard = app.wasm_runtime.as_ref().map(|rt| rt.lock());
+        let rt_guard = app.plugin_runtime.as_ref().map(|rt| rt.lock());
         let command_list = crate::commands::dispatcher::list_commands_with_plugins(
             &skills,
             Some(&app.plugin_manager),
@@ -1510,7 +1511,7 @@ pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
     }
 
     // Show result
-    if let Some(ref result) = output.wasm_result {
+    if let Some(ref result) = output.plugin_result {
         let mut parts = Vec::new();
         for build in &result.builds {
             if !build.success {

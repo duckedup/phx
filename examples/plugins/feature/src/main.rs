@@ -2,6 +2,8 @@ use phoenix_plugin_sdk::ui_field_types::UiField as ToolUiField;
 use phoenix_plugin_sdk::{tool, ToolOutput};
 
 tool! {
+    name: "phoenix-plugin-feature",
+    version: "0.1.0",
     tools: [
         {
             name: "feature",

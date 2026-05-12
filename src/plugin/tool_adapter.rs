@@ -125,6 +125,9 @@ mod tests {
             description: "A test tool".into(),
             parameters: serde_json::json!({"type": "object", "properties": {"x": {"type": "string"}}}),
             needs_context: false,
+            command: String::new(),
+            keybind: String::new(),
+            ui_fields: vec![],
         };
 
         assert_eq!(def.name, "test_tool");

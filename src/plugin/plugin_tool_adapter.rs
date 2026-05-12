@@ -6,18 +6,18 @@ use serde_json::Value;
 
 use crate::tools::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 
-use super::wasm_runtime::WasmRuntime;
+use super::plugin_runtime::PluginRuntime;
 
-pub struct UnifiedWasmToolAdapter {
-    runtime: Arc<Mutex<WasmRuntime>>,
+pub struct PluginToolAdapter {
+    runtime: Arc<Mutex<PluginRuntime>>,
     tool_name: String,
     description: String,
     parameters: Value,
 }
 
-impl UnifiedWasmToolAdapter {
+impl PluginToolAdapter {
     pub fn new(
-        runtime: Arc<Mutex<WasmRuntime>>,
+        runtime: Arc<Mutex<PluginRuntime>>,
         tool_name: String,
         description: String,
         parameters_json: &str,
@@ -34,7 +34,7 @@ impl UnifiedWasmToolAdapter {
 }
 
 #[async_trait]
-impl Tool for UnifiedWasmToolAdapter {
+impl Tool for PluginToolAdapter {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: self.tool_name.clone(),
@@ -67,27 +67,27 @@ impl Tool for UnifiedWasmToolAdapter {
                 },
             }),
             Err(e) => Err(ToolError::ExecutionFailed(format!(
-                "WASM tool '{}' failed: {e}",
+                "Plugin tool '{}' failed: {e}",
                 self.tool_name
             ))),
         }
     }
 }
 
-pub fn register_wasm_tools(
-    runtime: &Arc<Mutex<WasmRuntime>>,
+pub fn register_plugin_tools(
+    runtime: &Arc<Mutex<PluginRuntime>>,
     registry: &mut crate::tools::traits::ToolRegistry,
 ) {
     let rt = runtime.lock();
 
     for meta in rt.all_tool_schemas() {
-        let adapter = UnifiedWasmToolAdapter::new(
+        let adapter = PluginToolAdapter::new(
             Arc::clone(runtime),
             meta.name.clone(),
             meta.description.clone(),
             &meta.parameters_json,
         );
-        tracing::info!("registering WASM tool '{}'", meta.name);
+        tracing::info!("registering plugin tool '{}'", meta.name);
         registry.register(Arc::new(adapter));
     }
 }

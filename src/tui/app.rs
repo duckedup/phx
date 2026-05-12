@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use crate::commands::dispatcher::ModelChoice;
 use crate::config::schema::Config;
 use crate::plugin::manager::PluginManager;
-use crate::plugin::wasm_runtime::WasmRuntime;
+use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::providers;
 use crate::providers::traits::Provider;
 use crate::session::agent_loop::Session;
@@ -56,7 +56,7 @@ pub struct App {
     pub pending_skill_message: Option<String>,
     pub plugin_manager: PluginManager,
     pub extra_plugin_dirs: Vec<std::path::PathBuf>,
-    pub wasm_runtime: Option<Arc<parking_lot::Mutex<WasmRuntime>>>,
+    pub plugin_runtime: Option<Arc<parking_lot::Mutex<PluginRuntime>>>,
     pub command_items: Vec<PickerItem>,
     pub display_lines: Vec<DisplayLine>,
     pub chat_area_height: u16,
@@ -90,7 +90,7 @@ pub struct AgentReceiver {
 }
 
 pub struct ReloadOutput {
-    pub wasm_result: Option<crate::plugin::wasm_runtime::ReloadResult>,
+    pub plugin_result: Option<crate::plugin::plugin_runtime::ReloadResult>,
 }
 
 impl App {
@@ -184,7 +184,7 @@ impl App {
             pending_skill_message: None,
             plugin_manager: PluginManager::new(),
             extra_plugin_dirs: Vec::new(),
-            wasm_runtime: None,
+            plugin_runtime: None,
             command_items,
             display_lines: Vec::new(),
             chat_area_height: 0,
@@ -255,7 +255,7 @@ impl App {
         self.toast = Some(toast::Toast::new(message.into(), Duration::from_secs(3)));
     }
 
-    pub fn apply_tool_result(&mut self, result: crate::plugin::wasm_runtime::ToolExecResult) {
+    pub fn apply_tool_result(&mut self, result: crate::plugin::plugin_runtime::ToolExecResult) {
         if !result.toast.is_empty() {
             self.show_toast(result.toast);
         }
@@ -433,7 +433,7 @@ impl App {
             message_handler::handle_command(self, "/conductor");
             return;
         }
-        if let Some(rt) = self.wasm_runtime.as_ref().map(Arc::clone) {
+        if let Some(rt) = self.plugin_runtime.as_ref().map(Arc::clone) {
             match rt.lock().toggle_tool(tool_name, args_json) {
                 Ok(result) => self.apply_tool_result(result),
                 Err(e) => self.show_toast(format!("Plugin error: {e}")),
@@ -654,7 +654,7 @@ impl App {
 
         match key.code {
             KeyCode::BackTab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                let rt_clone = self.wasm_runtime.as_ref().map(Arc::clone);
+                let rt_clone = self.plugin_runtime.as_ref().map(Arc::clone);
                 let tool_name = rt_clone.as_ref().and_then(|rt| {
                     rt.lock()
                         .tool_for_keybind("shift+tab")
@@ -1331,7 +1331,7 @@ pub fn command_source_tag(source: &crate::commands::dispatcher::CommandSource) -
         CommandSource::Builtin => None,
         CommandSource::Skill => Some("skill".into()),
         CommandSource::Plugin => Some("plugin".into()),
-        CommandSource::WasmPlugin => Some("plugin".into()),
+        CommandSource::NativePlugin => Some("plugin".into()),
     }
 }
 
@@ -1395,32 +1395,21 @@ pub async fn run(
             .await;
     }
 
-    if let Ok(mut rt) = WasmRuntime::new_with_project(std::env::current_dir().unwrap_or_default()) {
+    {
+        let mut rt = PluginRuntime::new(std::env::current_dir().unwrap_or_default());
         rt.load_bundled();
-        let wasm_dirs =
-            WasmRuntime::discover_dirs(Some(&app.project), &crate::config::paths::user_home());
-        for dir in &wasm_dirs {
+        let plugin_dirs =
+            PluginRuntime::discover_dirs(Some(&app.project), &crate::config::paths::user_home());
+        for dir in &plugin_dirs {
             let _ = rt.load_from_dir(dir);
         }
-        let workspace_wasm = app.project.join("target/wasm32-wasip2/release");
-        if workspace_wasm.is_dir() {
-            let _ = rt.load_from_dir(&workspace_wasm);
-        }
-        let mut source_dirs = WasmRuntime::discover_source_dirs(Some(&app.project));
-        resolve_extra_plugin_dirs(&app.extra_plugin_dirs, &app.project, &mut source_dirs);
-        for dir in &source_dirs {
-            let release_dir = dir.join("target/wasm32-wasip2/release");
-            if release_dir.is_dir() {
-                let _ = rt.load_from_dir(&release_dir);
-            }
-        }
         let rt_arc = Arc::new(parking_lot::Mutex::new(rt));
-        crate::plugin::wasm_tool_adapter::register_wasm_tools(&rt_arc, &mut app.tools);
-        app.wasm_runtime = Some(rt_arc);
+        crate::plugin::plugin_tool_adapter::register_plugin_tools(&rt_arc, &mut app.tools);
+        app.plugin_runtime = Some(rt_arc);
     }
 
     if app
-        .wasm_runtime
+        .plugin_runtime
         .as_ref()
         .is_some_and(|rt| rt.lock().tool_count() > 0)
         || app.plugin_manager.plugin_count() > 0
@@ -1430,7 +1419,7 @@ pub async fn run(
             &crate::config::paths::user_home(),
             &app.config.skills.dirs,
         );
-        let rt_ref = app.wasm_runtime.as_ref().map(|rt| rt.lock());
+        let rt_ref = app.plugin_runtime.as_ref().map(|rt| rt.lock());
         let command_list = crate::commands::dispatcher::list_commands_with_plugins(
             &skills,
             Some(&app.plugin_manager),

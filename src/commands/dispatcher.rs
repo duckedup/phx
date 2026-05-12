@@ -1,7 +1,7 @@
 use crate::commands::{connect, model, session_cmd, skill, theme};
 use crate::config::schema::{Config, ProviderProfile};
 use crate::plugin::PluginManager;
-use crate::plugin::wasm_runtime::WasmRuntime;
+use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::session::skills::Skill;
 use crate::store::session_store::SessionStore;
 use crate::tui::theme::ThemeEntry;
@@ -27,7 +27,7 @@ pub enum CommandSource {
     Builtin,
     Skill,
     Plugin,
-    WasmPlugin,
+    NativePlugin,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +56,7 @@ pub enum CommandResult {
         plugin_command: String,
         args: String,
     },
-    WasmSkillCommand {
+    PluginToolCommand {
         command: String,
         args: String,
     },
@@ -100,7 +100,7 @@ pub fn dispatch_with_plugins(
     store: &SessionStore,
     project: &Path,
     plugins: Option<&PluginManager>,
-    wasm_runtime: Option<&WasmRuntime>,
+    plugin_runtime: Option<&PluginRuntime>,
 ) -> CommandResult {
     if !is_command(input) {
         return CommandResult::NotACommand;
@@ -122,7 +122,7 @@ pub fn dispatch_with_plugins(
         "solo" => CommandResult::Solo,
         "reload" => CommandResult::ReloadPlugins,
         "context" => CommandResult::ContextInfo,
-        "help" => CommandResult::Message(help_text(skills, plugins, wasm_runtime)),
+        "help" => CommandResult::Message(help_text(skills, plugins, plugin_runtime)),
         _ => {
             // Check plugin commands
             if let Some(pm) = plugins
@@ -134,10 +134,10 @@ pub fn dispatch_with_plugins(
                 };
             }
 
-            if let Some(rt) = wasm_runtime
+            if let Some(rt) = plugin_runtime
                 && rt.has_command(name)
             {
-                return CommandResult::WasmSkillCommand {
+                return CommandResult::PluginToolCommand {
                     command: name.to_string(),
                     args: args.to_string(),
                 };
@@ -165,7 +165,7 @@ pub fn list_commands(skills: &[Skill]) -> Vec<CommandInfo> {
 pub fn list_commands_with_plugins(
     skills: &[Skill],
     plugins: Option<&PluginManager>,
-    wasm_runtime: Option<&WasmRuntime>,
+    plugin_runtime: Option<&PluginRuntime>,
 ) -> Vec<CommandInfo> {
     let mut cmds: Vec<CommandInfo> = vec![
         CommandInfo {
@@ -274,17 +274,17 @@ pub fn list_commands_with_plugins(
             });
         }
     }
-    if let Some(rt) = wasm_runtime {
+    if let Some(rt) = plugin_runtime {
         for (name, description) in rt.commands() {
             cmds.push(CommandInfo {
                 name: name.to_string(),
                 summary: if description.is_empty() {
-                    "WASM skill".into()
+                    "Plugin tool".into()
                 } else {
                     description.to_string()
                 },
                 is_skill: true,
-                source: CommandSource::WasmPlugin,
+                source: CommandSource::NativePlugin,
             });
         }
     }
@@ -295,10 +295,10 @@ pub fn list_commands_with_plugins(
 fn help_text(
     skills: &[Skill],
     plugins: Option<&PluginManager>,
-    wasm_runtime: Option<&WasmRuntime>,
+    plugin_runtime: Option<&PluginRuntime>,
 ) -> String {
     let mut lines = vec!["Available commands:".to_string()];
-    for cmd in list_commands_with_plugins(skills, plugins, wasm_runtime) {
+    for cmd in list_commands_with_plugins(skills, plugins, plugin_runtime) {
         lines.push(format!("  /{:<12} {}", cmd.name, cmd.summary));
     }
     lines.join("\n")

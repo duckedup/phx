@@ -37,20 +37,20 @@ package:
 clean:
     cargo clean
 
-# Ensure wasm32-wasip2 target is installed
-_ensure-wasm-target:
-    @rustup target list --installed | grep -q wasm32-wasip2 || rustup target add wasm32-wasip2
-
-# Build all bundled WASM plugins and copy to bundled/
-build-plugins: _ensure-wasm-target
+# Build native plugins and install to .phoenix/plugins/
+# Usage: just build-plugins [folder]
+# Examples:
+#   just build-plugins              # builds from plugins/
+#   just build-plugins examples/plugins  # builds from examples/plugins/
+build-plugins dir="plugins":
     #!/usr/bin/env bash
     set -euo pipefail
     shopt -s nullglob
-    for manifest in plugins/*/Cargo.toml; do
+    for manifest in {{dir}}/*/Cargo.toml; do
         name=$(grep '^name' "$manifest" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-        cargo build -p "$name" --target wasm32-wasip2 --release
-        wasm="target/wasm32-wasip2/release/${name//-/_}.wasm"
-        cp "$wasm" bundled/
+        cargo build -p "$name" --release
+        short_name="${name#phoenix-plugin-}"
+        ./target/release/"$name" install .phoenix/plugins/"$short_name"
     done
 
 # Initialize beads issue tracking for this project

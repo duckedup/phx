@@ -1,3 +1,4 @@
+use phoenix_shared::ui_field_types::UiField;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -35,6 +36,12 @@ pub struct PluginToolDef {
     pub parameters: serde_json::Value,
     #[serde(default)]
     pub needs_context: bool,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub keybind: String,
+    #[serde(default)]
+    pub ui_fields: Vec<UiField>,
 }
 
 fn default_params() -> serde_json::Value {

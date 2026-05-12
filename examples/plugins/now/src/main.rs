@@ -1,6 +1,8 @@
 use phoenix_plugin_sdk::{tool, ToolOutput};
 
 tool! {
+    name: "phoenix-plugin-now",
+    version: "0.1.0",
     tools: [
         {
             name: "get_current_time",

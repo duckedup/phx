@@ -8,6 +8,10 @@ pub use phoenix_shared::tool_types;
 pub use phoenix_shared::ui_field_types;
 pub use phoenix_shared::ui_types;
 
+pub use clap;
+pub use serde;
+pub use serde_json;
+
 pub struct ToolOutput {
     pub output: String,
     pub is_error: bool,
@@ -62,14 +66,43 @@ impl ToolOutput {
     }
 }
 
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+pub fn run_command(program: &str, args: &[String]) -> Result<CommandOutput, String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run {program}: {e}"))?;
+
+    Ok(CommandOutput {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
+
 #[doc(hidden)]
-pub fn __to_wit_tool_result(r: ToolOutput) -> (String, bool, String, String) {
-    (r.output, r.is_error, r.toast, r.widget)
+pub fn __serialize_tool_output(r: &ToolOutput) -> String {
+    serde_json::json!({
+        "output": r.output,
+        "is_error": r.is_error,
+        "toast": r.toast,
+        "widget": r.widget,
+    })
+    .to_string()
 }
 
 #[macro_export]
 macro_rules! tool {
     (
+        name: $plugin_name:expr,
+        version: $plugin_version:expr,
         tools: [
             $(
                 {
@@ -85,121 +118,179 @@ macro_rules! tool {
             ),+ $(,)?
         ]
     ) => {
-        ::wit_bindgen::generate!({
-            inline: r#"
-                package phoenix:plugin@0.2.0;
-                world tool-plugin {
-                    enum ui-field-kind {
-                        text-input,
-                        text-area,
-                        toggle,
-                    }
-                    record ui-field {
-                        key: string,
-                        label: string,
-                        field-kind: ui-field-kind,
-                        required: bool,
-                        placeholder: string,
-                    }
-                    record tool-metadata {
-                        name: string,
-                        description: string,
-                        parameters-json: string,
-                        command: string,
-                        keybind: string,
-                        ui-fields: list<ui-field>,
-                    }
-                    record tool-result {
-                        output: string,
-                        is-error: bool,
-                        toast: string,
-                        widget: string,
-                    }
-                    record command-output {
-                        stdout: string,
-                        stderr: string,
-                        exit-code: s32,
-                    }
-                    import run-command: func(program: string, args: list<string>) -> result<command-output, string>;
-                    export get-tool-metadata: func() -> list<tool-metadata>;
-                    export invoke-tool: func(name: string, args-json: string) -> result<tool-result, string>;
-                    export on-exit-tool: func(name: string) -> result<tool-result, string>;
-                }
-            "#,
-            world: "tool-plugin",
-        });
-
-        struct PhoenixToolPlugin;
-        export!(PhoenixToolPlugin);
-
-        fn __convert(r: $crate::ToolOutput) -> ToolResult {
-            let (output, is_error, toast, widget) = $crate::__to_wit_tool_result(r);
-            ToolResult { output, is_error, toast, widget }
+        fn __build_manifest() -> String {
+            let tools: Vec<$crate::serde_json::Value> = vec![
+                $(
+                    {
+                        let ui_fields: Vec<$crate::ui_field_types::UiField> = $ui;
+                        let ui_json: Vec<$crate::serde_json::Value> = ui_fields.into_iter().map(|f| {
+                            $crate::serde_json::json!({
+                                "key": f.key,
+                                "label": f.label,
+                                "field": match f.field {
+                                    $crate::ui_field_types::UiFieldKind::TextInput => "text_input",
+                                    $crate::ui_field_types::UiFieldKind::TextArea => "text_area",
+                                    $crate::ui_field_types::UiFieldKind::Toggle => "toggle",
+                                },
+                                "required": f.required,
+                                "placeholder": f.placeholder,
+                                "default_value": f.default_value,
+                            })
+                        }).collect();
+                        $crate::serde_json::json!({
+                            "name": $name,
+                            "description": $desc,
+                            "parameters": $params,
+                            "command": $cmd,
+                            "keybind": $kb,
+                            "ui_fields": ui_json,
+                        })
+                    },
+                )+
+            ];
+            $crate::serde_json::to_string_pretty(&$crate::serde_json::json!({
+                "name": $plugin_name,
+                "version": $plugin_version,
+                "tools": tools,
+            })).unwrap()
         }
 
-        fn __convert_ui(fields: Vec<$crate::ui_field_types::UiField>) -> Vec<UiField> {
-            fields.into_iter().map(|f| {
-                let field_kind = match f.field {
-                    $crate::ui_field_types::UiFieldKind::TextInput => UiFieldKind::TextInput,
-                    $crate::ui_field_types::UiFieldKind::TextArea => UiFieldKind::TextArea,
-                    $crate::ui_field_types::UiFieldKind::Toggle => UiFieldKind::Toggle,
-                };
-                UiField {
-                    key: f.key,
-                    label: f.label,
-                    field_kind,
-                    required: f.required,
-                    placeholder: f.placeholder,
-                }
-            }).collect()
+        fn __invoke_tool(tool_name: &str, args_json: &str) -> Result<$crate::ToolOutput, String> {
+            let __parsed_args: $crate::serde_json::Value = $crate::serde_json::from_str(args_json)
+                .map_err(|e| format!("invalid JSON args: {e}"))?;
+            match tool_name {
+                $(
+                    $name => {
+                        fn __inner($iname: String, $iargs: $crate::serde_json::Value) -> Result<$crate::ToolOutput, String>
+                            $ibody
+                        __inner(tool_name.to_string(), __parsed_args)
+                    }
+                )+
+                other => Err(format!("unknown tool: {other}")),
+            }
         }
 
-        impl Guest for PhoenixToolPlugin {
-            fn get_tool_metadata() -> Vec<ToolMetadata> {
-                vec![
-                    $(
-                        ToolMetadata {
-                            name: $name.into(),
-                            description: $desc.into(),
-                            parameters_json: $params.into(),
-                            command: $cmd.into(),
-                            keybind: $kb.into(),
-                            ui_fields: __convert_ui($ui),
-                        },
-                    )+
-                ]
+        fn __exit_tool(tool_name: &str) -> Result<$crate::ToolOutput, String> {
+            match tool_name {
+                $(
+                    $name => {
+                        fn __inner() -> Result<$crate::ToolOutput, String>
+                            $ebody
+                        __inner()
+                    }
+                )+
+                _ => Ok($crate::ToolOutput::empty()),
+            }
+        }
+
+        fn __install_to(dir: &str) {
+            let dest = std::path::Path::new(dir);
+            std::fs::create_dir_all(dest).expect("failed to create install directory");
+
+            // Write manifest.json
+            let binary_name = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| format!("{}", $plugin_name));
+
+            let mut manifest: $crate::serde_json::Value =
+                $crate::serde_json::from_str(&__build_manifest()).unwrap();
+            manifest["command"] = $crate::serde_json::json!(format!("./{binary_name}"));
+
+            let manifest_path = dest.join("manifest.json");
+            let formatted = $crate::serde_json::to_string_pretty(&manifest).unwrap();
+            std::fs::write(&manifest_path, formatted)
+                .expect("failed to write manifest.json");
+
+            // Copy binary
+            let self_path = std::env::current_exe().expect("failed to get current exe path");
+            let binary_dest = dest.join(&binary_name);
+            std::fs::copy(&self_path, &binary_dest).expect("failed to copy binary");
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &binary_dest,
+                    std::fs::Permissions::from_mode(0o755),
+                );
             }
 
-            fn invoke_tool(__tool_name: String, __args_json: String) -> Result<ToolResult, String> {
-                let __parsed_args: serde_json::Value = serde_json::from_str(&__args_json)
-                    .map_err(|e| format!("invalid JSON args: {e}"))?;
-                match __tool_name.as_str() {
-                    $(
-                        $name => {
-                            fn __inner($iname: String, $iargs: serde_json::Value) -> Result<$crate::ToolOutput, String>
-                                $ibody
-                            __inner(__tool_name, __parsed_args).map(__convert)
+            eprintln!("Installed to {}", dest.display());
+            eprintln!("  manifest.json");
+            eprintln!("  {binary_name}");
+        }
+
+        fn main() {
+            use $crate::clap::{Arg, ArgAction, Command};
+
+            let cli = Command::new($plugin_name)
+                .version($plugin_version)
+                .arg(
+                    Arg::new("manifest")
+                        .long("manifest")
+                        .action(ArgAction::SetTrue)
+                        .help("Print plugin manifest as JSON"),
+                )
+                .subcommand(
+                    Command::new("invoke")
+                        .about("Invoke a tool")
+                        .arg(Arg::new("tool").required(true))
+                        .arg(Arg::new("args_json").required(true)),
+                )
+                .subcommand(
+                    Command::new("exit")
+                        .about("Exit/cleanup a tool")
+                        .arg(Arg::new("tool").required(true)),
+                )
+                .subcommand(
+                    Command::new("install")
+                        .about("Install plugin to a directory (manifest.json + binary)")
+                        .arg(Arg::new("dir").required(true)),
+                );
+
+            let matches = cli.get_matches();
+
+            if matches.get_flag("manifest") {
+                println!("{}", __build_manifest());
+                return;
+            }
+
+            match matches.subcommand() {
+                Some(("invoke", sub)) => {
+                    let tool = sub.get_one::<String>("tool").unwrap();
+                    let args = sub.get_one::<String>("args_json").unwrap();
+                    match __invoke_tool(tool, args) {
+                        Ok(result) => {
+                            println!("{}", $crate::__serialize_tool_output(&result));
                         }
-                    )+
-                    other => Err(format!("unknown tool: {other}")),
+                        Err(e) => {
+                            let err_result = $crate::ToolOutput::error(e);
+                            println!("{}", $crate::__serialize_tool_output(&err_result));
+                            std::process::exit(1);
+                        }
+                    }
                 }
-            }
-
-            fn on_exit_tool(__tool_name: String) -> Result<ToolResult, String> {
-                match __tool_name.as_str() {
-                    $(
-                        $name => {
-                            fn __inner() -> Result<$crate::ToolOutput, String>
-                                $ebody
-                            __inner().map(__convert)
+                Some(("exit", sub)) => {
+                    let tool = sub.get_one::<String>("tool").unwrap();
+                    match __exit_tool(tool) {
+                        Ok(result) => {
+                            println!("{}", $crate::__serialize_tool_output(&result));
                         }
-                    )+
-                    _ => Ok(ToolResult {
-                        output: String::new(),
-                        is_error: false,
-                        toast: String::new(),
-                        widget: String::new(),
-                    }),
+                        Err(e) => {
+                            let err_result = $crate::ToolOutput::error(e);
+                            println!("{}", $crate::__serialize_tool_output(&err_result));
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                Some(("install", sub)) => {
+                    let dir = sub.get_one::<String>("dir").unwrap();
+                    __install_to(dir);
+                }
+                _ => {
+                    eprintln!("Usage: {} --manifest | invoke <tool> <args> | exit <tool> | install <dir>", $plugin_name);
+                    std::process::exit(1);
                 }
             }
         }
