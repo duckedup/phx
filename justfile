@@ -37,7 +37,7 @@ package:
     @echo "binary at target/release/phx"
 
 publish:
-    cargo publish -p phx --allow-dirty
+    cargo publish -p phx
 
 clean:
     cargo clean
