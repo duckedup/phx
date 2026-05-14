@@ -21,6 +21,17 @@ pub struct ToolExecResult {
     pub widget: String,
 }
 
+impl ToolExecResult {
+    pub fn empty() -> Self {
+        Self {
+            output: String::new(),
+            is_error: false,
+            toast: String::new(),
+            widget: String::new(),
+        }
+    }
+}
+
 pub struct BuildOutput {
     pub name: String,
     pub package_name: String,
@@ -43,7 +54,9 @@ struct ManifestJson {
     #[serde(default)]
     version: String,
     #[serde(default)]
-    command: String,
+    bin: String,
+    #[serde(default)]
+    bin_args: Vec<String>,
     tools: Vec<ToolMetaJson>,
 }
 
@@ -60,6 +73,18 @@ struct ToolMetaJson {
     keybind: String,
     #[serde(default)]
     ui_fields: Vec<UiField>,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default)]
+    bin: Option<String>,
+    #[serde(default)]
+    bin_args: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+enum ToolExecKind {
+    Shell(String),
+    Bin { path: PathBuf, args: Vec<String> },
 }
 
 fn default_params_str() -> String {
@@ -79,8 +104,8 @@ struct ToolResultJson {
 }
 
 struct LoadedPlugin {
-    binary_path: PathBuf,
     tools: Vec<UnifiedToolMeta>,
+    tool_exec: HashMap<String, ToolExecKind>,
 }
 
 pub struct PluginRuntime {
@@ -152,36 +177,65 @@ impl PluginRuntime {
             anyhow::bail!("plugin in {} exports no tools", plugin_dir.display());
         }
 
-        if manifest.command.is_empty() {
-            anyhow::bail!(
-                "plugin in {} has no command field in manifest.json",
-                plugin_dir.display()
-            );
-        }
-
-        let binary_path = resolve_command(&manifest.command, plugin_dir);
-        if !binary_path.exists() {
-            anyhow::bail!(
-                "plugin command not found: {} (resolved to {})",
-                manifest.command,
-                binary_path.display()
-            );
-        }
+        let top_bin_path = if !manifest.bin.is_empty() {
+            let path = resolve_command(&manifest.bin, plugin_dir);
+            if !path.exists() {
+                anyhow::bail!(
+                    "plugin bin not found: {} (resolved to {})",
+                    manifest.bin,
+                    path.display()
+                );
+            }
+            Some(path)
+        } else {
+            None
+        };
 
         let key = plugin_dir.to_string_lossy().to_string();
 
-        let tools: Vec<UnifiedToolMeta> = manifest
-            .tools
-            .into_iter()
-            .map(|t| UnifiedToolMeta {
+        let mut tool_exec = HashMap::new();
+        let mut tools = Vec::new();
+
+        for t in manifest.tools {
+            let exec_kind = if let Some(ref shell) = t.shell {
+                ToolExecKind::Shell(shell.clone())
+            } else if let Some(ref bin) = t.bin {
+                let bin_path = resolve_bin_path(bin, plugin_dir, &self.project_dir);
+                if !bin_path.exists() {
+                    anyhow::bail!(
+                        "tool '{}' bin not found: {} (resolved to {})",
+                        t.name,
+                        bin,
+                        bin_path.display()
+                    );
+                }
+                ToolExecKind::Bin {
+                    path: bin_path,
+                    args: t.bin_args.clone(),
+                }
+            } else if let Some(ref top_path) = top_bin_path {
+                ToolExecKind::Bin {
+                    path: top_path.clone(),
+                    args: manifest.bin_args.clone(),
+                }
+            } else {
+                anyhow::bail!(
+                    "tool '{}' in {} has no execution strategy (shell, bin, or top-level bin)",
+                    t.name,
+                    plugin_dir.display()
+                );
+            };
+
+            tool_exec.insert(t.name.clone(), exec_kind);
+            tools.push(UnifiedToolMeta {
                 name: t.name,
                 description: t.description,
                 parameters_json: t.parameters,
                 command: t.command,
                 keybind: t.keybind,
                 ui: ToolUiConfig::new(t.ui_fields),
-            })
-            .collect();
+            });
+        }
 
         if tools.iter().any(|t| self.tool_index.contains_key(&t.name)) {
             tracing::debug!(key, "skipping plugin — tools already registered");
@@ -194,8 +248,7 @@ impl PluginRuntime {
             self.tool_index.insert(tool.name.clone(), key.clone());
         }
 
-        self.plugins
-            .insert(key, LoadedPlugin { binary_path, tools });
+        self.plugins.insert(key, LoadedPlugin { tools, tool_exec });
 
         Ok(result)
     }
@@ -216,18 +269,80 @@ impl PluginRuntime {
             .get(&plugin_key)
             .ok_or_else(|| anyhow::anyhow!("plugin not found: {plugin_key}"))?;
 
-        let output = Command::new(&loaded.binary_path)
-            .args(["invoke", tool_name, args_json])
+        let exec_kind = loaded
+            .tool_exec
+            .get(tool_name)
+            .ok_or_else(|| anyhow::anyhow!("no exec strategy for tool: {tool_name}"))?
+            .clone();
+
+        match exec_kind {
+            ToolExecKind::Shell(template) => self.invoke_shell(tool_name, &template, args_json),
+            ToolExecKind::Bin { path, args } => {
+                self.invoke_binary(&path, &args, tool_name, args_json)
+            }
+        }
+    }
+
+    fn invoke_shell(
+        &self,
+        tool_name: &str,
+        template: &str,
+        args_json: &str,
+    ) -> anyhow::Result<ToolExecResult> {
+        let args: serde_json::Value = serde_json::from_str(args_json)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+
+        let cmd = substitute_template(template, &args);
+
+        let output = Command::new("sh")
+            .args(["-c", &cmd])
             .current_dir(&self.project_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to invoke tool {tool_name} via {}: {e}",
-                    loaded.binary_path.display()
-                )
-            })?;
+            .map_err(|e| anyhow::anyhow!("failed to run shell tool {tool_name}: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            let msg = if stderr.is_empty() { &stdout } else { &stderr };
+            return Ok(ToolExecResult {
+                output: msg.to_string(),
+                is_error: true,
+                toast: String::new(),
+                widget: String::new(),
+            });
+        }
+
+        Ok(ToolExecResult {
+            output: stdout,
+            is_error: false,
+            toast: String::new(),
+            widget: String::new(),
+        })
+    }
+
+    fn invoke_binary(
+        &self,
+        binary_path: &Path,
+        static_args: &[String],
+        tool_name: &str,
+        args_json: &str,
+    ) -> anyhow::Result<ToolExecResult> {
+        let mut cmd = Command::new(binary_path);
+        cmd.args(static_args);
+        cmd.args(["invoke", tool_name, args_json]);
+        cmd.current_dir(&self.project_dir);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let output = cmd.output().map_err(|e| {
+            anyhow::anyhow!(
+                "failed to invoke tool {tool_name} via {}: {e}",
+                binary_path.display()
+            )
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -268,7 +383,16 @@ impl PluginRuntime {
             .get(&plugin_key)
             .ok_or_else(|| anyhow::anyhow!("plugin not found: {plugin_key}"))?;
 
-        let output = Command::new(&loaded.binary_path)
+        let exec_kind = loaded.tool_exec.get(tool_name).cloned();
+
+        self.active_tools.remove(tool_name);
+
+        let binary_path = match &exec_kind {
+            Some(ToolExecKind::Shell(_)) | None => return Ok(ToolExecResult::empty()),
+            Some(ToolExecKind::Bin { path, .. }) => path.clone(),
+        };
+
+        let output = Command::new(&binary_path)
             .args(["exit", tool_name])
             .current_dir(&self.project_dir)
             .stdout(std::process::Stdio::piped())
@@ -277,11 +401,9 @@ impl PluginRuntime {
             .map_err(|e| {
                 anyhow::anyhow!(
                     "failed to exit tool {tool_name} via {}: {e}",
-                    loaded.binary_path.display()
+                    binary_path.display()
                 )
             })?;
-
-        self.active_tools.remove(tool_name);
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let result: ToolResultJson = serde_json::from_str(&stdout).unwrap_or(ToolResultJson {
@@ -304,12 +426,28 @@ impl PluginRuntime {
         tool_name: &str,
         args_json: &str,
     ) -> anyhow::Result<ToolExecResult> {
-        if self.active_tools.contains(tool_name) {
-            self.exit_tool(tool_name)
+        let resolved = self.resolve_command_to_tool(tool_name).unwrap_or(tool_name);
+        let resolved = resolved.to_string();
+        if self.active_tools.contains(&resolved) {
+            self.exit_tool(&resolved)
         } else {
-            self.active_tools.insert(tool_name.to_string());
-            self.invoke_tool(tool_name, args_json)
+            self.active_tools.insert(resolved.clone());
+            self.invoke_tool(&resolved, args_json)
         }
+    }
+
+    fn resolve_command_to_tool<'a>(&'a self, command: &'a str) -> Option<&'a str> {
+        if self.tool_index.contains_key(command) {
+            return Some(command);
+        }
+        for loaded in self.plugins.values() {
+            for tool in &loaded.tools {
+                if tool.command == command {
+                    return Some(&tool.name);
+                }
+            }
+        }
+        None
     }
 
     pub fn is_active(&self, tool_name: &str) -> bool {
@@ -339,13 +477,16 @@ impl PluginRuntime {
         result
     }
 
-    pub fn tool_ui(&self, tool_name: &str) -> Option<&ToolUiConfig> {
-        let plugin_key = self.tool_index.get(tool_name)?;
+    pub fn tool_ui(&self, name_or_command: &str) -> Option<&ToolUiConfig> {
+        let resolved = self
+            .resolve_command_to_tool(name_or_command)
+            .unwrap_or(name_or_command);
+        let plugin_key = self.tool_index.get(resolved)?;
         let loaded = self.plugins.get(plugin_key)?;
         loaded
             .tools
             .iter()
-            .find(|t| t.name == tool_name)
+            .find(|t| t.name == resolved)
             .filter(|t| !t.ui.is_empty())
             .map(|t| &t.ui)
     }
@@ -435,6 +576,12 @@ impl PluginRuntime {
             }
         }
 
+        for dir in Self::discover_manifest_only_dirs(Some(&self.project_dir)) {
+            if let Err(e) = install_manifest_plugin(&dir, &install_base) {
+                errors.push(format!("install manifest plugin failed: {e}"));
+            }
+        }
+
         for dir in plugin_dirs {
             match self.load_from_dir(dir) {
                 Ok(tools) => {
@@ -485,14 +632,41 @@ impl PluginRuntime {
         let mut dirs = Vec::new();
 
         if let Some(p) = project {
-            let plugins_dir = p.join("plugins");
-            if plugins_dir.is_dir()
-                && let Ok(entries) = std::fs::read_dir(&plugins_dir)
-            {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() && path.join("Cargo.toml").exists() {
-                        dirs.push(path);
+            for parent in ["plugins", "examples/plugins"] {
+                let plugins_dir = p.join(parent);
+                if plugins_dir.is_dir()
+                    && let Ok(entries) = std::fs::read_dir(&plugins_dir)
+                {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() && path.join("Cargo.toml").exists() {
+                            dirs.push(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        dirs
+    }
+
+    pub fn discover_manifest_only_dirs(project: Option<&Path>) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+
+        if let Some(p) = project {
+            for parent in ["plugins", "examples/plugins"] {
+                let plugins_dir = p.join(parent);
+                if plugins_dir.is_dir()
+                    && let Ok(entries) = std::fs::read_dir(&plugins_dir)
+                {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir()
+                            && path.join("manifest.json").exists()
+                            && !path.join("Cargo.toml").exists()
+                        {
+                            dirs.push(path);
+                        }
                     }
                 }
             }
@@ -510,6 +684,34 @@ fn resolve_command(command: &str, plugin_dir: &Path) -> PathBuf {
         let stripped = command.strip_prefix("./").unwrap_or(command);
         plugin_dir.join(stripped)
     }
+}
+
+fn resolve_bin_path(bin: &str, plugin_dir: &Path, project_dir: &Path) -> PathBuf {
+    let path = Path::new(bin);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else if bin.starts_with("./") {
+        let stripped = bin.strip_prefix("./").unwrap_or(bin);
+        plugin_dir.join(stripped)
+    } else {
+        project_dir.join(bin)
+    }
+}
+
+fn substitute_template(template: &str, args: &serde_json::Value) -> String {
+    let mut result = template.to_string();
+    if let serde_json::Value::Object(map) = args {
+        for (key, val) in map {
+            let placeholder = format!("{{{{{key}}}}}");
+            let replacement = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            result = result.replace(&placeholder, &replacement);
+        }
+    }
+    result
 }
 
 fn dedup_paths(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -660,6 +862,28 @@ fn install_built_plugin(
     Ok(())
 }
 
+fn install_manifest_plugin(source_dir: &Path, install_base: &Path) -> anyhow::Result<()> {
+    let dir_name = source_dir
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("invalid plugin source dir"))?
+        .to_string_lossy();
+
+    let install_dir = install_base.join(&*dir_name);
+    std::fs::create_dir_all(&install_dir)?;
+
+    if let Ok(entries) = std::fs::read_dir(source_dir) {
+        for entry in entries.flatten() {
+            let src = entry.path();
+            let dest = install_dir.join(entry.file_name());
+            if src.is_file() {
+                std::fs::copy(&src, &dest)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -724,21 +948,135 @@ mod tests {
         let plugin_dir = dir.path().join("test-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
 
-        // Write a manifest that points to a nonexistent binary — should error
         std::fs::write(
             plugin_dir.join("manifest.json"),
-            r#"{"name":"test","command":"./nonexistent","tools":[{"name":"t","description":"d"}]}"#,
+            r#"{"name":"test","bin":"./nonexistent","tools":[{"name":"t","description":"d"}]}"#,
         )
         .unwrap();
 
         let mut rt = PluginRuntime::new(PathBuf::from("."));
         let result = rt.load_plugin_dir(&plugin_dir);
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("command not found")
+        assert!(result.unwrap_err().to_string().contains("bin not found"));
+    }
+
+    #[test]
+    fn load_shell_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("echo-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{"name":"echo","tools":[{"name":"echo_tool","description":"echoes","shell":"echo hello"}]}"#,
+        )
+        .unwrap();
+
+        let mut rt = PluginRuntime::new(PathBuf::from("."));
+        let tools = rt.load_plugin_dir(&plugin_dir).unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo_tool");
+    }
+
+    #[test]
+    fn invoke_shell_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("echo-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{"name":"echo","tools":[{"name":"echo_tool","description":"echoes","shell":"echo hello"}]}"#,
+        )
+        .unwrap();
+
+        let mut rt = PluginRuntime::new(PathBuf::from("."));
+        rt.load_plugin_dir(&plugin_dir).unwrap();
+        let result = rt.invoke_tool("echo_tool", "{}").unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.output.trim(), "hello");
+    }
+
+    #[test]
+    fn invoke_shell_tool_with_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("greet-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{"name":"greet","tools":[{"name":"greet_tool","description":"greets","shell":"echo hello {{name}}"}]}"#,
+        )
+        .unwrap();
+
+        let mut rt = PluginRuntime::new(PathBuf::from("."));
+        rt.load_plugin_dir(&plugin_dir).unwrap();
+        let result = rt.invoke_tool("greet_tool", r#"{"name":"world"}"#).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.output.trim(), "hello world");
+    }
+
+    #[test]
+    fn shell_tool_reports_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("fail-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            r#"{"name":"fail","tools":[{"name":"fail_tool","description":"fails","shell":"exit 1"}]}"#,
+        )
+        .unwrap();
+
+        let mut rt = PluginRuntime::new(PathBuf::from("."));
+        rt.load_plugin_dir(&plugin_dir).unwrap();
+        let result = rt.invoke_tool("fail_tool", "{}").unwrap();
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn substitute_template_replaces_placeholders() {
+        let args = serde_json::json!({"name": "world", "count": 5});
+        assert_eq!(
+            substitute_template("hello {{name}} {{count}}", &args),
+            "hello world 5"
+        );
+    }
+
+    #[test]
+    fn substitute_template_missing_key_left_as_is() {
+        let args = serde_json::json!({"name": "world"});
+        assert_eq!(
+            substitute_template("hello {{name}} {{missing}}", &args),
+            "hello world {{missing}}"
+        );
+    }
+
+    #[test]
+    fn resolve_bin_path_absolute() {
+        assert_eq!(
+            resolve_bin_path("/usr/bin/foo", Path::new("/p"), Path::new("/proj")),
+            PathBuf::from("/usr/bin/foo")
+        );
+    }
+
+    #[test]
+    fn resolve_bin_path_dot_relative() {
+        assert_eq!(
+            resolve_bin_path("./my-bin", Path::new("/plugins/test"), Path::new("/proj")),
+            PathBuf::from("/plugins/test/my-bin")
+        );
+    }
+
+    #[test]
+    fn resolve_bin_path_project_relative() {
+        assert_eq!(
+            resolve_bin_path(
+                "target/release/foo",
+                Path::new("/plugins/test"),
+                Path::new("/proj")
+            ),
+            PathBuf::from("/proj/target/release/foo")
         );
     }
 }

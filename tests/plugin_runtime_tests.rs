@@ -106,3 +106,35 @@ fn load_and_invoke_now_tool_plugin() {
     assert!(!result.is_error);
     assert!(result.output.contains("The current date and time is"));
 }
+
+#[test]
+fn load_and_invoke_now_bash_plugin() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/now-bash");
+    if !manifest_dir.join("manifest.json").exists() {
+        return;
+    }
+
+    let base = tempfile::tempdir().unwrap();
+    let plugin_dir = base.path().join("now-bash");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::copy(
+        manifest_dir.join("manifest.json"),
+        plugin_dir.join("manifest.json"),
+    )
+    .unwrap();
+
+    let mut rt = PluginRuntime::new(std::path::PathBuf::from("."));
+    let loaded = rt
+        .load_from_dir(base.path())
+        .expect("failed to load now-bash plugin dir");
+    assert!(!loaded.is_empty(), "expected now-bash plugin to load");
+    assert!(rt.has_command("now"));
+
+    let result = rt.invoke_tool("now_bash", "{}").unwrap();
+    assert!(!result.is_error);
+    assert!(
+        result.output.contains("T") && result.output.contains("Z"),
+        "expected ISO 8601 timestamp, got: {}",
+        result.output
+    );
+}

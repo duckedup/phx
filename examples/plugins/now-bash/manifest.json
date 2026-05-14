@@ -1,0 +1,13 @@
+{
+  "name": "now-bash",
+  "version": "0.1.0",
+  "description": "Get the current date and time using a shell command",
+  "tools": [
+    {
+      "name": "now_bash",
+      "description": "Get the current date and time. Returns an ISO 8601 timestamp.",
+      "command": "now",
+      "shell": "date -u '+%Y-%m-%dT%H:%M:%SZ'"
+    }
+  ]
+}

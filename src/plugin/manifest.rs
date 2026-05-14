@@ -9,9 +9,10 @@ pub struct PluginManifest {
     pub version: String,
     #[serde(default)]
     pub description: String,
-    pub command: String,
     #[serde(default)]
-    pub args: Vec<String>,
+    pub bin: String,
+    #[serde(default)]
+    pub bin_args: Vec<String>,
     #[serde(default)]
     pub commands: Vec<PluginCommand>,
     #[serde(default)]
@@ -42,6 +43,12 @@ pub struct PluginToolDef {
     pub keybind: String,
     #[serde(default)]
     pub ui_fields: Vec<UiField>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub bin: Option<String>,
+    #[serde(default)]
+    pub bin_args: Vec<String>,
 }
 
 fn default_params() -> serde_json::Value {
@@ -70,9 +77,7 @@ fn validate(m: &PluginManifest) -> anyhow::Result<()> {
     if m.name.is_empty() {
         anyhow::bail!("plugin name is required");
     }
-    if m.command.is_empty() {
-        anyhow::bail!("plugin command is required");
-    }
+    let has_top_level_bin = !m.bin.is_empty();
     for cmd in &m.commands {
         if cmd.name.is_empty() {
             anyhow::bail!("plugin command name is required");
@@ -81,6 +86,17 @@ fn validate(m: &PluginManifest) -> anyhow::Result<()> {
     for tool in &m.tools {
         if tool.name.is_empty() {
             anyhow::bail!("plugin tool name is required");
+        }
+        let has_shell = tool.shell.is_some();
+        let has_bin = tool.bin.is_some();
+        if has_shell && has_bin {
+            anyhow::bail!("tool '{}' cannot have both 'shell' and 'bin'", tool.name);
+        }
+        if !has_shell && !has_bin && !has_top_level_bin {
+            anyhow::bail!(
+                "tool '{}' has no execution strategy: needs 'shell', 'bin', or a top-level 'bin'",
+                tool.name
+            );
         }
     }
     for event in &m.events.can_block {
@@ -91,9 +107,9 @@ fn validate(m: &PluginManifest) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn resolve_command(manifest: &PluginManifest, plugin_dir: &Path) -> PathBuf {
-    let cmd = &manifest.command;
-    let path = Path::new(cmd);
+pub fn resolve_bin(manifest: &PluginManifest, plugin_dir: &Path) -> PathBuf {
+    let bin = &manifest.bin;
+    let path = Path::new(bin);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -113,7 +129,7 @@ mod tests {
             dir.path().join("plugin.json"),
             r#"{
                 "name": "test-plugin",
-                "command": "./run.sh",
+                "bin": "./run.sh",
                 "commands": [{"name": "greet", "summary": "Say hello"}],
                 "tools": [{"name": "my_tool", "description": "Does stuff"}],
                 "events": {"subscribe": ["tool_call_start"], "can_block": ["tool_call_start"]}
@@ -133,7 +149,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("plugin.json"),
-            r#"{"name": "", "command": "./run.sh"}"#,
+            r#"{"name": "", "bin": "./run.sh"}"#,
         )
         .unwrap();
         assert!(load_manifest(dir.path()).is_err());
@@ -144,41 +160,75 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("plugin.json"),
-            r#"{"name": "bad", "command": "./run.sh", "events": {"subscribe": [], "can_block": ["token"]}}"#,
+            r#"{"name": "bad", "bin": "./run.sh", "events": {"subscribe": [], "can_block": ["token"]}}"#,
         )
         .unwrap();
         assert!(load_manifest(dir.path()).is_err());
     }
 
     #[test]
-    fn resolve_relative_command() {
+    fn shell_tool_no_top_level_command_ok() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plugin.json"),
+            r#"{"name": "git-tools", "tools": [{"name": "diff", "shell": "git diff"}]}"#,
+        )
+        .unwrap();
+        let m = load_manifest(dir.path()).unwrap();
+        assert_eq!(m.tools[0].shell.as_deref(), Some("git diff"));
+    }
+
+    #[test]
+    fn tool_no_execution_strategy_fails() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plugin.json"),
+            r#"{"name": "bad", "tools": [{"name": "t"}]}"#,
+        )
+        .unwrap();
+        assert!(load_manifest(dir.path()).is_err());
+    }
+
+    #[test]
+    fn tool_both_shell_and_bin_fails() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plugin.json"),
+            r#"{"name": "bad", "tools": [{"name": "t", "shell": "echo hi", "bin": "./foo"}]}"#,
+        )
+        .unwrap();
+        assert!(load_manifest(dir.path()).is_err());
+    }
+
+    #[test]
+    fn resolve_relative_bin() {
         let m = PluginManifest {
             name: "test".into(),
             version: String::new(),
             description: String::new(),
-            command: "./bin/plugin".into(),
-            args: vec![],
+            bin: "./bin/plugin".into(),
+            bin_args: vec![],
             commands: vec![],
             tools: vec![],
             events: PluginEvents::default(),
         };
-        let resolved = resolve_command(&m, Path::new("/plugins/test"));
+        let resolved = resolve_bin(&m, Path::new("/plugins/test"));
         assert_eq!(resolved, PathBuf::from("/plugins/test/./bin/plugin"));
     }
 
     #[test]
-    fn resolve_absolute_command() {
+    fn resolve_absolute_bin() {
         let m = PluginManifest {
             name: "test".into(),
             version: String::new(),
             description: String::new(),
-            command: "/usr/bin/my-plugin".into(),
-            args: vec![],
+            bin: "/usr/bin/my-plugin".into(),
+            bin_args: vec![],
             commands: vec![],
             tools: vec![],
             events: PluginEvents::default(),
         };
-        let resolved = resolve_command(&m, Path::new("/plugins/test"));
+        let resolved = resolve_bin(&m, Path::new("/plugins/test"));
         assert_eq!(resolved, PathBuf::from("/usr/bin/my-plugin"));
     }
 }

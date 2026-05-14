@@ -14,8 +14,8 @@ pub struct PluginHandle {
 
 impl PluginHandle {
     pub fn spawn(manifest: PluginManifest, dir: PathBuf) -> anyhow::Result<Self> {
-        let command = super::manifest::resolve_command(&manifest, &dir);
-        let transport = PluginTransport::spawn(&command, &manifest.args, &dir)?;
+        let bin = super::manifest::resolve_bin(&manifest, &dir);
+        let transport = PluginTransport::spawn(&bin, &manifest.bin_args, &dir)?;
 
         Ok(Self {
             manifest,

@@ -38,19 +38,27 @@ clean:
     cargo clean
 
 # Build native plugins and install to .phoenix/plugins/
-# Usage: just build-plugins [folder]
-# Examples:
-#   just build-plugins              # builds from plugins/
-#   just build-plugins examples/plugins  # builds from examples/plugins/
-build-plugins dir="plugins":
+# Scans both plugins/ and examples/plugins/ for Cargo and manifest-only plugins.
+build-plugins:
     #!/usr/bin/env bash
     set -euo pipefail
     shopt -s nullglob
-    for manifest in {{dir}}/*/Cargo.toml; do
-        name=$(grep '^name' "$manifest" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-        cargo build -p "$name" --release
-        short_name="${name#phoenix-plugin-}"
-        ./target/release/"$name" install .phoenix/plugins/"$short_name"
+    for dir in plugins examples/plugins; do
+        [ -d "$dir" ] || continue
+        # Build Cargo-based plugins
+        for manifest in "$dir"/*/Cargo.toml; do
+            name=$(grep '^name' "$manifest" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            cargo build -p "$name" --release
+            short_name="${name#phoenix-plugin-}"
+            ./target/release/"$name" install .phoenix/plugins/"$short_name"
+        done
+        # Copy manifest-only plugins (no Cargo.toml, just manifest.json)
+        for plugin_dir in "$dir"/*/; do
+            [ -f "$plugin_dir/manifest.json" ] && [ ! -f "$plugin_dir/Cargo.toml" ] || continue
+            name=$(basename "$plugin_dir")
+            mkdir -p .phoenix/plugins/"$name"
+            cp "$plugin_dir"* .phoenix/plugins/"$name"/
+        done
     done
 
 # Initialize beads issue tracking for this project

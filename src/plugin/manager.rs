@@ -187,7 +187,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.json"),
-            r#"{"name":"my-plugin","command":"./run"}"#,
+            r#"{"name":"my-plugin","bin":"./run"}"#,
         )
         .unwrap();
 
@@ -203,7 +203,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.json"),
-            r#"{"name":"global-plugin","command":"./run"}"#,
+            r#"{"name":"global-plugin","bin":"./run"}"#,
         )
         .unwrap();
 
@@ -216,7 +216,7 @@ mod tests {
         let extra = tempdir().unwrap();
         std::fs::write(
             extra.path().join("plugin.json"),
-            r#"{"name":"extra","command":"./run"}"#,
+            r#"{"name":"extra","bin":"./run"}"#,
         )
         .unwrap();
 

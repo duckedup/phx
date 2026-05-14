@@ -128,6 +128,9 @@ mod tests {
             command: String::new(),
             keybind: String::new(),
             ui_fields: vec![],
+            shell: None,
+            bin: None,
+            bin_args: vec![],
         };
 
         assert_eq!(def.name, "test_tool");

@@ -1,156 +1,187 @@
-# Phoenix WASM Plugins
+# Phoenix Plugins
 
-Plugins extend Phoenix with custom slash commands. Each plugin is a Rust crate compiled to WebAssembly (WASI P2).
+Plugins extend Phoenix with custom slash commands and tools. A plugin is a directory containing a `manifest.json` that declares one or more tools. Tools can be backed by a compiled binary or a shell command.
 
-## Quick Start
+## Plugin Types
 
-### 1. Create a new plugin
+### Shell plugins (no binary required)
 
-```bash
-mkdir -p examples/plugins/my-skill/src
-```
+A `manifest.json` with `shell` on each tool. No compilation, no binary — just a manifest:
 
-**Cargo.toml:**
-```toml
-[package]
-name = "phoenix-plugin-my-skill"
-version = "0.1.0"
-edition = "2021"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-phoenix-plugin-sdk = { path = "../../../crates/phoenix-plugin-sdk" }
-wit-bindgen = "0.41"
-```
-
-**src/lib.rs:**
-```rust
-use phoenix_plugin_sdk::skill;
-
-skill! {
-    name: "my-skill",
-    command: "myskill",
-    description: "What this skill does",
-    execute(arguments) {
-        Ok(SkillResult {
-            context: format!("Instructions for the LLM: {arguments}"),
-            toast: "Skill activated.".into(),
-            widget: String::new(),
-        })
-    }
-}
-```
-
-### 2. Build
-
-```bash
-# One-time setup
-rustup target add wasm32-wasip2
-
-# Build
-cd examples/plugins/my-skill
-cargo build --target wasm32-wasip2 --release
-```
-
-### 3. Run
-
-```bash
-# Load plugins from the examples directory
-just run-plugins
-
-# Or pass the directory manually
-phoenix --plugin-dir examples/plugins
-```
-
-Inside Phoenix, type `/reload` to rebuild and reload all plugins without restarting.
-
-## SkillResult
-
-Every `execute` function returns `Result<SkillResult, String>`. The three fields are independent — leave any empty to skip it.
-
-| Field | What it does |
-|-------|-------------|
-| `context` | Sent to the LLM as a message (triggers a response) |
-| `toast` | Shown briefly in the dynamic island / status area |
-| `widget` | JSON UI tree rendered inline in the chat area |
-
-## Macro Forms
-
-### Basic — slash command only
-
-```rust
-skill! {
-    name: "review",
-    command: "review",
-    description: "Review code for simplicity",
-    execute(arguments) {
-        Ok(SkillResult {
-            context: format!("Review this code: {arguments}"),
-            toast: "Review mode.".into(),
-            widget: String::new(),
-        })
-    }
-}
-```
-
-### Toggle — keybind with enter/exit
-
-Adds a keyboard shortcut that toggles the skill on and off.
-
-```rust
-skill! {
-    name: "plan",
-    command: "plan",
-    description: "Plan mode",
-    keybind: "shift+tab",
-    execute(arguments) {
-        Ok(SkillResult {
-            context: format!("You are in PLAN MODE. {arguments}"),
-            toast: "Plan mode activated.".into(),
-            widget: String::new(),
-        })
+```json
+{
+  "name": "git-tools",
+  "version": "0.1.0",
+  "tools": [
+    {
+      "name": "git_diff",
+      "description": "Show git diff",
+      "command": "diff",
+      "shell": "git diff {{branch}}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "branch": { "type": "string", "description": "Branch to diff against" }
+        }
+      }
     },
-    on_exit() {
-        Ok(SkillResult {
-            context: "You are now in AGENT MODE.".into(),
-            toast: "Agent mode resumed.".into(),
-            widget: String::new(),
-        })
+    {
+      "name": "git_log",
+      "description": "Show recent commits",
+      "command": "log",
+      "shell": "git log --oneline -{{count}}",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "count": { "type": "integer", "description": "Number of commits" }
+        }
+      }
     }
+  ]
 }
 ```
+
+Shell tools run via `sh -c` with `{{param}}` template substitution from the tool's parameters.
+
+### Binary plugins
+
+A compiled binary that handles `invoke <tool> <args_json>` and returns JSON output. Built with the `tool!` macro from `phoenix-plugin-sdk`:
+
+```rust
+use phoenix_plugin_sdk::{tool, ToolOutput};
+
+tool! {
+    name: "phoenix-plugin-plan",
+    version: "0.1.0",
+    tools: [
+        {
+            name: "plan",
+            description: "Enter plan mode",
+            parameters: r#"{"type":"object","properties":{"arguments":{"type":"string"}}}"#,
+            command: "plan",
+            keybind: "shift+tab",
+            ui: vec![],
+            invoke(_name, args) {
+                let arguments = args.get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                Ok(ToolOutput::with_toast(
+                    format!("You are in PLAN MODE. {arguments}"),
+                    "Plan mode activated.",
+                ))
+            },
+            on_exit() {
+                Ok(ToolOutput::with_toast(
+                    "You are now in AGENT MODE.",
+                    "Agent mode resumed.",
+                ))
+            }
+        }
+    ]
+}
+```
+
+### Mixed plugins
+
+A single manifest can mix shell and binary tools. Tool-level `bin`/`bin_args` override the top-level values:
+
+```json
+{
+  "name": "dev-tools",
+  "version": "0.1.0",
+  "bin": "./dev-tools-binary",
+  "tools": [
+    {
+      "name": "analyze",
+      "description": "Deep analysis (uses top-level binary)"
+    },
+    {
+      "name": "quick_diff",
+      "description": "Fast diff (shell)",
+      "shell": "git diff --stat"
+    },
+    {
+      "name": "lint",
+      "description": "Run linter (different binary)",
+      "bin": "./custom-linter",
+      "bin_args": ["--format", "json"]
+    }
+  ]
+}
+```
+
+## Manifest Format
+
+### Top-level fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Plugin name |
+| `version` | no | Semver version string |
+| `description` | no | Human-readable description |
+| `bin` | no | Path to default binary (relative to plugin dir with `./`, otherwise relative to project root) |
+| `bin_args` | no | Static CLI args passed to the default binary |
+| `tools` | yes | Array of tool definitions |
+| `commands` | no | Slash command definitions (for JSON-RPC plugins) |
+| `events` | no | Event subscriptions for hooks |
+
+### Tool fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Tool identifier (used internally) |
+| `description` | no | Shown in command palette and to the LLM |
+| `command` | no | Slash command name (e.g. `"plan"` registers `/plan`) |
+| `keybind` | no | Keyboard shortcut (e.g. `"shift+tab"`) |
+| `parameters` | no | JSON Schema for tool arguments |
+| `shell` | no | Shell command template (mutually exclusive with `bin`) |
+| `bin` | no | Binary path override (mutually exclusive with `shell`) |
+| `bin_args` | no | Static args override for this tool's binary |
+| `ui_fields` | no | Form fields shown when invoked without arguments |
+
+Every tool needs exactly one execution strategy:
+- `shell` — run via `sh -c` with template substitution
+- `bin` — tool-level binary override
+- Top-level `bin` — fallback for tools without `shell` or `bin`
+
+## ToolOutput
+
+Binary tools return JSON with these fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `output` | string | Sent to the LLM as context (triggers a response) |
+| `is_error` | bool | Whether the output represents an error |
+| `toast` | string | Shown briefly in the status area |
+| `widget` | string | JSON UI tree rendered inline in chat |
+
+The SDK provides helpers: `ToolOutput::success(msg)`, `ToolOutput::error(msg)`, `ToolOutput::with_toast(output, toast)`, `ToolOutput::toast_only(toast)`, `ToolOutput::empty()`.
 
 ## Declarative UI Widgets
 
-Plugins can render styled widgets in the chat area using the `phoenix_plugin_sdk::ui` builder. The host renders them with theme-aware styling:
+Plugins can render styled widgets in the chat area using the `phoenix_plugin_sdk::ui` builder:
 
 ```
-  ▶ Current Time
-  │ 17:30:00 UTC
-  │ 8 May 2026
-  ╰ done
+  > Current Time
+  | 17:30:00 UTC
+  | 8 May 2026
+  ~ done
 ```
-
-### Builder API
 
 ```rust
 use phoenix_plugin_sdk::ui;
 
-// Bordered box with title and styled children
 let widget = ui::bordered("Current Time", &[
     &ui::text("17:30:00 UTC").bold().fg("cyan").build(),
     &ui::text("8 May 2026").dim().build(),
 ]);
 
-// Other widgets
-ui::text("plain text").build()           // styled text
-ui::text("bold").bold().fg("green").build()  // bold green
-ui::column(&[...])                       // vertical stack
-ui::row(&[...])                          // horizontal layout
-ui::gauge("Progress", 0.75)              // progress bar
-ui::spacer()                             // blank line
+ui::text("plain text").build()
+ui::text("bold").bold().fg("green").build()
+ui::column(&[...])
+ui::row(&[...])
+ui::gauge("Progress", 0.75)
+ui::spacer()
 ```
 
 ### Text Style Options
@@ -164,17 +195,32 @@ ui::spacer()                             // blank line
 
 Colors: `red`, `green`, `yellow`, `blue`, `cyan`, `dim`, `primary`
 
-## Plugin Capabilities
+## Installation
 
-Plugins have access to Rust's `std` library (strings, collections, formatting, `SystemTime`, etc.) but run in a WASM sandbox with **no** filesystem, network, or environment variable access.
+Plugins are installed to `.phoenix/plugins/<name>/`. The `build-plugins` step handles this automatically:
+
+```bash
+just build-plugins
+```
+
+This scans both `plugins/` and `examples/plugins/` for:
+- **Cargo plugins** — builds with `cargo build --release`, then runs `<binary> install .phoenix/plugins/<name>`
+- **Manifest-only plugins** — copies the directory to `.phoenix/plugins/<name>/`
+
+Plugins can also be installed manually by placing a directory with `manifest.json` (and optionally a binary) in `.phoenix/plugins/` or `~/.phoenix/plugins/`.
 
 ## Examples
 
-- **plan** — Toggles plan mode via `/plan` or Shift+Tab. Prevents file modifications.
-- **now** — `/now` injects the current UTC timestamp with a styled widget display.
+| Plugin | Type | Slash Command | Description |
+|--------|------|---------------|-------------|
+| **plan** | binary | `/plan` | Toggles plan mode via slash command or Shift+Tab |
+| **review** | binary | `/review` | Diffs current branch against main for code review |
+| **feature** | binary | `/feature` | Scaffolds a new feature workflow with ticket context |
+| **now** | binary | — | Injects current UTC timestamp with a styled widget |
+| **now-bash** | shell | `/now` | Gets current time via `date -u` (no binary needed) |
 
 ## Development Loop
 
-1. Edit your plugin's `src/lib.rs`
-2. Type `/reload` in Phoenix (builds + reloads all plugins)
+1. Edit your plugin (source code or `manifest.json`)
+2. Type `/reload` in Phoenix (builds + installs + reloads all plugins)
 3. Test your slash command

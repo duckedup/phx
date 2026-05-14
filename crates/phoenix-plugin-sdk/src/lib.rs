@@ -187,7 +187,6 @@ macro_rules! tool {
             let dest = std::path::Path::new(dir);
             std::fs::create_dir_all(dest).expect("failed to create install directory");
 
-            // Write manifest.json
             let binary_name = std::env::current_exe()
                 .ok()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
@@ -195,14 +194,13 @@ macro_rules! tool {
 
             let mut manifest: $crate::serde_json::Value =
                 $crate::serde_json::from_str(&__build_manifest()).unwrap();
-            manifest["command"] = $crate::serde_json::json!(format!("./{binary_name}"));
+            manifest["bin"] = $crate::serde_json::json!(format!("./{binary_name}"));
 
             let manifest_path = dest.join("manifest.json");
             let formatted = $crate::serde_json::to_string_pretty(&manifest).unwrap();
             std::fs::write(&manifest_path, formatted)
                 .expect("failed to write manifest.json");
 
-            // Copy binary
             let self_path = std::env::current_exe().expect("failed to get current exe path");
             let binary_dest = dest.join(&binary_name);
             std::fs::copy(&self_path, &binary_dest).expect("failed to copy binary");
