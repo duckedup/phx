@@ -27,12 +27,19 @@ clippy: build-plugins
 
 lint: fmt clippy
 
+check: lint build test
+
 bench:
     @echo "bench: not yet implemented"
 
 package:
     cargo build --release
     @echo "binary at target/release/phx"
+
+publish:
+    cargo publish -p phx-shared
+    cargo publish -p phx-plugin-sdk
+    cargo publish -p phx
 
 clean:
     cargo clean
