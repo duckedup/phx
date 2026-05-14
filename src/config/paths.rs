@@ -64,17 +64,22 @@ pub fn project_sessions_dir(cwd: &Path) -> PathBuf {
 
 /// Returns the runtime directory.
 ///
-/// Tries `$XDG_RUNTIME_DIR` first, then falls back to `/tmp/phx-<uid>`.
+/// Tries `$XDG_RUNTIME_DIR` first, then falls back to a platform-specific temp path.
 pub fn runtime_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR")
         && !xdg.is_empty()
     {
         return PathBuf::from(xdg);
     }
-    // Fallback: /tmp/phx-<uid>
-    // SAFETY: getuid() is a trivial POSIX syscall with no arguments.
-    let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/phx-{uid}"))
+    #[cfg(unix)]
+    {
+        let uid = unsafe { libc::getuid() };
+        PathBuf::from(format!("/tmp/phx-{uid}"))
+    }
+    #[cfg(windows)]
+    {
+        std::env::temp_dir().join("phx")
+    }
 }
 
 /// Returns the RPC socket path: `<runtime_dir>/phx.sock`.
