@@ -1,4 +1,4 @@
-pub use phx_shared::ui_types::{TextStyle, UiNode};
+pub use crate::shared::ui_types::{TextStyle, UiNode};
 
 pub struct TextNode {
     content: String,

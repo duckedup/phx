@@ -1,4 +1,5 @@
-use phx_plugin_sdk::{tool, ToolOutput};
+use phx::sdk::ToolOutput;
+use phx::tool;
 
 tool! {
     name: "phx-plugin-now",

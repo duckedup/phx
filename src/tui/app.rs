@@ -72,7 +72,7 @@ pub struct App {
     pub orch_ctx: Arc<crate::tools::orchestration::OrchestrationContext>,
     pub sidebar_state: sidebar::SidebarState,
     pub sidebar_area: Option<Rect>,
-    pub panels: std::collections::HashMap<String, phx_shared::ui_types::PanelState>,
+    pub panels: std::collections::HashMap<String, crate::shared::ui_types::PanelState>,
     pub panel_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::plugin::host_handler::PanelUpdate>>,
     pub pending_conductor_activate: bool,
@@ -308,7 +308,7 @@ impl App {
                     } => {
                         self.panels.insert(
                             panel_id.clone(),
-                            phx_shared::ui_types::PanelState {
+                            crate::shared::ui_types::PanelState {
                                 panel_id,
                                 position,
                                 content,
@@ -371,7 +371,7 @@ impl App {
                         tool_name,
                         ..
                     } => {
-                        let config = phx_shared::ui_field_types::ToolUiConfig::new(fields);
+                        let config = crate::shared::ui_field_types::ToolUiConfig::new(fields);
                         self.tool_form = Some(tool_form::ToolFormState::from_ui(
                             tool_name,
                             String::new(),

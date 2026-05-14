@@ -13,7 +13,7 @@ pub enum PanelUpdate {
     Set {
         panel_id: String,
         position: String,
-        content: phx_shared::ui_types::UiNode,
+        content: crate::shared::ui_types::UiNode,
     },
     Remove {
         panel_id: String,
@@ -147,7 +147,7 @@ impl HostHandler {
             .ok_or("missing 'panel_id'")?
             .to_string();
         let position = params["position"].as_str().unwrap_or("right").to_string();
-        let content: phx_shared::ui_types::UiNode =
+        let content: crate::shared::ui_types::UiNode =
             serde_json::from_value(params["content"].clone())
                 .map_err(|e| format!("invalid panel content: {e}"))?;
 

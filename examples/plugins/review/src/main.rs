@@ -1,5 +1,6 @@
-use phx_plugin_sdk::ui_field_types::UiField as ToolUiField;
-use phx_plugin_sdk::{run_command, tool, ToolOutput};
+use phx::sdk::ui_field_types::UiField as ToolUiField;
+use phx::sdk::{run_command, ToolOutput};
+use phx::tool;
 
 const MAX_DIFF_BYTES: usize = 12_500;
 

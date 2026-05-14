@@ -1,5 +1,6 @@
-use phx_plugin_sdk::ui_field_types::UiField as ToolUiField;
-use phx_plugin_sdk::{tool, ToolOutput};
+use phx::sdk::ui_field_types::UiField as ToolUiField;
+use phx::sdk::ToolOutput;
+use phx::tool;
 
 tool! {
     name: "phx-plugin-plan",

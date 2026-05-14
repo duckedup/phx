@@ -8,5 +8,4 @@ name = "phx-plugin-feature"
 path = "src/main.rs"
 
 [dependencies]
-phx-plugin-sdk = { path = "../../../crates/phx-plugin-sdk" }
-serde_json = "1"
+phx = { path = "../../.." }
