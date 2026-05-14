@@ -11,9 +11,11 @@ tool! {
             parameters: r#"{"type":"object","properties":{"arguments":{"type":"string","description":"Plan description or context"}}}"#,
             command: "plan",
             keybind: "shift+tab",
-            ui: vec![
-                ToolUiField::text_area("arguments", "Describe what you want to build"),
-            ],
+            ui(_name, _args) {
+                vec![
+                    ToolUiField::text_area("arguments", "Describe what you want to build"),
+                ]
+            },
             invoke(_name, args) {
                 let arguments = args.get("arguments")
                     .and_then(|v| v.as_str())

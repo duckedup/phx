@@ -51,6 +51,7 @@ pub fn start_conversation(app: &mut App, text: String) {
         project: app.project.clone(),
         config: app.config.clone(),
         system_prompt_override: None,
+        plugin_runtime: app.plugin_runtime.clone(),
     };
 
     let rx =
@@ -488,7 +489,7 @@ pub fn handle_command(app: &mut App, input: &str) {
             .into();
 
             let mut lines = Vec::new();
-            let mut schemas = app.tools.list_schemas();
+            let mut schemas = app.tools.read().list_schemas();
             schemas.sort_by(|a, b| a.name.cmp(&b.name));
 
             let (core_tools, plugin_tools): (Vec<_>, Vec<_>) = schemas
@@ -742,10 +743,10 @@ fn toggle_conductor_mode(app: &mut App, activate: bool) {
             .map(|(name, _)| name.to_string())
             .unwrap_or_default();
         *app.orch_ctx.parent_provider.write() = parent_provider;
-        *app.orch_ctx.parent_tools.write() = app.tools.clone();
+        *app.orch_ctx.parent_tools.write() = app.tools.read().clone();
 
         let tracker_result =
-            validate_and_build_tracker_context(&app.config, &app.project, &app.tools);
+            validate_and_build_tracker_context(&app.config, &app.project, &app.tools.read());
 
         if let TrackerStatus::Broken(ref msg) = tracker_result
             && let Some(tab) = app.tabs.get_mut(app.active_tab)
@@ -1005,6 +1006,7 @@ pub async fn send_message(
 
         let tool_schemas: Vec<ToolSchema> = app
             .tools
+            .read()
             .list_schemas()
             .into_iter()
             .map(|s| ToolSchema {
@@ -1331,27 +1333,58 @@ pub async fn send_message(
                         is_error: true,
                     },
                     _ => {
-                        if let Some(tool) = app.tools.get(&tc.name) {
-                            let args: serde_json::Value =
-                                serde_json::from_str(&tc.args_json).unwrap_or_default();
-                            let noop = crate::tools::traits::NoopInputRequester;
-                            match tool.invoke(args, &noop).await {
-                                Ok(r) => crate::session::message::ToolResult {
+                        let args: serde_json::Value =
+                            serde_json::from_str(&tc.args_json).unwrap_or_default();
+
+                        let dynamic_ui = app
+                            .plugin_runtime
+                            .as_ref()
+                            .and_then(|rt| rt.lock().request_dynamic_ui(&tc.name, &tc.args_json));
+
+                        if let Some(fields) = dynamic_ui {
+                            let config = phoenix_shared::ui_field_types::ToolUiConfig::new(fields);
+                            let form_state = crate::tui::ui::tool_form::ToolFormState::from_ui(
+                                tc.name.clone(),
+                                String::new(),
+                                &config,
+                            );
+                            match run_interactive_form(app, terminal, form_state).await {
+                                Some(state) => {
+                                    let answers = crate::tui::ui::tool_form::format_answers(&state);
+                                    crate::session::message::ToolResult {
+                                        id: tc.id.clone(),
+                                        output: answers,
+                                        is_error: false,
+                                    }
+                                }
+                                None => crate::session::message::ToolResult {
                                     id: tc.id.clone(),
-                                    output: r.output,
-                                    is_error: r.is_error,
-                                },
-                                Err(e) => crate::session::message::ToolResult {
-                                    id: tc.id.clone(),
-                                    output: e.to_string(),
+                                    output: "User cancelled.".into(),
                                     is_error: true,
                                 },
                             }
                         } else {
-                            crate::session::message::ToolResult {
-                                id: tc.id.clone(),
-                                output: format!("unknown tool: {}", tc.name),
-                                is_error: true,
+                            let maybe_tool = app.tools.read().get(&tc.name);
+                            if let Some(tool) = maybe_tool {
+                                let noop = crate::tools::traits::NoopInputRequester;
+                                match tool.invoke(args, &noop).await {
+                                    Ok(r) => crate::session::message::ToolResult {
+                                        id: tc.id.clone(),
+                                        output: r.output,
+                                        is_error: r.is_error,
+                                    },
+                                    Err(e) => crate::session::message::ToolResult {
+                                        id: tc.id.clone(),
+                                        output: e.to_string(),
+                                        is_error: true,
+                                    },
+                                }
+                            } else {
+                                crate::session::message::ToolResult {
+                                    id: tc.id.clone(),
+                                    output: format!("unknown tool: {}", tc.name),
+                                    is_error: true,
+                                }
                             }
                         }
                     }
@@ -1476,11 +1509,11 @@ pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::S
 pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
     use crate::tui::picker::PickerItem;
 
-    app.tools.retain_builtins();
+    app.tools.write().retain_builtins();
 
     // Register all plugin tools via adapter
     if let Some(rt) = &app.plugin_runtime {
-        crate::plugin::plugin_tool_adapter::register_plugin_tools(rt, &mut app.tools);
+        crate::plugin::plugin_tool_adapter::register_plugin_tools(rt, &mut app.tools.write());
     }
 
     // Re-discover markdown skills and register isTool skills
@@ -1489,7 +1522,7 @@ pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
         &crate::config::paths::user_home(),
         &app.config.skills.dirs,
     );
-    crate::tools::skill_tool::register_skill_tools(&skills, &mut app.tools);
+    crate::tools::skill_tool::register_skill_tools(&skills, &mut app.tools.write());
 
     // Rebuild command items
     {
@@ -1522,11 +1555,14 @@ pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
             parts.push(format!("errors: {}", result.errors.join("; ")));
         }
         let msg = if parts.is_empty() {
-            format!("Reload complete. {} tools registered.", app.tools.count())
+            format!(
+                "Reload complete. {} tools registered.",
+                app.tools.read().count()
+            )
         } else {
             format!(
                 "Reload complete ({} tools). {}",
-                app.tools.count(),
+                app.tools.read().count(),
                 parts.join(" | ")
             )
         };
@@ -1534,7 +1570,7 @@ pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
     } else {
         app.show_toast(format!(
             "Reload complete. {} tools registered.",
-            app.tools.count()
+            app.tools.read().count()
         ));
     }
 }
@@ -1544,5 +1580,57 @@ fn format_bullet(lines: &mut Vec<String>, name: &str, description: &str, tag: &s
         lines.push(format!("- **{name}**{tag}"));
     } else {
         lines.push(format!("- **{name}**{tag} — {description}"));
+    }
+}
+
+async fn run_interactive_form(
+    app: &mut App,
+    terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<std::io::Stdout>>,
+    form_state: crate::tui::ui::tool_form::ToolFormState,
+) -> Option<crate::tui::ui::tool_form::ToolFormState> {
+    use crate::tui::ui::tool_form;
+    use crossterm::event::EventStream;
+    use futures::StreamExt;
+
+    app.tool_form = Some(form_state);
+    redraw(app, terminal);
+
+    let mut term_events = EventStream::new();
+    let result = loop {
+        let maybe = term_events.next().await;
+        match maybe {
+            Some(Ok(crossterm::event::Event::Key(key))) => {
+                if let Some(ref mut form) = app.tool_form {
+                    let action = tool_form::handle_key(form, key);
+                    match action {
+                        tool_form::FormAction::Submit(_) => {
+                            break Some(());
+                        }
+                        tool_form::FormAction::Cancel => {
+                            break None;
+                        }
+                        tool_form::FormAction::None => {}
+                    }
+                }
+            }
+            Some(Ok(crossterm::event::Event::Paste(text))) => {
+                if let Some(ref mut form) = app.tool_form {
+                    tool_form::handle_paste(form, &text);
+                }
+            }
+            Some(Ok(crossterm::event::Event::Mouse(mouse))) => {
+                handle_sidebar_click(app, mouse);
+            }
+            _ => {}
+        }
+        redraw(app, terminal);
+    };
+
+    let form = app.tool_form.take();
+    redraw(app, terminal);
+
+    match result {
+        Some(()) => form,
+        None => None,
     }
 }

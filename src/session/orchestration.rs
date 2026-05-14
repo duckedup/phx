@@ -118,7 +118,7 @@ pub struct SpawnConfig {
     pub profile: SessionProfile,
     pub profile_name: String,
     pub prompt: String,
-    pub tools: ToolRegistry,
+    pub tools: Arc<parking_lot::RwLock<ToolRegistry>>,
     pub store: Arc<SessionStore>,
     pub project: PathBuf,
     pub worktree: Option<WorktreeInfo>,
@@ -265,6 +265,7 @@ impl SessionPool {
                 project: work_dir,
                 config,
                 system_prompt_override,
+                plugin_runtime: None,
             };
             let conv_rx = crate::session::conversation::spawn_conversation(
                 session,

@@ -12,10 +12,11 @@ tool! {
             description: "Review the current branch by diffing against main",
             parameters: r#"{"type":"object","properties":{"branch":{"type":"string","description":"Base branch to diff against"}}}"#,
             command: "review",
-            keybind: "",
-            ui: vec![
-                ToolUiField::text_input("branch", "Base Branch").placeholder("main"),
-            ],
+            ui(_name, _args) {
+                vec![
+                    ToolUiField::text_input("branch", "Base Branch").placeholder("main"),
+                ]
+            },
             invoke(_name, args) {
                 let branch = args.get("branch")
                     .and_then(|v| v.as_str())
@@ -105,7 +106,6 @@ tool! {
                     "Review mode activated.",
                 ))
             },
-            on_exit() { Ok(ToolOutput::empty()) }
         }
     ]
 }

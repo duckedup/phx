@@ -1295,6 +1295,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "phoenix-plugin-ask-user-questions"
+version = "0.1.0"
+dependencies = [
+ "phoenix-plugin-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "phoenix-plugin-feature"
 version = "0.1.0"
 dependencies = [

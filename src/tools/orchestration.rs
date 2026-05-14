@@ -156,7 +156,7 @@ impl Tool for SpawnAgentTool {
 
         let tools = {
             let parent_tools = self.ctx.parent_tools.read();
-            if let Some(ref def) = agent_def {
+            let reg = if let Some(ref def) = agent_def {
                 if def.tools.is_empty() {
                     parent_tools.clone()
                 } else {
@@ -178,7 +178,8 @@ impl Tool for SpawnAgentTool {
                 }
             } else {
                 parent_tools.clone()
-            }
+            };
+            std::sync::Arc::new(parking_lot::RwLock::new(reg))
         };
 
         let system_prompt_override = agent_def.as_ref().map(|d| d.system_prompt.clone());

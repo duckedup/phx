@@ -283,6 +283,35 @@ impl PluginRuntime {
         }
     }
 
+    pub fn request_dynamic_ui(&self, tool_name: &str, args_json: &str) -> Option<Vec<UiField>> {
+        let plugin_key = self.tool_index.get(tool_name)?;
+        let loaded = self.plugins.get(plugin_key)?;
+        let exec_kind = loaded.tool_exec.get(tool_name)?;
+
+        let ToolExecKind::Bin { path, args } = exec_kind else {
+            return None;
+        };
+
+        let mut cmd = Command::new(path);
+        cmd.args(args.iter());
+        cmd.args(["ui", tool_name, args_json]);
+        cmd.current_dir(&self.project_dir);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let output = cmd.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let fields: Vec<UiField> = serde_json::from_str(&stdout).ok()?;
+        if fields.is_empty() {
+            return None;
+        }
+        Some(fields)
+    }
+
     fn invoke_shell(
         &self,
         tool_name: &str,
@@ -348,10 +377,16 @@ impl PluginRuntime {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let msg = if stderr.is_empty() {
+            let msg = if !stderr.is_empty() {
+                stderr.to_string()
+            } else if !stdout.is_empty() {
                 stdout.to_string()
             } else {
-                stderr.to_string()
+                format!(
+                    "process exited with status {} (binary: {})",
+                    output.status,
+                    binary_path.display()
+                )
             };
             return Err(anyhow::anyhow!("tool {tool_name} error: {msg}"));
         }
@@ -548,6 +583,7 @@ impl PluginRuntime {
         let old_tools: Vec<String> = self.tool_index.keys().cloned().collect();
         self.plugins.clear();
         self.tool_index.clear();
+        self.active_tools.clear();
 
         let mut added = Vec::new();
         let mut errors = Vec::new();
@@ -562,15 +598,25 @@ impl PluginRuntime {
             let workspace_release = self.project_dir.join("target/release");
             let deduped = dedup_paths(source_dirs);
             for dir in &deduped {
+                tracing::info!(dir = %dir.display(), "building plugin");
                 let build = build_plugin(dir);
                 if build.success {
-                    if let Err(e) =
-                        install_built_plugin(&build, &install_base, Some(&workspace_release))
-                    {
-                        errors.push(format!("install {} failed: {e}", build.name));
+                    match install_built_plugin(&build, &install_base, Some(&workspace_release)) {
+                        Ok(()) => {
+                            tracing::info!(plugin = %build.name, "plugin installed");
+                        }
+                        Err(e) => {
+                            tracing::error!(plugin = %build.name, error = %e, "install failed");
+                            errors.push(format!("install {} failed: {e}", build.name));
+                        }
                     }
                 } else {
-                    errors.push(format!("build {} failed", build.name));
+                    tracing::error!(
+                        plugin = %build.name,
+                        stderr = %build.stderr,
+                        "build failed"
+                    );
+                    errors.push(format!("build {} failed: {}", build.name, build.stderr));
                 }
                 builds.push(build);
             }
@@ -847,6 +893,15 @@ fn install_built_plugin(
 
     let install_dir = install_base.join(short_name);
 
+    let src_size = std::fs::metadata(&binary).map(|m| m.len()).unwrap_or(0);
+    tracing::info!(
+        plugin = %build.package_name,
+        binary = %binary.display(),
+        src_size,
+        install_dir = %install_dir.display(),
+        "running install command"
+    );
+
     let output = Command::new(&binary)
         .args(["install", &install_dir.to_string_lossy()])
         .stdout(std::process::Stdio::piped())
@@ -854,10 +909,74 @@ fn install_built_plugin(
         .output()
         .map_err(|e| anyhow::anyhow!("failed to run install for {}: {e}", build.package_name))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("install for {} failed: {}", build.package_name, stderr);
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    if !stderr_text.is_empty() {
+        tracing::debug!(
+            plugin = %build.package_name,
+            stderr = %stderr_text,
+            "install stderr"
+        );
     }
+
+    if !output.status.success() {
+        anyhow::bail!("install for {} failed: {}", build.package_name, stderr_text);
+    }
+
+    let manifest_dest = install_dir.join("manifest.json");
+    if !manifest_dest.is_file() {
+        anyhow::bail!(
+            "install for {} produced no manifest.json at {}",
+            build.package_name,
+            manifest_dest.display()
+        );
+    }
+
+    let bin_name_installed = format!("{}{}", build.package_name, std::env::consts::EXE_SUFFIX);
+    let installed_binary = install_dir.join(&bin_name_installed);
+    if installed_binary.is_file() {
+        let dest_size = std::fs::metadata(&installed_binary)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        tracing::info!(
+            plugin = %build.package_name,
+            src_size,
+            dest_size,
+            path = %installed_binary.display(),
+            "binary installed"
+        );
+        if dest_size != src_size {
+            tracing::warn!(
+                plugin = %build.package_name,
+                src_size,
+                dest_size,
+                "binary size mismatch after install"
+            );
+        }
+    } else {
+        let has_any_binary = std::fs::read_dir(&install_dir)
+            .ok()
+            .map(|entries| {
+                entries.flatten().any(|e| {
+                    let p = e.path();
+                    p.is_file() && p.file_name().is_some_and(|n| n != "manifest.json")
+                })
+            })
+            .unwrap_or(false);
+
+        if !has_any_binary {
+            anyhow::bail!(
+                "install for {} produced no binary in {}",
+                build.package_name,
+                install_dir.display()
+            );
+        }
+    }
+
+    tracing::info!(
+        plugin = %build.package_name,
+        dir = %install_dir.display(),
+        "plugin installed"
+    );
 
     Ok(())
 }
@@ -871,14 +990,39 @@ fn install_manifest_plugin(source_dir: &Path, install_base: &Path) -> anyhow::Re
     let install_dir = install_base.join(&*dir_name);
     std::fs::create_dir_all(&install_dir)?;
 
-    if let Ok(entries) = std::fs::read_dir(source_dir) {
-        for entry in entries.flatten() {
-            let src = entry.path();
-            let dest = install_dir.join(entry.file_name());
-            if src.is_file() {
-                std::fs::copy(&src, &dest)?;
-            }
+    let entries = std::fs::read_dir(source_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read plugin source dir {}: {e}",
+            source_dir.display()
+        )
+    })?;
+
+    let mut copied = 0u32;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            anyhow::anyhow!("failed to read entry in {}: {e}", source_dir.display())
+        })?;
+        let src = entry.path();
+        let dest = install_dir.join(entry.file_name());
+        if src.is_file() {
+            let bytes = std::fs::copy(&src, &dest).map_err(|e| {
+                anyhow::anyhow!("failed to copy {} → {}: {e}", src.display(), dest.display())
+            })?;
+            tracing::debug!(
+                src = %src.display(),
+                dest = %dest.display(),
+                bytes,
+                "copied plugin file"
+            );
+            copied += 1;
         }
+    }
+
+    if copied == 0 {
+        anyhow::bail!(
+            "no files found in plugin source dir {}",
+            source_dir.display()
+        );
     }
 
     Ok(())

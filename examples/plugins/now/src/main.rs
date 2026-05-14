@@ -8,9 +8,6 @@ tool! {
             name: "get_current_time",
             description: "Get the current date and time in UTC. Returns an ISO 8601 timestamp.",
             parameters: r#"{"type":"object","properties":{}}"#,
-            command: "",
-            keybind: "",
-            ui: vec![],
             invoke(_name, _args) {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -56,8 +53,7 @@ tool! {
                 Ok(ToolOutput::success(
                     format!("The current date and time is {timestamp} (UTC).")
                 ))
-            },
-            on_exit() { Ok(ToolOutput::empty()) }
+            }
         }
     ]
 }

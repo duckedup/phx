@@ -20,9 +20,21 @@ pub enum ConvEvent {
     StreamToken(String),
     AssistantMessage(String),
     ToolCall(String),
-    ToolResult { output: String, is_error: bool },
+    ToolResult {
+        output: String,
+        is_error: bool,
+    },
+    InteractiveUi {
+        call_id: String,
+        tool_name: String,
+        fields: Vec<phoenix_shared::ui_field_types::UiField>,
+        response_tx: tokio::sync::oneshot::Sender<Option<String>>,
+    },
     ContextLoaded(Vec<String>),
-    ContextCompacted { removed: usize, remaining: usize },
+    ContextCompacted {
+        removed: usize,
+        remaining: usize,
+    },
     Error(String),
     Done(Session),
     Cancelled(Session),
@@ -30,11 +42,13 @@ pub enum ConvEvent {
 
 pub struct ConvConfig {
     pub provider: Arc<dyn Provider>,
-    pub tools: ToolRegistry,
+    pub tools: Arc<parking_lot::RwLock<ToolRegistry>>,
     pub store: SessionStore,
     pub project: PathBuf,
     pub config: crate::config::schema::Config,
     pub system_prompt_override: Option<String>,
+    pub plugin_runtime:
+        Option<Arc<parking_lot::Mutex<crate::plugin::plugin_runtime::PluginRuntime>>>,
 }
 
 pub fn spawn_conversation(
@@ -56,6 +70,7 @@ pub fn spawn_conversation(
             project,
             config,
             system_prompt_override,
+            plugin_runtime,
         } = cfg;
 
         loop {
@@ -65,6 +80,7 @@ pub fn spawn_conversation(
             }
 
             let tool_schemas: Vec<ToolSchema> = tools
+                .read()
                 .list_schemas()
                 .into_iter()
                 .map(|s| ToolSchema {
@@ -259,27 +275,54 @@ pub fn spawn_conversation(
                     let summary = format!("🔧 {}", tc.name);
                     let _ = tx.send(ConvEvent::ToolCall(summary));
 
-                    let tr = if let Some(tool) = tools.get(&tc.name) {
-                        let args: serde_json::Value =
-                            serde_json::from_str(&tc.args_json).unwrap_or_default();
-                        let noop = crate::tools::traits::NoopInputRequester;
-                        match tool.invoke(args, &noop).await {
-                            Ok(r) => crate::session::message::ToolResult {
+                    let dynamic_ui = plugin_runtime
+                        .as_ref()
+                        .and_then(|rt| rt.lock().request_dynamic_ui(&tc.name, &tc.args_json));
+
+                    let tr = if let Some(fields) = dynamic_ui {
+                        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                        let _ = tx.send(ConvEvent::InteractiveUi {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            fields,
+                            response_tx,
+                        });
+                        match response_rx.await {
+                            Ok(Some(answers)) => crate::session::message::ToolResult {
                                 id: tc.id.clone(),
-                                output: r.output,
-                                is_error: r.is_error,
+                                output: answers,
+                                is_error: false,
                             },
-                            Err(e) => crate::session::message::ToolResult {
+                            _ => crate::session::message::ToolResult {
                                 id: tc.id.clone(),
-                                output: e.to_string(),
+                                output: "User cancelled.".into(),
                                 is_error: true,
                             },
                         }
                     } else {
-                        crate::session::message::ToolResult {
-                            id: tc.id.clone(),
-                            output: format!("unknown tool: {}", tc.name),
-                            is_error: true,
+                        let maybe_tool = tools.read().get(&tc.name);
+                        if let Some(tool) = maybe_tool {
+                            let args: serde_json::Value =
+                                serde_json::from_str(&tc.args_json).unwrap_or_default();
+                            let noop = crate::tools::traits::NoopInputRequester;
+                            match tool.invoke(args, &noop).await {
+                                Ok(r) => crate::session::message::ToolResult {
+                                    id: tc.id.clone(),
+                                    output: r.output,
+                                    is_error: r.is_error,
+                                },
+                                Err(e) => crate::session::message::ToolResult {
+                                    id: tc.id.clone(),
+                                    output: e.to_string(),
+                                    is_error: true,
+                                },
+                            }
+                        } else {
+                            crate::session::message::ToolResult {
+                                id: tc.id.clone(),
+                                output: format!("unknown tool: {}", tc.name),
+                                is_error: true,
+                            }
                         }
                     };
 

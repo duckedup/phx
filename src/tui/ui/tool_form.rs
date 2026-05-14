@@ -10,10 +10,27 @@ use super::form_field::{TextAreaField, TextField};
 
 type SelectionRange = ((usize, usize), (usize, usize));
 
+pub struct SelectOption {
+    pub value: String,
+    pub label: String,
+    pub description: String,
+}
+
+pub struct SelectState {
+    pub options: Vec<SelectOption>,
+    pub selected: Option<usize>,
+    pub hover: usize,
+    pub allow_other: bool,
+    pub other_active: bool,
+    pub other_text: TextField,
+}
+
 pub enum FormFieldValue {
     Text(TextField),
     TextArea(Box<TextAreaField>),
     Toggle(bool),
+    Select(SelectState),
+    SelectPaged(SelectState),
 }
 
 pub struct FormField {
@@ -29,6 +46,13 @@ impl FormField {
             FormFieldValue::Text(t) => t.is_empty(),
             FormFieldValue::TextArea(t) => t.is_empty(),
             FormFieldValue::Toggle(_) => false,
+            FormFieldValue::Select(s) | FormFieldValue::SelectPaged(s) => {
+                if s.other_active {
+                    s.other_text.is_empty()
+                } else {
+                    s.selected.is_none()
+                }
+            }
         }
     }
 
@@ -37,6 +61,32 @@ impl FormField {
             FormFieldValue::Text(t) => serde_json::Value::String(t.value.clone()),
             FormFieldValue::TextArea(t) => serde_json::Value::String(t.value()),
             FormFieldValue::Toggle(b) => serde_json::Value::Bool(*b),
+            FormFieldValue::Select(s) | FormFieldValue::SelectPaged(s) => {
+                if s.other_active {
+                    serde_json::Value::String(s.other_text.value.clone())
+                } else if let Some(idx) = s.selected {
+                    serde_json::Value::String(s.options[idx].value.clone())
+                } else {
+                    serde_json::Value::Null
+                }
+            }
+        }
+    }
+
+    pub fn display_value(&self) -> String {
+        match &self.value {
+            FormFieldValue::Text(t) => t.value.clone(),
+            FormFieldValue::TextArea(t) => t.value(),
+            FormFieldValue::Toggle(b) => if *b { "yes" } else { "no" }.to_string(),
+            FormFieldValue::Select(s) | FormFieldValue::SelectPaged(s) => {
+                if s.other_active {
+                    format!("(other) {}", s.other_text.value)
+                } else if let Some(idx) = s.selected {
+                    s.options[idx].label.clone()
+                } else {
+                    String::new()
+                }
+            }
         }
     }
 }
@@ -74,6 +124,30 @@ impl ToolFormState {
                         FormFieldValue::TextArea(Box::new(TextAreaField::new(&f.placeholder)))
                     }
                     UiFieldKind::Toggle => FormFieldValue::Toggle(false),
+                    UiFieldKind::Select | UiFieldKind::SelectPaged => {
+                        let options = f
+                            .options
+                            .iter()
+                            .map(|o| SelectOption {
+                                value: o.value.clone(),
+                                label: o.label.clone(),
+                                description: o.description.clone(),
+                            })
+                            .collect();
+                        let state = SelectState {
+                            options,
+                            selected: None,
+                            hover: 0,
+                            allow_other: f.allow_other,
+                            other_active: false,
+                            other_text: TextField::new("Type your answer..."),
+                        };
+                        if f.field == UiFieldKind::SelectPaged {
+                            FormFieldValue::SelectPaged(state)
+                        } else {
+                            FormFieldValue::Select(state)
+                        }
+                    }
                 };
                 FormField {
                     key: f.key.clone(),
@@ -95,6 +169,10 @@ impl ToolFormState {
 
     fn can_submit(&self) -> bool {
         self.fields.iter().all(|f| !f.required || !f.is_empty())
+    }
+
+    pub fn collect_json(&self) -> serde_json::Value {
+        self.collect_values()
     }
 
     fn collect_values(&self) -> serde_json::Value {
@@ -152,9 +230,9 @@ pub fn handle_key(state: &mut ToolFormState, key: KeyEvent) -> FormAction {
         return FormAction::None;
     }
 
-    let is_textarea = matches!(
+    let consumes_arrows = matches!(
         state.fields[state.focused_index].value,
-        FormFieldValue::TextArea(_)
+        FormFieldValue::TextArea(_) | FormFieldValue::Select(_) | FormFieldValue::SelectPaged(_)
     );
 
     match key.code {
@@ -172,7 +250,7 @@ pub fn handle_key(state: &mut ToolFormState, key: KeyEvent) -> FormAction {
             }
             return FormAction::None;
         }
-        KeyCode::Down if !is_textarea => {
+        KeyCode::Down if !consumes_arrows => {
             if state.focused_index + 1 < state.fields.len() {
                 state.focused_index += 1;
             } else {
@@ -180,13 +258,13 @@ pub fn handle_key(state: &mut ToolFormState, key: KeyEvent) -> FormAction {
             }
             return FormAction::None;
         }
-        KeyCode::Up if !is_textarea => {
+        KeyCode::Up if !consumes_arrows => {
             if state.focused_index > 0 {
                 state.focused_index -= 1;
             }
             return FormAction::None;
         }
-        KeyCode::Enter if !is_textarea => {
+        KeyCode::Enter if !consumes_arrows => {
             if state.focused_index + 1 < state.fields.len() {
                 state.focused_index += 1;
             } else {
@@ -222,6 +300,107 @@ pub fn handle_key(state: &mut ToolFormState, key: KeyEvent) -> FormAction {
         FormFieldValue::Toggle(b) => {
             if key.code == KeyCode::Enter || key.code == KeyCode::Char(' ') {
                 *b = !*b;
+            }
+        }
+        FormFieldValue::Select(s) => match key.code {
+            KeyCode::Up => {
+                if s.hover > 0 {
+                    s.hover -= 1;
+                } else if state.focused_index > 0 {
+                    state.focused_index -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if s.hover + 1 < s.options.len() {
+                    s.hover += 1;
+                } else if state.focused_index + 1 < state.fields.len() {
+                    state.focused_index += 1;
+                } else {
+                    state.submit_focused = true;
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                s.selected = Some(s.hover);
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => {
+                let idx = (c as usize) - ('1' as usize);
+                if idx < s.options.len() {
+                    s.selected = Some(idx);
+                    s.hover = idx;
+                }
+            }
+            _ => {}
+        },
+        FormFieldValue::SelectPaged(s) => {
+            if s.other_active {
+                match key.code {
+                    KeyCode::Up => {
+                        s.other_active = false;
+                        s.hover = s.options.len().saturating_sub(1);
+                    }
+                    KeyCode::Enter => {
+                        if !s.other_text.is_empty() {
+                            if state.focused_index + 1 < state.fields.len() {
+                                state.focused_index += 1;
+                            } else {
+                                state.submit_focused = true;
+                            }
+                        }
+                    }
+                    _ => {
+                        s.other_text.handle_key(key);
+                    }
+                }
+            } else {
+                match key.code {
+                    KeyCode::Up if s.hover > 0 => {
+                        s.hover -= 1;
+                    }
+                    KeyCode::Down if s.hover + 1 < s.options.len() => {
+                        s.hover += 1;
+                    }
+                    KeyCode::Down if s.allow_other && s.hover + 1 == s.options.len() => {
+                        s.other_active = true;
+                        s.selected = None;
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        s.selected = Some(s.hover);
+                        s.other_active = false;
+                        s.other_text.value.clear();
+                        s.other_text.cursor = 0;
+                        if state.focused_index + 1 < state.fields.len() {
+                            state.focused_index += 1;
+                        } else {
+                            state.submit_focused = true;
+                        }
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        let idx = (c as usize) - ('1' as usize);
+                        if idx < s.options.len() {
+                            s.selected = Some(idx);
+                            s.hover = idx;
+                            s.other_active = false;
+                            s.other_text.value.clear();
+                            s.other_text.cursor = 0;
+                            if state.focused_index + 1 < state.fields.len() {
+                                state.focused_index += 1;
+                            } else {
+                                state.submit_focused = true;
+                            }
+                        }
+                    }
+                    KeyCode::Left if state.focused_index > 0 => {
+                        state.focused_index -= 1;
+                    }
+                    KeyCode::Right => {
+                        if state.focused_index + 1 < state.fields.len() {
+                            state.focused_index += 1;
+                        } else {
+                            state.submit_focused = true;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -348,12 +527,76 @@ pub fn render_tool_form(frame: &mut Frame, area: Rect, state: &ToolFormState, th
     let field_x = area.x + INDENT.len() as u16;
     let field_width = content_width.saturating_sub(INDENT.len() as u16 + 1);
 
+    // Count paged selects for stepper rendering
+    let paged_fields: Vec<usize> = state
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| matches!(f.value, FormFieldValue::SelectPaged(_)))
+        .map(|(i, _)| i)
+        .collect();
+    let has_paged = !paged_fields.is_empty();
+
+    // Render stepper bar for paged selects
+    if has_paged && y < area.bottom() {
+        let mut spans = vec![Span::styled(INDENT, Style::default())];
+        for (page_num, &field_idx) in paged_fields.iter().enumerate() {
+            let f = &state.fields[field_idx];
+            let is_active = !state.submit_focused && state.focused_index == field_idx;
+            let is_answered = !f.is_empty();
+            let marker = if is_answered {
+                "\u{25cf}"
+            } else if is_active {
+                "\u{25c9}"
+            } else {
+                "\u{25cb}"
+            };
+            let color = if is_active {
+                theme.accent
+            } else if is_answered {
+                Color::Green
+            } else {
+                theme.dim()
+            };
+            spans.push(Span::styled(
+                format!("{marker} {} ", page_num + 1),
+                Style::default().fg(color),
+            ));
+        }
+        let answered_count = paged_fields
+            .iter()
+            .filter(|&&i| !state.fields[i].is_empty())
+            .count();
+        spans.push(Span::styled(
+            format!("  ({answered_count}/{})", paged_fields.len()),
+            Style::default().fg(theme.dim()),
+        ));
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(bg)),
+            Rect {
+                x: area.x,
+                y,
+                width: content_width,
+                height: 1,
+            },
+        );
+        y += 2;
+    }
+
     for (i, field) in state.fields.iter().enumerate() {
         if y >= area.bottom() {
             break;
         }
 
         let focused = !state.submit_focused && state.focused_index == i;
+
+        // SelectPaged: only render the focused one with full options
+        if let FormFieldValue::SelectPaged(_) = &field.value
+            && !focused
+        {
+            continue;
+        }
+
         let label_prefix = if field.required { "* " } else { "" };
         let label_style = if focused {
             Style::default()
@@ -424,6 +667,81 @@ pub fn render_tool_form(frame: &mut Frame, area: Rect, state: &ToolFormState, th
                     },
                 );
                 y += 1;
+            }
+            FormFieldValue::Select(s) | FormFieldValue::SelectPaged(s) => {
+                for (j, opt) in s.options.iter().enumerate() {
+                    if y >= area.bottom() {
+                        break;
+                    }
+                    let is_selected = !s.other_active && s.selected == Some(j);
+                    let is_hover = focused && !s.other_active && s.hover == j;
+                    let radio = if is_selected { "(\u{25cf})" } else { "( )" };
+                    let radio_color = if is_selected {
+                        Color::Green
+                    } else {
+                        theme.dim()
+                    };
+                    let text_fg = if is_hover {
+                        theme.accent
+                    } else if is_selected {
+                        Color::Green
+                    } else {
+                        theme.foreground
+                    };
+                    let pointer = if is_hover { "> " } else { "  " };
+                    let desc = if opt.description.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" \u{2014} {}", opt.description)
+                    };
+                    let line = Line::from(vec![
+                        Span::styled(pointer, Style::default().fg(theme.accent)),
+                        Span::styled(format!("{radio} "), Style::default().fg(radio_color)),
+                        Span::styled(&opt.label, Style::default().fg(text_fg)),
+                        Span::styled(desc, Style::default().fg(theme.dim())),
+                    ]);
+                    frame.render_widget(
+                        Paragraph::new(line).style(Style::default().bg(bg)),
+                        Rect {
+                            x: field_x,
+                            y,
+                            width: field_width,
+                            height: 1,
+                        },
+                    );
+                    y += 1;
+                }
+                if s.allow_other && y < area.bottom() {
+                    let is_active = s.other_active;
+                    let label_fg = if is_active { theme.accent } else { theme.dim() };
+                    let prefix = if is_active { "> " } else { "  " };
+                    let label_line = Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(theme.accent)),
+                        Span::styled("or type your own:", Style::default().fg(label_fg)),
+                    ]);
+                    frame.render_widget(
+                        Paragraph::new(label_line).style(Style::default().bg(bg)),
+                        Rect {
+                            x: field_x,
+                            y,
+                            width: field_width,
+                            height: 1,
+                        },
+                    );
+                    y += 1;
+                    if y < area.bottom() {
+                        let input_x = field_x + 4;
+                        let input_w = field_width.saturating_sub(5);
+                        let fa = Rect {
+                            x: input_x,
+                            y,
+                            width: input_w,
+                            height: 1,
+                        };
+                        s.other_text.render(frame, fa, is_active, theme);
+                        y += 1;
+                    }
+                }
             }
         }
 
@@ -583,19 +901,61 @@ fn build_selected_spans<'a>(
 }
 
 pub fn form_height(state: &ToolFormState) -> u16 {
-    let mut h: u16 = 4; // separator + name + description + spacing
-    for field in &state.fields {
-        h += 1; // label
+    let mut h: u16 = 2; // separator + name
+    if !state.description.is_empty() {
+        h += 1;
+    }
+    h += 1; // spacing after header
+
+    let has_paged = state
+        .fields
+        .iter()
+        .any(|f| matches!(f.value, FormFieldValue::SelectPaged(_)));
+    if has_paged {
+        h += 2; // stepper bar + spacing
+    }
+
+    for (i, field) in state.fields.iter().enumerate() {
+        let focused = !state.submit_focused && state.focused_index == i;
         match &field.value {
+            FormFieldValue::SelectPaged(s) => {
+                if focused {
+                    h += 1; // label
+                    h += s.options.len() as u16;
+                    if s.allow_other {
+                        h += 2; // "or type your own:" + text input
+                    }
+                    h += 1; // spacing
+                }
+            }
+            FormFieldValue::Select(s) => {
+                h += 1; // label
+                h += s.options.len() as u16;
+                if s.allow_other {
+                    h += 2;
+                }
+                h += 1; // spacing
+            }
             FormFieldValue::TextArea(ta) => {
+                h += 1; // label
                 h += (ta.line_count() as u16).clamp(1, 8);
+                h += 1; // spacing
             }
             _ => {
-                h += 1; // single-line field
+                h += 1; // label
+                h += 1; // field
+                h += 1; // spacing
             }
         }
-        h += 1; // spacing between fields
     }
-    h += 2; // spacing + submit button
+    h += 1; // submit button
     h
+}
+
+pub fn format_answers(state: &ToolFormState) -> String {
+    let mut out = String::new();
+    for field in &state.fields {
+        out.push_str(&format!("{}: {}\n", field.label, field.display_value()));
+    }
+    out
 }

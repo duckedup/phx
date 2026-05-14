@@ -42,7 +42,7 @@ pub struct App {
     pub ctrl_c_count: u8,
     pub ctrl_c_time: Option<std::time::Instant>,
     pub provider: Option<Arc<dyn Provider>>,
-    pub tools: ToolRegistry,
+    pub tools: Arc<parking_lot::RwLock<ToolRegistry>>,
     pub store: SessionStore,
     pub project: std::path::PathBuf,
     pub session: Option<Session>,
@@ -80,6 +80,7 @@ pub struct App {
     pub pending_model_selection: Option<usize>,
     pub models_page: Option<ModelsPageState>,
     pub tool_form: Option<tool_form::ToolFormState>,
+    pub interactive_response_tx: Option<tokio::sync::oneshot::Sender<Option<String>>>,
 }
 
 pub struct AgentReceiver {
@@ -166,7 +167,7 @@ impl App {
             ctrl_c_count: 0,
             ctrl_c_time: None,
             provider,
-            tools: tool_registry,
+            tools: Arc::new(parking_lot::RwLock::new(tool_registry)),
             store,
             project,
             session: None,
@@ -207,6 +208,7 @@ impl App {
             pending_model_selection: None,
             models_page: None,
             tool_form: None,
+            interactive_response_tx: None,
         }
     }
 
@@ -363,6 +365,21 @@ impl App {
                             }));
                         }
                     }
+                    ConvEvent::InteractiveUi {
+                        fields,
+                        response_tx,
+                        tool_name,
+                        ..
+                    } => {
+                        let config = phoenix_shared::ui_field_types::ToolUiConfig::new(fields);
+                        self.tool_form = Some(tool_form::ToolFormState::from_ui(
+                            tool_name,
+                            String::new(),
+                            &config,
+                        ));
+                        self.interactive_response_tx = Some(response_tx);
+                        break;
+                    }
                     ConvEvent::ContextLoaded(names) => {
                         if let Some(tab) = self.tabs.get_mut(tab_idx) {
                             tab.chat_lines.push(ChatItem::Line(ChatLine {
@@ -472,13 +489,23 @@ impl App {
         if let Some(ref mut form) = self.tool_form {
             let action = tool_form::handle_key(form, key);
             match action {
-                tool_form::FormAction::Submit(args) => {
-                    let name = form.tool_name.clone();
-                    let args_str = args.to_string();
-                    self.tool_form = None;
-                    self.invoke_tool_command(&name, &args_str);
+                tool_form::FormAction::Submit(_) => {
+                    if let Some(response_tx) = self.interactive_response_tx.take() {
+                        let answers = tool_form::format_answers(form);
+                        let _ = response_tx.send(Some(answers));
+                        self.tool_form = None;
+                    } else {
+                        let name = form.tool_name.clone();
+                        let args = form.collect_json();
+                        let args_str = args.to_string();
+                        self.tool_form = None;
+                        self.invoke_tool_command(&name, &args_str);
+                    }
                 }
                 tool_form::FormAction::Cancel => {
+                    if let Some(response_tx) = self.interactive_response_tx.take() {
+                        let _ = response_tx.send(None);
+                    }
                     self.tool_form = None;
                 }
                 tool_form::FormAction::None => {}
@@ -1390,9 +1417,11 @@ pub async fn run(
         &app.config.plugins.dirs,
     );
     if !plugin_dirs.is_empty() {
+        let mut tools_snapshot = app.tools.read().clone();
         app.plugin_manager
-            .load_and_start(plugin_dirs, &app.project, &mut app.tools)
+            .load_and_start(plugin_dirs, &app.project, &mut tools_snapshot)
             .await;
+        *app.tools.write() = tools_snapshot;
     }
 
     {
@@ -1404,7 +1433,7 @@ pub async fn run(
             let _ = rt.load_from_dir(dir);
         }
         let rt_arc = Arc::new(parking_lot::Mutex::new(rt));
-        crate::plugin::plugin_tool_adapter::register_plugin_tools(&rt_arc, &mut app.tools);
+        crate::plugin::plugin_tool_adapter::register_plugin_tools(&rt_arc, &mut app.tools.write());
         app.plugin_runtime = Some(rt_arc);
     }
 

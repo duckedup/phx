@@ -10,11 +10,12 @@ tool! {
             description: "Start working on a new feature",
             parameters: r#"{"type":"object","properties":{"ticket":{"type":"string","description":"Ticket or issue number"},"notes":{"type":"string","description":"Additional context or notes"}}}"#,
             command: "feature",
-            keybind: "",
-            ui: vec![
-                ToolUiField::text_area("ticket", "Ticket Number").placeholder("e.g. PROJ-123"),
-                ToolUiField::text_area("notes", "Additional Notes").placeholder("Any extra context..."),
-            ],
+            ui(_name, _args) {
+                vec![
+                    ToolUiField::text_area("ticket", "Ticket Number").placeholder("e.g. PROJ-123"),
+                    ToolUiField::text_area("notes", "Additional Notes").placeholder("Any extra context..."),
+                ]
+            },
             invoke(_name, args) {
                 let ticket = args.get("ticket").and_then(|v| v.as_str()).unwrap_or("");
                 let notes = args.get("notes").and_then(|v| v.as_str()).unwrap_or("");
@@ -39,8 +40,7 @@ tool! {
                 }
 
                 Ok(ToolOutput::success(context))
-            },
-            on_exit() { Ok(ToolOutput::empty()) }
+            }
         }
     ]
 }
