@@ -1261,7 +1261,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "phx"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1277,7 +1277,6 @@ dependencies = [
  "glob",
  "libc",
  "parking_lot",
- "phx-shared",
  "pin-project-lite",
  "predicates",
  "pretty_assertions",
@@ -1298,58 +1297,35 @@ dependencies = [
 name = "phx-plugin-ask-user-questions"
 version = "0.1.0"
 dependencies = [
- "phx-plugin-sdk",
- "serde_json",
+ "phx",
 ]
 
 [[package]]
 name = "phx-plugin-feature"
 version = "0.1.0"
 dependencies = [
- "phx-plugin-sdk",
- "serde_json",
+ "phx",
 ]
 
 [[package]]
 name = "phx-plugin-now"
 version = "0.1.0"
 dependencies = [
- "phx-plugin-sdk",
- "serde_json",
+ "phx",
 ]
 
 [[package]]
 name = "phx-plugin-plan"
 version = "0.1.0"
 dependencies = [
- "phx-plugin-sdk",
- "serde_json",
+ "phx",
 ]
 
 [[package]]
 name = "phx-plugin-review"
 version = "0.1.0"
 dependencies = [
- "phx-plugin-sdk",
- "serde_json",
-]
-
-[[package]]
-name = "phx-plugin-sdk"
-version = "0.3.0"
-dependencies = [
- "clap",
- "phx-shared",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "phx-shared"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
+ "phx",
 ]
 
 [[package]]

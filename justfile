@@ -37,8 +37,6 @@ package:
     @echo "binary at target/release/phx"
 
 publish:
-    cargo publish -p phx-shared
-    cargo publish -p phx-plugin-sdk
     cargo publish -p phx
 
 clean:

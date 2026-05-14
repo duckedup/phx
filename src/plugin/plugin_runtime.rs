@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use phx_shared::ui_field_types::{ToolUiConfig, UiField};
+use crate::shared::ui_field_types::{ToolUiConfig, UiField};
 
 #[derive(Clone, Debug)]
 pub struct UnifiedToolMeta {

@@ -1,12 +1,11 @@
 pub mod ui;
 
-pub use phx_shared;
-pub use phx_shared::context_types;
-pub use phx_shared::hook_types;
-pub use phx_shared::skill_types;
-pub use phx_shared::tool_types;
-pub use phx_shared::ui_field_types;
-pub use phx_shared::ui_types;
+pub use crate::shared::context_types;
+pub use crate::shared::hook_types;
+pub use crate::shared::skill_types;
+pub use crate::shared::tool_types;
+pub use crate::shared::ui_field_types;
+pub use crate::shared::ui_types;
 
 pub use clap;
 pub use serde;
@@ -99,7 +98,7 @@ pub fn __serialize_tool_output(r: &ToolOutput) -> String {
 }
 
 #[doc(hidden)]
-pub fn __serialize_ui_fields(fields: &[phx_shared::ui_field_types::UiField]) -> String {
+pub fn __serialize_ui_fields(fields: &[crate::shared::ui_field_types::UiField]) -> String {
     serde_json::to_string(fields).unwrap_or_else(|_| "[]".to_string())
 }
 
@@ -137,22 +136,22 @@ macro_rules! tool {
         ]
     ) => {
         fn __build_manifest() -> String {
-            let tools: Vec<$crate::serde_json::Value> = vec![
+            let tools: Vec<$crate::sdk::serde_json::Value> = vec![
                 $(
                     {
                         #[allow(clippy::redundant_closure_call)]
-                        let ui_fields: Vec<$crate::ui_field_types::UiField> = (|| {
+                        let ui_fields: Vec<$crate::sdk::ui_field_types::UiField> = (|| {
                             $(return $ui_static;)?
                             $(
-                                fn __ui_fn($uname: String, $uargs: $crate::serde_json::Value) -> Vec<$crate::ui_field_types::UiField>
+                                fn __ui_fn($uname: String, $uargs: $crate::sdk::serde_json::Value) -> Vec<$crate::sdk::ui_field_types::UiField>
                                     $ubody
-                                return __ui_fn($name.to_string(), $crate::serde_json::json!({}));
+                                return __ui_fn($name.to_string(), $crate::sdk::serde_json::json!({}));
                             )?
                             #[allow(unreachable_code)]
                             Vec::new()
                         })();
-                        let ui_json: $crate::serde_json::Value = $crate::serde_json::to_value(&ui_fields).unwrap_or_default();
-                        $crate::serde_json::json!({
+                        let ui_json: $crate::sdk::serde_json::Value = $crate::sdk::serde_json::to_value(&ui_fields).unwrap_or_default();
+                        $crate::sdk::serde_json::json!({
                             "name": $name,
                             "description": $desc,
                             "parameters": $params,
@@ -163,15 +162,15 @@ macro_rules! tool {
                     },
                 )+
             ];
-            $crate::serde_json::to_string_pretty(&$crate::serde_json::json!({
+            $crate::sdk::serde_json::to_string_pretty(&$crate::sdk::serde_json::json!({
                 "name": $plugin_name,
                 "version": $plugin_version,
                 "tools": tools,
             })).unwrap()
         }
 
-        fn __ui_for_tool(tool_name: &str, args_json: &str) -> Result<Vec<$crate::ui_field_types::UiField>, String> {
-            let __parsed_args: $crate::serde_json::Value = $crate::serde_json::from_str(args_json)
+        fn __ui_for_tool(tool_name: &str, args_json: &str) -> Result<Vec<$crate::sdk::ui_field_types::UiField>, String> {
+            let __parsed_args: $crate::sdk::serde_json::Value = $crate::sdk::serde_json::from_str(args_json)
                 .map_err(|e| format!("invalid JSON args: {e}"))?;
             match tool_name {
                 $(
@@ -180,7 +179,7 @@ macro_rules! tool {
                         Ok((|| {
                             $(return $ui_static;)?
                             $(
-                                fn __inner($uname: String, $uargs: $crate::serde_json::Value) -> Vec<$crate::ui_field_types::UiField>
+                                fn __inner($uname: String, $uargs: $crate::sdk::serde_json::Value) -> Vec<$crate::sdk::ui_field_types::UiField>
                                     $ubody
                                 return __inner(tool_name.to_string(), __parsed_args);
                             )?
@@ -193,13 +192,13 @@ macro_rules! tool {
             }
         }
 
-        fn __invoke_tool(tool_name: &str, args_json: &str) -> Result<$crate::ToolOutput, String> {
-            let __parsed_args: $crate::serde_json::Value = $crate::serde_json::from_str(args_json)
+        fn __invoke_tool(tool_name: &str, args_json: &str) -> Result<$crate::sdk::ToolOutput, String> {
+            let __parsed_args: $crate::sdk::serde_json::Value = $crate::sdk::serde_json::from_str(args_json)
                 .map_err(|e| format!("invalid JSON args: {e}"))?;
             match tool_name {
                 $(
                     $name => {
-                        fn __inner($iname: String, $iargs: $crate::serde_json::Value) -> Result<$crate::ToolOutput, String>
+                        fn __inner($iname: String, $iargs: $crate::sdk::serde_json::Value) -> Result<$crate::sdk::ToolOutput, String>
                             $ibody
                         __inner(tool_name.to_string(), __parsed_args)
                     }
@@ -208,23 +207,23 @@ macro_rules! tool {
             }
         }
 
-        fn __exit_tool(tool_name: &str) -> Result<$crate::ToolOutput, String> {
+        fn __exit_tool(tool_name: &str) -> Result<$crate::sdk::ToolOutput, String> {
             match tool_name {
                 $(
                     #[allow(clippy::redundant_closure_call)]
                     $name => {
                         (|| {
                             $(
-                                fn __inner() -> Result<$crate::ToolOutput, String>
+                                fn __inner() -> Result<$crate::sdk::ToolOutput, String>
                                     $ebody
                                 return __inner();
                             )?
                             #[allow(unreachable_code)]
-                            Ok($crate::ToolOutput::empty())
+                            Ok($crate::sdk::ToolOutput::empty())
                         })()
                     }
                 )+
-                _ => Ok($crate::ToolOutput::empty()),
+                _ => Ok($crate::sdk::ToolOutput::empty()),
             }
         }
 
@@ -238,12 +237,12 @@ macro_rules! tool {
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                 .unwrap_or_else(|| format!("{}", $plugin_name));
 
-            let mut manifest: $crate::serde_json::Value =
-                $crate::serde_json::from_str(&__build_manifest()).unwrap();
-            manifest["bin"] = $crate::serde_json::json!(format!("./{binary_name}"));
+            let mut manifest: $crate::sdk::serde_json::Value =
+                $crate::sdk::serde_json::from_str(&__build_manifest()).unwrap();
+            manifest["bin"] = $crate::sdk::serde_json::json!(format!("./{binary_name}"));
 
             let manifest_path = dest.join("manifest.json");
-            let formatted = $crate::serde_json::to_string_pretty(&manifest).unwrap();
+            let formatted = $crate::sdk::serde_json::to_string_pretty(&manifest).unwrap();
             std::fs::write(&manifest_path, &formatted)
                 .map_err(|e| format!("failed to write manifest.json: {e}"))?;
 
@@ -251,7 +250,6 @@ macro_rules! tool {
                 .map_err(|e| format!("failed to get current exe path: {e}"))?;
             let binary_dest = dest.join(&binary_name);
 
-            // Remove old binary first to avoid overwrite issues (ETXTBSY on some platforms)
             if binary_dest.exists() {
                 let old_size = std::fs::metadata(&binary_dest).map(|m| m.len()).unwrap_or(0);
                 eprintln!("  removing old binary ({old_size} bytes): {}", binary_dest.display());
@@ -278,7 +276,6 @@ macro_rules! tool {
                 ));
             }
 
-            // Verify the destination matches
             let dest_size = std::fs::metadata(&binary_dest).map(|m| m.len()).unwrap_or(0);
             if dest_size != src_size {
                 return Err(format!(
@@ -305,7 +302,7 @@ macro_rules! tool {
         }
 
         fn main() {
-            use $crate::clap::{Arg, ArgAction, Command};
+            use $crate::sdk::clap::{Arg, ArgAction, Command};
 
             let cli = Command::new($plugin_name)
                 .version($plugin_version)
@@ -351,11 +348,11 @@ macro_rules! tool {
                     let args = sub.get_one::<String>("args_json").unwrap();
                     match __invoke_tool(tool, args) {
                         Ok(result) => {
-                            println!("{}", $crate::__serialize_tool_output(&result));
+                            println!("{}", $crate::sdk::__serialize_tool_output(&result));
                         }
                         Err(e) => {
-                            let err_result = $crate::ToolOutput::error(e);
-                            println!("{}", $crate::__serialize_tool_output(&err_result));
+                            let err_result = $crate::sdk::ToolOutput::error(e);
+                            println!("{}", $crate::sdk::__serialize_tool_output(&err_result));
                             std::process::exit(1);
                         }
                     }
@@ -365,7 +362,7 @@ macro_rules! tool {
                     let args = sub.get_one::<String>("args_json").unwrap();
                     match __ui_for_tool(tool, args) {
                         Ok(fields) => {
-                            println!("{}", $crate::__serialize_ui_fields(&fields));
+                            println!("{}", $crate::sdk::__serialize_ui_fields(&fields));
                         }
                         Err(e) => {
                             eprintln!("ui error: {e}");
@@ -377,11 +374,11 @@ macro_rules! tool {
                     let tool = sub.get_one::<String>("tool").unwrap();
                     match __exit_tool(tool) {
                         Ok(result) => {
-                            println!("{}", $crate::__serialize_tool_output(&result));
+                            println!("{}", $crate::sdk::__serialize_tool_output(&result));
                         }
                         Err(e) => {
-                            let err_result = $crate::ToolOutput::error(e);
-                            println!("{}", $crate::__serialize_tool_output(&err_result));
+                            let err_result = $crate::sdk::ToolOutput::error(e);
+                            println!("{}", $crate::sdk::__serialize_tool_output(&err_result));
                             std::process::exit(1);
                         }
                     }

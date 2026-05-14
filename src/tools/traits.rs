@@ -144,9 +144,15 @@ pub trait Tool: Send + Sync {
     async fn invoke_with_context(
         &self,
         args: Value,
-        _context: &phx_shared::context_types::SessionContext,
+        _context: &crate::shared::context_types::SessionContext,
         input: &dyn InputRequester,
-    ) -> Result<(ToolResult, Vec<phx_shared::context_types::ContextMutation>), ToolError> {
+    ) -> Result<
+        (
+            ToolResult,
+            Vec<crate::shared::context_types::ContextMutation>,
+        ),
+        ToolError,
+    > {
         self.invoke(args, input).await.map(|r| (r, vec![]))
     }
 }

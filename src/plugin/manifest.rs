@@ -1,4 +1,4 @@
-use phx_shared::ui_field_types::UiField;
+use crate::shared::ui_field_types::UiField;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 

@@ -1,4 +1,4 @@
-use phx_shared::context_types::{
+use crate::shared::context_types::{
     ContextMessage, ContextMutation, ContextToolCall, ContextToolResult, SessionContext,
 };
 

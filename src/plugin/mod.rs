@@ -10,5 +10,5 @@ pub mod tool_adapter;
 pub mod transport;
 pub mod ui;
 
+pub use crate::shared::hook_types::{HookAction, HookEvent};
 pub use manager::{PluginManager, discover_plugin_dirs};
-pub use phx_shared::hook_types::{HookAction, HookEvent};

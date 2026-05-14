@@ -1342,7 +1342,7 @@ pub async fn send_message(
                             .and_then(|rt| rt.lock().request_dynamic_ui(&tc.name, &tc.args_json));
 
                         if let Some(fields) = dynamic_ui {
-                            let config = phx_shared::ui_field_types::ToolUiConfig::new(fields);
+                            let config = crate::shared::ui_field_types::ToolUiConfig::new(fields);
                             let form_state = crate::tui::ui::tool_form::ToolFormState::from_ui(
                                 tc.name.clone(),
                                 String::new(),
