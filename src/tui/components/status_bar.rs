@@ -59,7 +59,7 @@ pub fn render_status(frame: &mut Frame, area: Rect, state: &StatusState<'_>, the
         "✦"
     };
 
-    let left = format!(" {spinner} phoenix");
+    let left = format!(" {spinner} phx");
 
     let mut right_parts: Vec<String> = Vec::new();
     if let Some(ref t) = state.tokens {

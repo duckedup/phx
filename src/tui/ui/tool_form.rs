@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use phoenix_shared::ui_field_types::{ToolUiConfig, UiFieldKind};
+use phx_shared::ui_field_types::{ToolUiConfig, UiFieldKind};
 
 use crate::tui::theme::Theme;
 

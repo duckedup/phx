@@ -20,7 +20,7 @@ pub fn render_header(
         "✦"
     };
 
-    let left = format!(" {spinner} phoenix · {tab_name}");
+    let left = format!(" {spinner} phx · {tab_name}");
     let right = format!("{}  ", provider_info);
     let pad_width =
         (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());

@@ -132,10 +132,10 @@ pub fn discover_plugin_dirs(
     let mut dirs = Vec::new();
 
     if let Some(p) = project {
-        scan_plugins_dir(&p.join(".phoenix/plugins"), &mut dirs);
+        scan_plugins_dir(&p.join(".phx/plugins"), &mut dirs);
     }
 
-    scan_plugins_dir(&home.join(".phoenix/plugins"), &mut dirs);
+    scan_plugins_dir(&home.join(".phx/plugins"), &mut dirs);
 
     for dir in extra {
         let expanded = expand_tilde(dir, home);
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn discover_project_plugins() {
         let project = tempdir().unwrap();
-        let plugin_dir = project.path().join(".phoenix/plugins/my-plugin");
+        let plugin_dir = project.path().join(".phx/plugins/my-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.json"),
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn discover_home_plugins() {
         let home = tempdir().unwrap();
-        let plugin_dir = home.path().join(".phoenix/plugins/global-plugin");
+        let plugin_dir = home.path().join(".phx/plugins/global-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.json"),

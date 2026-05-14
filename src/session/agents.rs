@@ -160,13 +160,13 @@ pub fn discover_agents(project_dir: Option<&Path>, user_home: &Path) -> Vec<Agen
 
     if let Some(p) = project_dir {
         add(scan_agents_dir(
-            &p.join(".phoenix/agents"),
+            &p.join(".phx/agents"),
             AgentSource::Project,
         ));
     }
 
     add(scan_agents_dir(
-        &user_home.join(".phoenix/agents"),
+        &user_home.join(".phx/agents"),
         AgentSource::User,
     ));
 
@@ -353,7 +353,7 @@ Review the code.";
     #[test]
     fn discover_finds_agents() {
         let home = tempdir().unwrap();
-        let agents_dir = home.path().join(".phoenix/agents");
+        let agents_dir = home.path().join(".phx/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(
             agents_dir.join("reviewer.md"),
@@ -372,7 +372,7 @@ Review the code.";
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();
 
-        let user_dir = home.path().join(".phoenix/agents");
+        let user_dir = home.path().join(".phx/agents");
         std::fs::create_dir_all(&user_dir).unwrap();
         std::fs::write(
             user_dir.join("shared.md"),
@@ -380,7 +380,7 @@ Review the code.";
         )
         .unwrap();
 
-        let proj_dir = project.path().join(".phoenix/agents");
+        let proj_dir = project.path().join(".phx/agents");
         std::fs::create_dir_all(&proj_dir).unwrap();
         std::fs::write(
             proj_dir.join("shared.md"),
@@ -397,7 +397,7 @@ Review the code.";
     #[test]
     fn discover_skips_non_md_files() {
         let home = tempdir().unwrap();
-        let agents_dir = home.path().join(".phoenix/agents");
+        let agents_dir = home.path().join(".phx/agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(agents_dir.join("notes.txt"), "not an agent").unwrap();
         std::fs::write(

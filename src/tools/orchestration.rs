@@ -353,7 +353,7 @@ impl Tool for CollectAgentTool {
         let mut result = serde_json::to_value(&info).unwrap_or_default();
 
         if let (Some(branch), Some(mgr)) = (&info.worktree_branch, &self.ctx.pool.worktrees) {
-            let child_id = branch.strip_prefix("phoenix/agent/").unwrap_or(session_id);
+            let child_id = branch.strip_prefix("phx/agent/").unwrap_or(session_id);
             if let Ok(diff) = mgr.diff_summary(child_id, "HEAD") {
                 result["worktree_diff"] = json!({
                     "branch": branch,
@@ -499,7 +499,7 @@ impl Tool for MergeAgentTool {
             .as_deref()
             .ok_or_else(|| ToolError::ExecutionFailed("child has no worktree".into()))?;
 
-        let child_id = branch.strip_prefix("phoenix/agent/").unwrap_or(session_id);
+        let child_id = branch.strip_prefix("phx/agent/").unwrap_or(session_id);
 
         let mgr =
             self.ctx.pool.worktrees.as_ref().ok_or_else(|| {
@@ -507,7 +507,7 @@ impl Tool for MergeAgentTool {
             })?;
 
         // Auto-commit any remaining changes
-        let _ = mgr.auto_commit(child_id, &format!("phoenix: agent {child_id} — final"));
+        let _ = mgr.auto_commit(child_id, &format!("phx: agent {child_id} — final"));
 
         let merge_result = mgr
             .merge(child_id, strategy, message, cleanup)

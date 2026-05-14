@@ -11,4 +11,4 @@ pub mod transport;
 pub mod ui;
 
 pub use manager::{PluginManager, discover_plugin_dirs};
-pub use phoenix_shared::hook_types::{HookAction, HookEvent};
+pub use phx_shared::hook_types::{HookAction, HookEvent};

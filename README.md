@@ -1,4 +1,4 @@
-# phoenix
+# phx
 
 A lightweight, fast, minimalistic agent harness.
 
@@ -13,8 +13,8 @@ A lightweight, fast, minimalistic agent harness.
 ### Setup
 
 ```bash
-git clone https://codeberg.org/reddirtbytes/phoenix.git
-cd phoenix
+git clone https://github.com/duckedup/phx.git
+cd phx
 just build
 ```
 
@@ -24,7 +24,7 @@ just build
 just build          # Build everything (plugins + binary)
 just test           # Run all tests
 just lint           # Format + clippy
-just run            # Run phoenix
+just run            # Run phx
 just run-plugins    # Run with example plugins loaded
 ```
 

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use phoenix_shared::context_types::{ContextMutation, SessionContext};
+use phx_shared::context_types::{ContextMutation, SessionContext};
 
 use crate::tools::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 

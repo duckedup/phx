@@ -1,6 +1,6 @@
 use ratatui::prelude::*;
 
-use phoenix_shared::ui_types::{TextStyle, UiNode};
+use phx_shared::ui_types::{TextStyle, UiNode};
 
 use super::display::DisplayLine;
 use super::helpers::wrap_text;

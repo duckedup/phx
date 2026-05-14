@@ -26,7 +26,7 @@ impl PluginHandle {
 
     pub async fn initialize(&self, project_dir: &Path) -> anyhow::Result<serde_json::Value> {
         let params = serde_json::json!({
-            "phoenix_version": env!("CARGO_PKG_VERSION"),
+            "phx_version": env!("CARGO_PKG_VERSION"),
             "project_dir": project_dir,
             "plugin_dir": self.dir,
         });

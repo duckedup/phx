@@ -1,12 +1,12 @@
 pub mod ui;
 
-pub use phoenix_shared;
-pub use phoenix_shared::context_types;
-pub use phoenix_shared::hook_types;
-pub use phoenix_shared::skill_types;
-pub use phoenix_shared::tool_types;
-pub use phoenix_shared::ui_field_types;
-pub use phoenix_shared::ui_types;
+pub use phx_shared;
+pub use phx_shared::context_types;
+pub use phx_shared::hook_types;
+pub use phx_shared::skill_types;
+pub use phx_shared::tool_types;
+pub use phx_shared::ui_field_types;
+pub use phx_shared::ui_types;
 
 pub use clap;
 pub use serde;
@@ -99,7 +99,7 @@ pub fn __serialize_tool_output(r: &ToolOutput) -> String {
 }
 
 #[doc(hidden)]
-pub fn __serialize_ui_fields(fields: &[phoenix_shared::ui_field_types::UiField]) -> String {
+pub fn __serialize_ui_fields(fields: &[phx_shared::ui_field_types::UiField]) -> String {
     serde_json::to_string(fields).unwrap_or_else(|_| "[]".to_string())
 }
 

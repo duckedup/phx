@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use phoenix_shared::ui_field_types::{ToolUiConfig, UiField};
+use phx_shared::ui_field_types::{ToolUiConfig, UiField};
 
 #[derive(Clone, Debug)]
 pub struct UnifiedToolMeta {
@@ -592,7 +592,7 @@ impl PluginRuntime {
         let install_base = plugin_dirs
             .first()
             .cloned()
-            .unwrap_or_else(|| self.project_dir.join(".phoenix/plugins"));
+            .unwrap_or_else(|| self.project_dir.join(".phx/plugins"));
 
         if !skip_build {
             let workspace_release = self.project_dir.join("target/release");
@@ -660,13 +660,13 @@ impl PluginRuntime {
         let mut dirs = Vec::new();
 
         if let Some(p) = project {
-            let d = p.join(".phoenix/plugins");
+            let d = p.join(".phx/plugins");
             if d.is_dir() {
                 dirs.push(d);
             }
         }
 
-        let d = home.join(".phoenix/plugins");
+        let d = home.join(".phx/plugins");
         if d.is_dir() {
             dirs.push(d);
         }
@@ -884,11 +884,10 @@ fn install_built_plugin(
         )
     })?;
 
-    // Strip phoenix-plugin- prefix for the install directory name
     let short_name = build
         .package_name
-        .strip_prefix("phoenix-plugin-")
-        .or_else(|| build.package_name.strip_prefix("phoenix_plugin_"))
+        .strip_prefix("phx-plugin-")
+        .or_else(|| build.package_name.strip_prefix("phx_plugin_"))
         .unwrap_or(&build.package_name);
 
     let install_dir = install_base.join(short_name);
@@ -1056,7 +1055,7 @@ mod tests {
     #[test]
     fn discover_dirs_finds_project_dir() {
         let project = tempfile::tempdir().unwrap();
-        let plugin_dir = project.path().join(".phoenix/plugins");
+        let plugin_dir = project.path().join(".phx/plugins");
         std::fs::create_dir_all(&plugin_dir).unwrap();
 
         let dirs = PluginRuntime::discover_dirs(Some(project.path()), Path::new("/nonexistent"));

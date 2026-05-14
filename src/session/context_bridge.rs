@@ -1,4 +1,4 @@
-use phoenix_shared::context_types::{
+use phx_shared::context_types::{
     ContextMessage, ContextMutation, ContextToolCall, ContextToolResult, SessionContext,
 };
 

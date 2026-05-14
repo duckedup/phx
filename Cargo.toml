@@ -1,8 +1,8 @@
 [workspace]
 members = [
     ".",
-    "crates/phoenix-shared",
-    "crates/phoenix-plugin-sdk",
+    "crates/phx-shared",
+    "crates/phx-plugin-sdk",
     "examples/plugins/now",
     "examples/plugins/plan",
     "examples/plugins/review",
@@ -11,14 +11,15 @@ members = [
 ]
 
 [package]
-name = "phoenix"
+name = "phx"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "A lightweight, fast, minimalistic agent harness"
+repository = "https://github.com/duckedup/phx"
 
 [[bin]]
-name = "phoenix"
+name = "phx"
 path = "src/main.rs"
 
 [dependencies]
@@ -46,7 +47,7 @@ libc = "0.2"
 glob = "0.3"
 base64 = "0.22.1"
 ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }
-phoenix-shared = { path = "crates/phoenix-shared" }
+phx-shared = { path = "crates/phx-shared" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -20,7 +20,7 @@ pub fn install_panic_hook() {
         let log_path = write_crash_log(&crash_report);
 
         // Print to stderr so the user sees it
-        eprintln!("\n\x1b[1;31mPhoenix crashed.\x1b[0m\n");
+        eprintln!("\n\x1b[1;31mphx crashed.\x1b[0m\n");
         eprintln!("{crash_report}");
         if let Some(path) = log_path {
             eprintln!("\x1b[2mCrash log saved to: {}\x1b[0m\n", path.display());
@@ -67,7 +67,7 @@ fn write_crash_log(report: &str) -> Option<std::path::PathBuf> {
     let path = logs_dir.join(&filename);
 
     let mut file = fs::File::create(&path).ok()?;
-    writeln!(file, "phoenix crash report").ok()?;
+    writeln!(file, "phx crash report").ok()?;
     writeln!(file, "time: {}", chrono::Utc::now().to_rfc3339()).ok()?;
     writeln!(file, "version: {}", env!("CARGO_PKG_VERSION")).ok()?;
     writeln!(file).ok()?;

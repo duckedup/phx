@@ -27,7 +27,7 @@ pub enum ConvEvent {
     InteractiveUi {
         call_id: String,
         tool_name: String,
-        fields: Vec<phoenix_shared::ui_field_types::UiField>,
+        fields: Vec<phx_shared::ui_field_types::UiField>,
         response_tx: tokio::sync::oneshot::Sender<Option<String>>,
     },
     ContextLoaded(Vec<String>),

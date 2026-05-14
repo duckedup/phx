@@ -42,7 +42,7 @@ fn config_files(explicit: Option<&Path>) -> Vec<PathBuf> {
 
 /// Load configuration with layered merging.
 ///
-/// Reads user (`~/.phoenix/phoenix.json`), project (`.phoenix/phoenix.json`),
+/// Reads user (`~/.phx/phx.json`), project (`.phx/phx.json`),
 /// and optionally an explicit path. Later layers win on a per-key basis.
 /// Missing files are silently skipped. After merging, env-var auth fallbacks
 /// are applied to the active provider.
@@ -424,9 +424,9 @@ mod tests {
         let files = config_files(None);
         assert!(files.len() >= 2);
         // First should be user config
-        assert!(files[0].ends_with("phoenix.json"));
+        assert!(files[0].ends_with("phx.json"));
         // Second should be project config
-        assert!(files[1].ends_with("phoenix.json"));
+        assert!(files[1].ends_with("phx.json"));
     }
 
     #[test]

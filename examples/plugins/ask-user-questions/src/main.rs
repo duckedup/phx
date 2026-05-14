@@ -1,8 +1,8 @@
-use phoenix_plugin_sdk::ui_field_types::{UiField as ToolUiField, UiOption};
-use phoenix_plugin_sdk::{tool, ToolOutput};
+use phx_plugin_sdk::ui_field_types::{UiField as ToolUiField, UiOption};
+use phx_plugin_sdk::{tool, ToolOutput};
 
 tool! {
-    name: "phoenix-plugin-ask-user-questions",
+    name: "phx-plugin-ask-user-questions",
     version: "0.1.0",
     tools: [
         {

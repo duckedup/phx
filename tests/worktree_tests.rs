@@ -1,4 +1,4 @@
-use phoenix::worktree::{MergeStrategy, WorktreeManager};
+use phx::worktree::{MergeStrategy, WorktreeManager};
 use tempfile::TempDir;
 
 fn init_test_repo() -> TempDir {
@@ -51,7 +51,7 @@ fn create_and_list_worktree() {
 
     let info = mgr.create("c-01").unwrap();
     assert!(info.path.exists());
-    assert_eq!(info.branch, "phoenix/agent/c-01");
+    assert_eq!(info.branch, "phx/agent/c-01");
     assert_eq!(info.child_id, "c-01");
 
     let active = mgr.list().unwrap();

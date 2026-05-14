@@ -1260,7 +1260,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "phoenix"
+name = "phx"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1277,7 +1277,7 @@ dependencies = [
  "glob",
  "libc",
  "parking_lot",
- "phoenix-shared",
+ "phx-shared",
  "pin-project-lite",
  "predicates",
  "pretty_assertions",
@@ -1295,57 +1295,57 @@ dependencies = [
 ]
 
 [[package]]
-name = "phoenix-plugin-ask-user-questions"
+name = "phx-plugin-ask-user-questions"
 version = "0.1.0"
 dependencies = [
- "phoenix-plugin-sdk",
+ "phx-plugin-sdk",
  "serde_json",
 ]
 
 [[package]]
-name = "phoenix-plugin-feature"
+name = "phx-plugin-feature"
 version = "0.1.0"
 dependencies = [
- "phoenix-plugin-sdk",
+ "phx-plugin-sdk",
  "serde_json",
 ]
 
 [[package]]
-name = "phoenix-plugin-now"
+name = "phx-plugin-now"
 version = "0.1.0"
 dependencies = [
- "phoenix-plugin-sdk",
+ "phx-plugin-sdk",
  "serde_json",
 ]
 
 [[package]]
-name = "phoenix-plugin-plan"
+name = "phx-plugin-plan"
 version = "0.1.0"
 dependencies = [
- "phoenix-plugin-sdk",
+ "phx-plugin-sdk",
  "serde_json",
 ]
 
 [[package]]
-name = "phoenix-plugin-review"
+name = "phx-plugin-review"
 version = "0.1.0"
 dependencies = [
- "phoenix-plugin-sdk",
+ "phx-plugin-sdk",
  "serde_json",
 ]
 
 [[package]]
-name = "phoenix-plugin-sdk"
+name = "phx-plugin-sdk"
 version = "0.3.0"
 dependencies = [
  "clap",
- "phoenix-shared",
+ "phx-shared",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "phoenix-shared"
+name = "phx-shared"
 version = "0.1.0"
 dependencies = [
  "serde",
