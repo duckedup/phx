@@ -23,37 +23,34 @@ pub fn user_home() -> PathBuf {
     home_dir()
 }
 
-/// Returns the Phoenix home directory: `~/.phoenix`.
-///
-/// Uses `dirs::home_dir()` to locate the user home, or the test override if
-/// set via `set_home_override`.
+/// Returns the phx home directory: `~/.phx`.
 pub fn config_dir() -> PathBuf {
-    home_dir().join(".phoenix")
+    home_dir().join(".phx")
 }
 
-/// Returns the user-level config file: `~/.phoenix/phoenix.json`.
+/// Returns the user-level config file: `~/.phx/phx.json`.
 pub fn user_config_file() -> PathBuf {
-    config_dir().join("phoenix.json")
+    config_dir().join("phx.json")
 }
 
-/// Returns the project-level config file: `.phoenix/phoenix.json` relative to
+/// Returns the project-level config file: `.phx/phx.json` relative to
 /// the current working directory.
 pub fn project_config_file() -> PathBuf {
-    PathBuf::from(".phoenix").join("phoenix.json")
+    PathBuf::from(".phx").join("phx.json")
 }
 
-/// Returns the Phoenix data directory: `~/.phoenix`.
+/// Returns the phx data directory: `~/.phx`.
 pub fn data_dir() -> PathBuf {
     config_dir()
 }
 
-/// Returns the sessions directory: `~/.phoenix/sessions`.
+/// Returns the sessions directory: `~/.phx/sessions`.
 pub fn sessions_dir() -> PathBuf {
     config_dir().join("sessions")
 }
 
 /// Returns a project-specific sessions directory derived from the cwd basename:
-/// `~/.phoenix/sessions/<basename>`.
+/// `~/.phx/sessions/<basename>`.
 ///
 /// If the cwd has no file name component (e.g. `/`), the directory name
 /// `"_root"` is used instead.
@@ -67,43 +64,43 @@ pub fn project_sessions_dir(cwd: &Path) -> PathBuf {
 
 /// Returns the runtime directory.
 ///
-/// Tries `$XDG_RUNTIME_DIR` first, then falls back to `/tmp/phoenix-<uid>`.
+/// Tries `$XDG_RUNTIME_DIR` first, then falls back to `/tmp/phx-<uid>`.
 pub fn runtime_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR")
         && !xdg.is_empty()
     {
         return PathBuf::from(xdg);
     }
-    // Fallback: /tmp/phoenix-<uid>
+    // Fallback: /tmp/phx-<uid>
     // SAFETY: getuid() is a trivial POSIX syscall with no arguments.
     let uid = unsafe { libc::getuid() };
-    PathBuf::from(format!("/tmp/phoenix-{uid}"))
+    PathBuf::from(format!("/tmp/phx-{uid}"))
 }
 
-/// Returns the RPC socket path: `<runtime_dir>/phoenix.sock`.
+/// Returns the RPC socket path: `<runtime_dir>/phx.sock`.
 pub fn rpc_socket_path() -> PathBuf {
-    runtime_dir().join("phoenix.sock")
+    runtime_dir().join("phx.sock")
 }
 
-/// Returns the logs directory: `~/.phoenix/logs`.
+/// Returns the logs directory: `~/.phx/logs`.
 pub fn logs_dir() -> PathBuf {
     config_dir().join("logs")
 }
 
-/// Returns the history file path: `~/.phoenix/history`.
+/// Returns the history file path: `~/.phx/history`.
 pub fn history_file() -> PathBuf {
     config_dir().join("history")
 }
 
-/// Returns the user-level agents directory: `~/.phoenix/agents`.
+/// Returns the user-level agents directory: `~/.phx/agents`.
 pub fn user_agents_dir() -> PathBuf {
     config_dir().join("agents")
 }
 
-/// Returns the project-level agents directory: `.phoenix/agents` relative to
+/// Returns the project-level agents directory: `.phx/agents` relative to
 /// the given project root.
 pub fn project_agents_dir(project: &Path) -> PathBuf {
-    project.join(".phoenix/agents")
+    project.join(".phx/agents")
 }
 
 // ---------------------------------------------------------------------------
@@ -129,11 +126,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_dir_ends_with_phoenix() {
+    fn config_dir_ends_with_phx() {
         let d = config_dir();
         assert!(
-            d.ends_with(".phoenix"),
-            "expected path ending in .phoenix, got {:?}",
+            d.ends_with(".phx"),
+            "expected path ending in .phx, got {:?}",
             d
         );
     }
@@ -141,22 +138,22 @@ mod tests {
     #[test]
     fn user_config_file_is_json() {
         let f = user_config_file();
-        assert_eq!(f.file_name().unwrap(), "phoenix.json");
+        assert_eq!(f.file_name().unwrap(), "phx.json");
     }
 
     #[test]
     fn project_config_file_is_relative() {
         let f = project_config_file();
         assert!(f.is_relative());
-        assert_eq!(f, PathBuf::from(".phoenix/phoenix.json"));
+        assert_eq!(f, PathBuf::from(".phx/phx.json"));
     }
 
     #[test]
     fn sessions_dir_under_config() {
         let s = sessions_dir();
         assert!(
-            s.ends_with(".phoenix/sessions"),
-            "expected path ending in .phoenix/sessions, got {:?}",
+            s.ends_with(".phx/sessions"),
+            "expected path ending in .phx/sessions, got {:?}",
             s
         );
     }
@@ -184,7 +181,7 @@ mod tests {
     #[test]
     fn rpc_socket_path_is_sock() {
         let p = rpc_socket_path();
-        assert_eq!(p.file_name().unwrap(), "phoenix.sock");
+        assert_eq!(p.file_name().unwrap(), "phx.sock");
     }
 
     #[test]
@@ -192,8 +189,8 @@ mod tests {
         let h = history_file();
         assert_eq!(h.file_name().unwrap(), "history");
         assert!(
-            h.ends_with(".phoenix/history"),
-            "expected path ending in .phoenix/history, got {:?}",
+            h.ends_with(".phx/history"),
+            "expected path ending in .phx/history, got {:?}",
             h
         );
     }
@@ -204,14 +201,14 @@ mod tests {
         set_home_override(tmp.path());
 
         let d = config_dir();
-        assert_eq!(d, tmp.path().join(".phoenix"));
+        assert_eq!(d, tmp.path().join(".phx"));
 
         clear_home_override();
     }
 
     #[test]
     fn runtime_dir_fallback() {
-        // When XDG_RUNTIME_DIR is not set, we should get /tmp/phoenix-<uid>
+        // When XDG_RUNTIME_DIR is not set, we should get /tmp/phx-<uid>
         let rd = runtime_dir();
         // Just verify it's a valid path; the exact value depends on env
         assert!(!rd.as_os_str().is_empty());

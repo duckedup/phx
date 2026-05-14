@@ -60,7 +60,7 @@ struct StoreData {
 /// File-backed store for todos and the tool audit log.
 ///
 /// All mutations acquire an **exclusive file lock** (via `fs2`) so that
-/// concurrent processes (e.g. multiple phoenix sessions in the same project)
+/// concurrent processes (e.g. multiple phx sessions in the same project)
 /// cannot corrupt the JSON file.  Reads acquire a **shared lock** so they
 /// can proceed concurrently with each other but not with writes.
 #[derive(Debug, Clone)]

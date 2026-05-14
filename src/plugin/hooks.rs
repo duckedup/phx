@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 use async_trait::async_trait;
 
-pub use phoenix_shared::hook_types::{HookAction, HookEvent};
+pub use phx_shared::hook_types::{HookAction, HookEvent};
 
 use super::handle::PluginHandle;
 

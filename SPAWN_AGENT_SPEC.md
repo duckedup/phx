@@ -6,7 +6,7 @@
 
 ## Problem
 
-Phoenix's DESIGN.md specifies orchestration tools (`spawn_session`, `check_sessions`, `collect_session`, `cancel_session`) that work within a single provider. But the real power move is **cross-provider spawning**: a Claude Opus orchestrator spawning OpenAI o3 workers, Gemini researchers, and local Ollama coders — each on the model best suited to its subtask.
+phx's DESIGN.md specifies orchestration tools (`spawn_session`, `check_sessions`, `collect_session`, `cancel_session`) that work within a single provider. But the real power move is **cross-provider spawning**: a Claude Opus orchestrator spawning OpenAI o3 workers, Gemini researchers, and local Ollama coders — each on the model best suited to its subtask.
 
 The existing `SessionPool` in `src/session/orchestration.rs` is a stub. It tracks child state but never actually runs a child session. This spec fills that gap and extends it to support heterogeneous model selection.
 
@@ -90,8 +90,8 @@ Creates a child agent session, starts it running, returns immediately with an ID
   "provider": "gpt",
   "model": "o3",
   "status": "queued",
-  "worktree": "/Users/austin/Projects/.phoenix-worktrees/phoenix.c-a3f2dd",
-  "branch": "phoenix/agent/c-a3f2dd"
+  "worktree": "/Users/austin/Projects/.phx-worktrees/phx.c-a3f2dd",
+  "branch": "phx/agent/c-a3f2dd"
 }
 ```
 
@@ -180,7 +180,7 @@ Retrieve the final output from a completed child. Fails if still running.
   "tool_calls": 5,
   "elapsed_s": 32.1,
   "worktree": {
-    "branch": "phoenix/agent/c-02",
+    "branch": "phx/agent/c-02",
     "files_changed": 3,
     "insertions": 47,
     "deletions": 12,
@@ -264,7 +264,7 @@ This uses worktrunk's merge operation under the hood — squash, rebase, or merg
 
 ### Worktree Isolation (via embedded worktrunk)
 
-Phoenix embeds [worktrunk](https://worktrunk.dev) as a Rust library dependency (not a CLI subprocess). Worktrunk provides git worktree management with a library crate gated behind a `cli` feature — we depend on the library without pulling in terminal UI deps.
+phx embeds [worktrunk](https://worktrunk.dev) as a Rust library dependency (not a CLI subprocess). Worktrunk provides git worktree management with a library crate gated behind a `cli` feature — we depend on the library without pulling in terminal UI deps.
 
 ```toml
 # Cargo.toml
@@ -286,9 +286,9 @@ Git worktrees solve this at the filesystem level. Each worktree is a full checko
 ```
 spawn_agent(prompt, worktree=true)
 │
-├── 1. Create branch: phoenix/agent/{child_id}
+├── 1. Create branch: phx/agent/{child_id}
 ├── 2. Create worktree via worktrunk::git::Repository
-│       path: {project}/../.phoenix-worktrees/{project}.{child_id}
+│       path: {project}/../.phx-worktrees/{project}.{child_id}
 ├── 3. Run child session with cwd = worktree path
 ├── 4. Child completes → auto-commit changes on its branch
 │
@@ -305,14 +305,14 @@ spawn_agent(prompt, worktree=true)
 
 #### Integration layer: `src/worktree.rs`
 
-A thin wrapper around worktrunk's library API, scoped to what Phoenix needs:
+A thin wrapper around worktrunk's library API, scoped to what phx needs:
 
 ```rust
 use std::path::{Path, PathBuf};
 
 pub struct WorktreeManager {
     repo_root: PathBuf,
-    worktree_base: PathBuf,  // e.g., ../.phoenix-worktrees/
+    worktree_base: PathBuf,  // e.g., ../.phx-worktrees/
 }
 
 impl WorktreeManager {
@@ -333,28 +333,28 @@ pub struct MergeResult { pub commit: String, pub files_changed: usize, pub confl
 
 ```
 ~/Projects/
-├── phoenix/                    # main repo
-├── .phoenix-worktrees/
-│   ├── phoenix.c-01/           # child c-01's worktree
-│   ├── phoenix.c-02/           # child c-02's worktree
-│   └── phoenix.c-03/           # child c-03's worktree
+├── phx/                    # main repo
+├── .phx-worktrees/
+│   ├── phx.c-01/           # child c-01's worktree
+│   ├── phx.c-02/           # child c-02's worktree
+│   └── phx.c-03/           # child c-03's worktree
 ```
 
 #### When NOT to use worktrees
 
 - **Read-only tasks** (research, analysis, code review) — set `worktree: false`
 - **Tasks that don't touch files** (API calls, web search) — set `worktree: false`
-- **Non-git projects** — worktrees require git; Phoenix falls back to shared cwd
+- **Non-git projects** — worktrees require git; phx falls back to shared cwd
 
 Default: `worktree: true` for any child with write/edit tools in its profile, `worktree: false` for read-only profiles.
 
 #### Auto-commit on completion
 
-When a child completes in a worktree, Phoenix auto-commits any uncommitted changes on the child's branch. The commit message: `phoenix: agent {child_id} — {first_line_of_prompt}`.
+When a child completes in a worktree, phx auto-commits any uncommitted changes on the child's branch. The commit message: `phx: agent {child_id} — {first_line_of_prompt}`.
 
 #### Build cache sharing
 
-Worktrunk supports build cache sharing between worktrees. Phoenix sets this up automatically so `cargo build` in one worktree reuses artifacts from others.
+Worktrunk supports build cache sharing between worktrees. phx sets this up automatically so `cargo build` in one worktree reuses artifacts from others.
 
 ### Provider Resolution
 
@@ -472,7 +472,7 @@ pub enum SessionEvent {
 
 ## Observability — OTEL Tracing
 
-Phoenix already has OTEL infrastructure (`src/otel/`) with a ring buffer, broadcast subscriber, and span factory functions (`session_span`, `provider_span`, `tool_span`). These span factories exist but **are not yet wired into the agent loop**. This spec requires wiring them up for both the main agent and all spawned children.
+phx already has OTEL infrastructure (`src/otel/`) with a ring buffer, broadcast subscriber, and span factory functions (`session_span`, `provider_span`, `tool_span`). These span factories exist but **are not yet wired into the agent loop**. This spec requires wiring them up for both the main agent and all spawned children.
 
 ### Span Hierarchy
 
@@ -754,7 +754,7 @@ Build on Josh's plugin system (`src/plugin/`). The orchestrate plugin is a **sub
 
 3. **~~Observability~~** → Resolved: OTEL span hierarchy with `session_span` → `provider_span` → `tool_span`, shared ring buffer, `follows_from` links between parent and child spans.
 
-4. **Cost attribution.** Each provider's API key handles its own billing. Phoenix tracks token usage per child for visibility. The aggregate token budget applies across all providers, converted to USD estimates via the cost table in `model_info.rs`.
+4. **Cost attribution.** Each provider's API key handles its own billing. phx tracks token usage per child for visibility. The aggregate token budget applies across all providers, converted to USD estimates via the cost table in `model_info.rs`.
 
 ## Resolved Questions
 

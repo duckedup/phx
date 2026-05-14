@@ -1,7 +1,7 @@
-use phoenix_plugin_sdk::{tool, ToolOutput};
+use phx_plugin_sdk::{tool, ToolOutput};
 
 tool! {
-    name: "phoenix-plugin-now",
+    name: "phx-plugin-now",
     version: "0.1.0",
     tools: [
         {

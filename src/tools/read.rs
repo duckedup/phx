@@ -179,7 +179,7 @@ mod tests {
     async fn read_missing_file() {
         let result = ReadTool
             .invoke(
-                json!({"file_path": "/tmp/nonexistent_phoenix_test_file.txt"}),
+                json!({"file_path": "/tmp/nonexistent_phx_test_file.txt"}),
                 &NoopInputRequester,
             )
             .await;

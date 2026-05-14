@@ -27,17 +27,24 @@ clippy: build-plugins
 
 lint: fmt clippy
 
+check: lint build test
+
 bench:
     @echo "bench: not yet implemented"
 
 package:
     cargo build --release
-    @echo "binary at target/release/phoenix"
+    @echo "binary at target/release/phx"
+
+publish:
+    cargo publish -p phx-shared
+    cargo publish -p phx-plugin-sdk
+    cargo publish -p phx
 
 clean:
     cargo clean
 
-# Build native plugins and install to .phoenix/plugins/
+# Build native plugins and install to .phx/plugins/
 # Scans both plugins/ and examples/plugins/ for Cargo and manifest-only plugins.
 build-plugins:
     #!/usr/bin/env bash
@@ -49,15 +56,15 @@ build-plugins:
         for manifest in "$dir"/*/Cargo.toml; do
             name=$(grep '^name' "$manifest" | head -1 | sed 's/.*"\(.*\)".*/\1/')
             cargo build -p "$name" --release
-            short_name="${name#phoenix-plugin-}"
-            ./target/release/"$name" install .phoenix/plugins/"$short_name"
+            short_name="${name#phx-plugin-}"
+            ./target/release/"$name" install .phx/plugins/"$short_name"
         done
         # Copy manifest-only plugins (no Cargo.toml, just manifest.json)
         for plugin_dir in "$dir"/*/; do
             [ -f "$plugin_dir/manifest.json" ] && [ ! -f "$plugin_dir/Cargo.toml" ] || continue
             name=$(basename "$plugin_dir")
-            mkdir -p .phoenix/plugins/"$name"
-            cp "$plugin_dir"* .phoenix/plugins/"$name"/
+            mkdir -p .phx/plugins/"$name"
+            cp "$plugin_dir"* .phx/plugins/"$name"/
         done
     done
 

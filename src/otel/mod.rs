@@ -71,7 +71,7 @@ pub fn init(cfg: TelemetryInit) -> TelemetryHandle {
     let log_writer = {
         let log_dir = crate::config::paths::config_dir();
         let _ = std::fs::create_dir_all(&log_dir);
-        let log_path = log_dir.join("phoenix.log");
+        let log_path = log_dir.join("phx.log");
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

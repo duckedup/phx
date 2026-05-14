@@ -251,7 +251,7 @@ pub fn discover_layered(
 
     if let Some(p) = project_dir {
         add(scan_skills_dir(
-            &p.join(".phoenix/skills"),
+            &p.join(".phx/skills"),
             SkillSource::Project,
         ));
         add(scan_skills_dir(
@@ -261,7 +261,7 @@ pub fn discover_layered(
     }
 
     add(scan_skills_dir(
-        &user_home.join(".phoenix/skills"),
+        &user_home.join(".phx/skills"),
         SkillSource::User,
     ));
     add(scan_skills_dir(
@@ -466,8 +466,8 @@ mod tests {
     fn layered_discovery() {
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();
-        skill_with_desc(&home.path().join(".phoenix/skills"), "a", "Skill A");
-        skill_with_desc(&project.path().join(".phoenix/skills"), "b", "Skill B");
+        skill_with_desc(&home.path().join(".phx/skills"), "a", "Skill A");
+        skill_with_desc(&project.path().join(".phx/skills"), "b", "Skill B");
 
         let skills = discover_layered(Some(project.path()), home.path(), &[]);
         assert_eq!(skills.len(), 2);
@@ -594,13 +594,9 @@ mod tests {
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();
 
+        skill_with_desc(&home.path().join(".phx/skills"), "shared", "User version");
         skill_with_desc(
-            &home.path().join(".phoenix/skills"),
-            "shared",
-            "User version",
-        );
-        skill_with_desc(
-            &project.path().join(".phoenix/skills"),
+            &project.path().join(".phx/skills"),
             "shared",
             "Project version",
         );
@@ -612,15 +608,15 @@ mod tests {
     }
 
     #[test]
-    fn phoenix_takes_precedence_over_agents_same_scope() {
+    fn phx_takes_precedence_over_agents_same_scope() {
         let home = tempdir().unwrap();
 
-        skill_with_desc(&home.path().join(".phoenix/skills"), "dupe", "From phoenix");
+        skill_with_desc(&home.path().join(".phx/skills"), "dupe", "From phx");
         skill_with_desc(&home.path().join(".agents/skills"), "dupe", "From agents");
 
         let skills = discover_layered(None, home.path(), &[]);
         assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].description, "From phoenix");
+        assert_eq!(skills[0].description, "From phx");
     }
 
     #[test]
@@ -649,11 +645,7 @@ mod tests {
     #[test]
     fn catalog_contains_skill_info() {
         let home = tempdir().unwrap();
-        skill_with_desc(
-            &home.path().join(".phoenix/skills"),
-            "my-skill",
-            "Does things",
-        );
+        skill_with_desc(&home.path().join(".phx/skills"), "my-skill", "Does things");
 
         let skills = discover_layered(None, home.path(), &[]);
         let catalog = build_skill_catalog(&skills);

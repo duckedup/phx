@@ -1,9 +1,10 @@
 [package]
-name = "phoenix-shared"
+name = "phx-shared"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Shared types for Phoenix core and plugin SDK"
+description = "Shared types for phx core and plugin SDK"
+repository = "https://github.com/duckedup/phx"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,9 +1,9 @@
-# Phoenix — Agent Harness Design
+# phx — Agent Harness Design
 
 > Status: Draft
 > Last updated: 2026-05-01
 
-Phoenix is a lightweight, fast, minimalistic agent harness written in Rust. It provides a runtime for agents (LLM-driven or otherwise) that is explicitly *not* opinionated about model providers or subagent topology. The harness gives you the loop, the I/O, the shared state, and the extension points — you bring the rest.
+phx is a lightweight, fast, minimalistic agent harness written in Rust. It provides a runtime for agents (LLM-driven or otherwise) that is explicitly *not* opinionated about model providers or subagent topology. The harness gives you the loop, the I/O, the shared state, and the extension points — you bring the rest.
 
 ---
 
@@ -15,14 +15,14 @@ Phoenix is a lightweight, fast, minimalistic agent harness written in Rust. It p
 - **Two deployment shapes from one core.** Terminal UI (interactive) and headless RPC (for tooling/CI).
 - **Vibes-mode by default.** No permission prompts. The user is the operator; if they don't trust the agent, they shouldn't run it. (See §7.)
 - **Total visibility.** The user can see everything every agent is doing, in real time, at every level of the session tree. Observability is the contract that makes vibes mode safe. (See §11.)
-- **Configurable orchestration.** Phoenix can be a single agent, or it can drive other agents — but it never spawns a subagent without being told to. Orchestration is a shape the user opts into via config, not a default.
+- **Configurable orchestration.** phx can be a single agent, or it can drive other agents — but it never spawns a subagent without being told to. Orchestration is a shape the user opts into via config, not a default.
 - **Just.** All harness-side commands (build, test, fmt, run, package) flow through a `justfile`. No bespoke shell scripts in the repo root.
-- **Extension over feature creep.** Phoenix exposes hooks; you write the plugin. Model-specific transports, telemetry sinks — all live outside the core.
+- **Extension over feature creep.** phx exposes hooks; you write the plugin. Model-specific transports, telemetry sinks — all live outside the core.
 
 ### Non-Goals
 
-- **MCP.** Phoenix does not support MCP. Not in core, not as a plugin. If you need MCP, use a tool that speaks it.
-- **Tmux integration.** Multi-pane work happens via Phoenix's own tab system inside the TUI.
+- **MCP.** phx does not support MCP. Not in core, not as a plugin. If you need MCP, use a tool that speaks it.
+- **Tmux integration.** Multi-pane work happens via phx's own tab system inside the TUI.
 - **Auto-spawning subagents.** The harness will never decide on its own to fan out. Sub-agent invocation is a user-configured tool, the same as any other tool.
 - **Blanket permission prompts.** No "may I run this command?" UX on every tool call. If a tool is enabled, the agent uses it.
 - **Cross-platform parity on day one.** Linux first; macOS second; Windows is a "patches welcome" target.
@@ -80,16 +80,16 @@ The TUI is a rendering layer on top of the core runtime. The RPC server exposes 
 
 ## 4. Runtime Shapes
 
-Phoenix ships two frontends that both link the same core. They are subcommands of the `phoenix` binary (`phoenix tui`, `phoenix rpc`).
+phx ships two frontends that both link the same core. They are subcommands of the `phx` binary (`phx tui`, `phx rpc`).
 
 ### 4.1 Terminal (TUI) — `ratatui`
 
-- Built on **ratatui** + **crossterm** for rendering. Phoenix owns layout and event routing.
+- Built on **ratatui** + **crossterm** for rendering. phx owns layout and event routing.
 - **Tabs, not panes.** A tab is one session. The user creates tabs explicitly; agents do not. Switching tabs is `Ctrl+Tab` / `Ctrl+Shift+Tab`. A tab can host:
   - A primary agent session.
   - A tool view (e.g., a file diff).
   - A read-only log/observer view.
-- **No tmux.** Phoenix does not shell out to tmux, does not require it, does not integrate with it. If users want tmux *outside* Phoenix, that's their call.
+- **No tmux.** phx does not shell out to tmux, does not require it, does not integrate with it. If users want tmux *outside* phx, that's their call.
 - **No permission prompts.** The TUI displays what an agent is doing in real time and lets the user cancel, but it never asks "approve y/n?".
 - Status line shows: provider, model, token use, and active tool, if any.
 
@@ -115,14 +115,14 @@ A **session** is the unit of agent state: message history, tool registry, and a 
 
 ### 5.1A Session persistence
 
-Sessions persist to disk at `~/.phoenix/sessions/{project}/{session_id}/`, where `{project}` is the basename of the working directory the harness was launched from. The session directory contains:
+Sessions persist to disk at `~/.phx/sessions/{project}/{session_id}/`, where `{project}` is the basename of the working directory the harness was launched from. The session directory contains:
 
 - **`messages.jsonl`** — the conversation history, one JSON object per message. Appended as messages are committed (after each user message, assistant turn, tool call, and tool result). This is the source of truth for session resume.
 - **`state.json`** — session metadata: derived display name, provider+model at session start, token accounting, creation/updated timestamps.
 
 **Resume.** `/resume` lists the persisted sessions for the current project and lets the user pick one to rehydrate. Over RPC, `session.list` returns all persisted sessions for the current project; `session.resume(id)` rehydrates one and replaces the active in-memory session.
 
-Rehydration loads the message history into memory. The agent picks up where the last committed message left off. Because Phoenix appends after every committed message rather than at end-of-turn, partial tool-use rounds are recoverable to the last commit point — the only data lost on a hard kill is whatever was still in the streaming token buffer when the signal arrived.
+Rehydration loads the message history into memory. The agent picks up where the last committed message left off. Because phx appends after every committed message rather than at end-of-turn, partial tool-use rounds are recoverable to the last commit point — the only data lost on a hard kill is whatever was still in the streaming token buffer when the signal arrived.
 
 **Lifecycle.** Sessions are persisted by default. `session.destroy` (RPC) or closing a tab with the destroy keybind removes the session directory. Old sessions are never auto-deleted; the user or a cleanup tool manages retention.
 
@@ -138,7 +138,7 @@ persist = false             # in-memory only; lost on exit
 
 ### 5.2 Agent vs. orchestrator (same machinery)
 
-Phoenix doesn't have separate "agent" and "orchestrator" code paths. There is one loop *per session*. What differs is the **tool set** the session is configured with:
+phx doesn't have separate "agent" and "orchestrator" code paths. There is one loop *per session*. What differs is the **tool set** the session is configured with:
 
 - A plain agent has tools like `read`, `write`, `bash`, `edit`.
 - An orchestrator has, in addition, orchestration tools (see §5A) that let the model manage child agents.
@@ -164,7 +164,7 @@ Three consequences:
 
 ## 5A. Async Orchestration
 
-Orchestration in Phoenix is async-first and cross-provider: the orchestrator fans out work to child agents that run concurrently — potentially on different models from different providers — polls for completion, collects results, and merges changes back. Each child agent runs in an isolated git worktree, fully traced via OTEL.
+Orchestration in phx is async-first and cross-provider: the orchestrator fans out work to child agents that run concurrently — potentially on different models from different providers — polls for completion, collects results, and merges changes back. Each child agent runs in an isolated git worktree, fully traced via OTEL.
 
 ### 5A.1 Orchestration tools
 
@@ -218,21 +218,21 @@ Provider resolution: look up the named profile in `Config.providers`, optionally
 
 ### 5A.4 Worktree isolation (via embedded worktrunk)
 
-Phoenix embeds [worktrunk](https://worktrunk.dev) as a Rust library dependency (`worktrunk = { version = "0.48", default-features = false }` — no CLI deps). Each child agent gets its own git worktree by default, eliminating filesystem conflicts between parallel agents.
+phx embeds [worktrunk](https://worktrunk.dev) as a Rust library dependency (`worktrunk = { version = "0.48", default-features = false }` — no CLI deps). Each child agent gets its own git worktree by default, eliminating filesystem conflicts between parallel agents.
 
 **Why worktrees:** When multiple agents write code in parallel, filesystem conflicts are the #1 failure mode. Agent A writes `src/lib.rs`, Agent B writes `src/lib.rs` → last write wins, work lost. Git worktrees solve this at the filesystem level. Each worktree is a full checkout sharing the same `.git` object store — true isolation with near-zero storage overhead.
 
 **Worktree lifecycle:**
-1. `spawn_agent` creates a branch (`phoenix/agent/{child_id}`) and worktree at `{project}/../.phoenix-worktrees/{project}.{child_id}`.
+1. `spawn_agent` creates a branch (`phx/agent/{child_id}`) and worktree at `{project}/../.phx-worktrees/{project}.{child_id}`.
 2. Child runs with `cwd` set to the worktree path.
-3. On completion, Phoenix auto-commits any uncommitted changes on the child's branch.
+3. On completion, phx auto-commits any uncommitted changes on the child's branch.
 4. `collect_agent` returns a diff summary (files changed, insertions, deletions).
 5. `merge_agent` squashes/rebases/merges the child's branch back into the parent.
 6. Cleanup removes the worktree directory and deletes the branch.
 
 **When not to use worktrees:** Set `worktree: false` for read-only tasks (research, analysis), tasks that don't touch files, or non-git projects. Default: `worktree: true` for any child with write/edit tools in its profile.
 
-**Build cache sharing:** Worktrunk supports sharing build caches between worktrees. Phoenix configures this automatically so `cargo build` in one worktree reuses artifacts from others.
+**Build cache sharing:** Worktrunk supports sharing build caches between worktrees. phx configures this automatically so `cargo build` in one worktree reuses artifacts from others.
 
 ### 5A.5 Context sharing
 
@@ -353,8 +353,8 @@ A user on an 8-core machine runs the orchestrator. The model breaks a task into 
 Config is layered, lowest to highest precedence:
 
 1. Built-in defaults (compiled in).
-2. `~/.phoenix/phoenix.json` — user defaults.
-3. `.phoenix/phoenix.json` — project-local.
+2. `~/.phx/phx.json` — user defaults.
+3. `.phx/phx.json` — project-local.
 4. `--config` CLI flag and env vars.
 5. Per-session overrides at session creation time (via TUI menu or RPC arg).
 
@@ -397,24 +397,24 @@ tools = ["read", "bash", "spawn_agent", "check_agents", "collect_agent", "merge_
 
 [store]
 backend = "beans"          # "beans" | "doltlite" | "memory"
-path = "./.phoenix/store"
+path = "./.phx/store"
 
 [plugins]
 load = []   # dynamic plugins; see §8.1
 ```
 
-Reload semantics: the TUI watches its config file and hot-reloads non-structural changes (prompts, tool lists). Structural changes (provider, store backend) require restart and Phoenix says so explicitly.
+Reload semantics: the TUI watches its config file and hot-reloads non-structural changes (prompts, tool lists). Structural changes (provider, store backend) require restart and phx says so explicitly.
 
 ---
 
 ## 7. Permissions: Vibes Only
 
-Phoenix does not prompt for tool permission. Ever. The philosophy:
+phx does not prompt for tool permission. Ever. The philosophy:
 
 - **Allowlist at config time.** The set of tools a session may call is fixed when the session starts. There is no "elevate" path mid-session — restart with a different config. If a tool is in the session's tool list, the agent can call it unconditionally.
 - **Cancel, don't gate.** The TUI surfaces a live "currently running" indicator with a cancel keybind. RPC clients can call `session.cancel`. This is the user's lever — watch what the agent is doing, and stop it if you don't like it.
 - **Audit, always.** Every tool invocation is appended to the shared store with timestamp, args, and result. No prompts does not mean no record.
-- **Isolation is the OS's job.** If you need hard guardrails — if the consequence of a bad tool call is data loss, credential exposure, or production impact — run Phoenix inside a container, VM, or namespace with filesystem and network restrictions enforced by the OS. The harness does not pretend to be a security boundary. Pattern-matching on serialized arguments cannot reason about shell semantics, command equivalence, or intent. Don't build safety theater into the agent loop; use real isolation where it matters.
+- **Isolation is the OS's job.** If you need hard guardrails — if the consequence of a bad tool call is data loss, credential exposure, or production impact — run phx inside a container, VM, or namespace with filesystem and network restrictions enforced by the OS. The harness does not pretend to be a security boundary. Pattern-matching on serialized arguments cannot reason about shell semantics, command equivalence, or intent. Don't build safety theater into the agent loop; use real isolation where it matters.
 
 If you don't trust the agent with a tool, don't give it the tool. If you give it the tool, let it work.
 
@@ -443,7 +443,7 @@ pub struct ToolResult {
 
 Tools return a complete result from `invoke`. The session loop commits the result to the message history and forwards it to the frontend (TUI renders inline; RPC emits tool result events).
 
-**Truncation.** If a tool's output exceeds `max_output_bytes` (default 512 KiB), Phoenix truncates it and appends a `[truncated]` marker. The truncated version is what enters the conversation history and counts against the context budget. This prevents a single `find /` or verbose build log from consuming the entire context window.
+**Truncation.** If a tool's output exceeds `max_output_bytes` (default 512 KiB), phx truncates it and appends a `[truncated]` marker. The truncated version is what enters the conversation history and counts against the context budget. This prevents a single `find /` or verbose build log from consuming the entire context window.
 
 Tools are registered at session start. Built-in tools live in `src/tools/`. Custom tools implement the `Tool` trait and are registered in the tool registry at build time.
 
@@ -459,7 +459,7 @@ pub trait Provider: Send + Sync {
 }
 ```
 
-The adapter takes the conversation history and tool schemas, makes the provider-specific API call, and returns an async stream that yields Phoenix's internal event types (`Token`, `ToolCall`, `Done`, `Error`). The session loop consumes this stream and stays provider-agnostic.
+The adapter takes the conversation history and tool schemas, makes the provider-specific API call, and returns an async stream that yields phx's internal event types (`Token`, `ToolCall`, `Done`, `Error`). The session loop consumes this stream and stays provider-agnostic.
 
 Day-one providers (shipped in core):
 
@@ -481,7 +481,7 @@ The `opencode_delegate` tool:
 - Takes a prompt and an opencode session config.
 - Spawns (or connects to) an opencode process.
 - Streams opencode's output back as the tool result.
-- Returns the final output to the calling Phoenix session.
+- Returns the final output to the calling phx session.
 
 This fits naturally as a tool the orchestrator (or any session) can call. It avoids forcing a harness-to-harness delegation into the provider interface, where it would create impedance mismatches around tool dispatch, cancellation, and event normalization.
 
@@ -561,11 +561,11 @@ We will start with Beans (or memory, for tests), behind a `Store` interface, and
 
 ## 10. Compaction (Context Window Management)
 
-Every long-running session will eventually approach the model's context limit. Phoenix handles this automatically via **compaction** — reducing the conversation history to fit within budget while preserving the information the agent needs to continue working.
+Every long-running session will eventually approach the model's context limit. phx handles this automatically via **compaction** — reducing the conversation history to fit within budget while preserving the information the agent needs to continue working.
 
 ### 10.1 Mechanics (core-owned)
 
-The session tracks token usage against the active model's context budget. When usage crosses a configurable threshold, Phoenix triggers a compaction pass:
+The session tracks token usage against the active model's context budget. When usage crosses a configurable threshold, phx triggers a compaction pass:
 
 1. **Partition.** The message history is split into three regions:
    - **Pinned head** — the system prompt. Always preserved verbatim.
@@ -601,7 +601,7 @@ Messages can be marked `pinned` by the user (TUI command or RPC call) or by the 
 
 Compaction manages the context window. Token budgets manage *spend*. They are separate concerns with separate config.
 
-A session tracks cumulative tokens sent and received across all provider calls. When a budget threshold is crossed, Phoenix acts:
+A session tracks cumulative tokens sent and received across all provider calls. When a budget threshold is crossed, phx acts:
 
 - **Warn threshold.** The TUI displays a persistent warning in the status line ("session at 80% of token budget"). RPC emits a `session.budget_warning` event. The session continues.
 - **Hard cap.** The session pauses. The TUI shows "token budget exhausted" and offers the user a choice: increase the budget, or end the session. RPC emits `session.budget_exhausted`; the client must call `session.setBudget` with a new limit or `session.destroy` before the loop resumes. The agent is never silently cut off — the user always decides.
@@ -627,7 +627,7 @@ Local providers (`ollama`, `llamacpp`) don't have per-token costs, but the budge
 
 ## 11. Observability
 
-Observability is the point of Phoenix. The harness runs in vibes mode — no permission gates, no safety prompts — because the user can *see everything*. That contract only holds if the observability surface is comprehensive, real-time, and usable at scale (20 concurrent children, not just 2).
+Observability is the point of phx. The harness runs in vibes mode — no permission gates, no safety prompts — because the user can *see everything*. That contract only holds if the observability surface is comprehensive, real-time, and usable at scale (20 concurrent children, not just 2).
 
 ### 11.1 Live visibility (TUI)
 
@@ -645,7 +645,7 @@ Observability is the point of Phoenix. The harness runs in vibes mode — no per
 
 Every tool invocation in the tool log carries a `session_id` and a `parent_session_id` (null for the root orchestrator). This creates a **session tree** — a structured trace of the full fan-out.
 
-`phoenix trace <session_id>` reconstructs and displays the tree:
+`phx trace <session_id>` reconstructs and displays the tree:
 
 ```
 orchestrator (s-00)  [42.1k tokens, 3m12s]
@@ -680,7 +680,7 @@ Token counts per provider call, tool latency, store write latency, child session
 
 ## 12. Error Recovery
 
-Phoenix is "vibes mode" — no permission prompts, no hand-holding. That only works if the harness handles failures without user intervention. There are four failure domains.
+phx is "vibes mode" — no permission prompts, no hand-holding. That only works if the harness handles failures without user intervention. There are four failure domains.
 
 ### 12.1 Provider failures
 
@@ -742,7 +742,7 @@ The TUI and RPC frontends install signal handlers.
 ## 14. Repository Layout (proposed)
 
 ```
-phoenix/
+phx/
 ├── DESIGN.md              # this file
 ├── README.md
 ├── justfile
@@ -771,7 +771,7 @@ phoenix/
 - **M0.5 — Provider parity.** Add `openai`, `ollama`, `gemini`, `vertex`, and `nvidia` provider adapters; share the event-normalization layer; integration tests per provider.
 - **M1 — Sessions & loop.** Real session loop, tool dispatch, cancel semantics, token accounting, context manager (rules, AGENTS.md, compaction), session persistence and resume, token budgets, streaming tool output.
 - **M2 — Orchestration.** Orchestration tools (`spawn_agent`, `check_agents`, `collect_agent`, `merge_agent`, `cancel_agent`); embedded worktrunk for worktree isolation; OTEL tracing for child agents; bidirectional plugin RPC; orchestrate plugin; Tokio task pool; multi-session shared store.
-- **M3 — Polish.** Config hot-reload, `phoenix trace`, benchmarks, packaging.
+- **M3 — Polish.** Config hot-reload, `phx trace`, benchmarks, packaging.
 
 Each milestone ends with: `just test` green, `just bench` recorded, docs updated.
 

@@ -1,6 +1,6 @@
-# Phoenix Plugins
+# phx Plugins
 
-Plugins extend Phoenix with custom slash commands and tools. A plugin is a directory containing a `manifest.json` that declares one or more tools. Tools can be backed by a compiled binary or a shell command.
+Plugins extend phx with custom slash commands and tools. A plugin is a directory containing a `manifest.json` that declares one or more tools. Tools can be backed by a compiled binary or a shell command.
 
 ## Plugin Types
 
@@ -45,13 +45,13 @@ Shell tools run via `sh -c` with `{{param}}` template substitution from the tool
 
 ### Binary plugins
 
-A compiled binary that handles `invoke <tool> <args_json>` and returns JSON output. Built with the `tool!` macro from `phoenix-plugin-sdk`:
+A compiled binary that handles `invoke <tool> <args_json>` and returns JSON output. Built with the `tool!` macro from `phx-plugin-sdk`:
 
 ```rust
-use phoenix_plugin_sdk::{tool, ToolOutput};
+use phx_plugin_sdk::{tool, ToolOutput};
 
 tool! {
-    name: "phoenix-plugin-plan",
+    name: "phx-plugin-plan",
     version: "0.1.0",
     tools: [
         {
@@ -159,7 +159,7 @@ The SDK provides helpers: `ToolOutput::success(msg)`, `ToolOutput::error(msg)`, 
 
 ## Declarative UI Widgets
 
-Plugins can render styled widgets in the chat area using the `phoenix_plugin_sdk::ui` builder:
+Plugins can render styled widgets in the chat area using the `phx_plugin_sdk::ui` builder:
 
 ```
   > Current Time
@@ -169,7 +169,7 @@ Plugins can render styled widgets in the chat area using the `phoenix_plugin_sdk
 ```
 
 ```rust
-use phoenix_plugin_sdk::ui;
+use phx_plugin_sdk::ui;
 
 let widget = ui::bordered("Current Time", &[
     &ui::text("17:30:00 UTC").bold().fg("cyan").build(),
@@ -197,17 +197,17 @@ Colors: `red`, `green`, `yellow`, `blue`, `cyan`, `dim`, `primary`
 
 ## Installation
 
-Plugins are installed to `.phoenix/plugins/<name>/`. The `build-plugins` step handles this automatically:
+Plugins are installed to `.phx/plugins/<name>/`. The `build-plugins` step handles this automatically:
 
 ```bash
 just build-plugins
 ```
 
 This scans both `plugins/` and `examples/plugins/` for:
-- **Cargo plugins** — builds with `cargo build --release`, then runs `<binary> install .phoenix/plugins/<name>`
-- **Manifest-only plugins** — copies the directory to `.phoenix/plugins/<name>/`
+- **Cargo plugins** — builds with `cargo build --release`, then runs `<binary> install .phx/plugins/<name>`
+- **Manifest-only plugins** — copies the directory to `.phx/plugins/<name>/`
 
-Plugins can also be installed manually by placing a directory with `manifest.json` (and optionally a binary) in `.phoenix/plugins/` or `~/.phoenix/plugins/`.
+Plugins can also be installed manually by placing a directory with `manifest.json` (and optionally a binary) in `.phx/plugins/` or `~/.phx/plugins/`.
 
 ## Examples
 
@@ -222,5 +222,5 @@ Plugins can also be installed manually by placing a directory with `manifest.jso
 ## Development Loop
 
 1. Edit your plugin (source code or `manifest.json`)
-2. Type `/reload` in Phoenix (builds + installs + reloads all plugins)
+2. Type `/reload` in phx (builds + installs + reloads all plugins)
 3. Test your slash command

@@ -79,7 +79,7 @@ pub fn compute_display_lines(
             (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
             ("✦ ".to_string(), Style::default().fg(theme.warning)),
             (
-                "phoenix".to_string(),
+                "phx".to_string(),
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),

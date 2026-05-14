@@ -136,7 +136,7 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<(), ConfigError> {
     // Create a temp file in the same directory (same filesystem) so rename is
     // atomic.
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let tmp_path = parent.join(format!(".phoenix-cfg-{}.tmp", std::process::id()));
+    let tmp_path = parent.join(format!(".phx-cfg-{}.tmp", std::process::id()));
 
     std::fs::write(&tmp_path, data).map_err(|e| ConfigError::io(&tmp_path, e))?;
 
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn roundtrip_default_config() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("phoenix.json");
+        let path = tmp.path().join("phx.json");
 
         let mut cfg = Config::default();
         cfg.providers.insert(
@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn save_creates_parent_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("deep").join("nested").join("phoenix.json");
+        let path = tmp.path().join("deep").join("nested").join("phx.json");
 
         let cfg = Config::default();
         save(&cfg, &path).unwrap();
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn save_provider_creates_new_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("phoenix.json");
+        let path = tmp.path().join("phx.json");
 
         let profile = ProviderProfile {
             kind: ProviderKind::OpenAI,
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn save_provider_preserves_other_sections() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("phoenix.json");
+        let path = tmp.path().join("phx.json");
 
         // Write initial config with a session and a provider.
         let mut cfg = Config::default();
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn save_provider_replaces_existing() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("phoenix.json");
+        let path = tmp.path().join("phx.json");
 
         // Initial provider.
         let p1 = ProviderProfile {
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn save_output_is_pretty_printed() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("phoenix.json");
+        let path = tmp.path().join("phx.json");
 
         let mut cfg = Config::default();
         cfg.providers
@@ -330,7 +330,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("phoenix.json");
+        let path = tmp.path().join("phx.json");
 
         let cfg = Config::default();
         save(&cfg, &path).unwrap();
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn auth_entry_serializes_correctly_in_saved_config() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("phoenix.json");
+        let path = tmp.path().join("phx.json");
 
         let mut cfg = Config::default();
         cfg.providers.insert(

@@ -1,12 +1,13 @@
 [package]
-name = "phoenix-plugin-sdk"
+name = "phx-plugin-sdk"
 version = "0.3.0"
 edition = "2021"
 license = "MIT"
-description = "SDK for building Phoenix native tool plugins"
+description = "SDK for building phx native tool plugins"
+repository = "https://github.com/duckedup/phx"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-phoenix-shared = { path = "../phoenix-shared" }
+phx-shared = { path = "../phx-shared" }

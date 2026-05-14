@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use phoenix_shared::hook_types::HookAction;
+use phx_shared::hook_types::HookAction;
 
 use crate::session::skills::{Skill, load_skill_body};
 

@@ -67,7 +67,7 @@ impl WorktreeManager {
         let worktree_base = repo_root
             .parent()
             .unwrap_or(Path::new("/tmp"))
-            .join(format!(".phoenix-worktrees/{project_name}"));
+            .join(format!(".phx-worktrees/{project_name}"));
 
         Ok(Self {
             repo_root,
@@ -108,7 +108,7 @@ impl WorktreeManager {
     }
 
     fn branch_name(child_id: &str) -> String {
-        format!("phoenix/agent/{child_id}")
+        format!("phx/agent/{child_id}")
     }
 
     fn worktree_path(&self, child_id: &str) -> PathBuf {
@@ -216,7 +216,7 @@ impl WorktreeManager {
         cleanup: bool,
     ) -> Result<MergeResult, WorktreeError> {
         let branch = Self::branch_name(child_id);
-        let auto_msg = format!("phoenix: merge agent {child_id}");
+        let auto_msg = format!("phx: merge agent {child_id}");
         let msg = message.unwrap_or(&auto_msg);
 
         let result = match strategy {
@@ -285,7 +285,7 @@ impl WorktreeManager {
                 current_branch = Some(branch_ref.to_string());
             } else if line.is_empty() {
                 if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take())
-                    && let Some(child_id) = branch.strip_prefix("phoenix/agent/")
+                    && let Some(child_id) = branch.strip_prefix("phx/agent/")
                 {
                     result.push(WorktreeInfo {
                         path,
@@ -299,7 +299,7 @@ impl WorktreeManager {
         }
 
         if let (Some(path), Some(branch)) = (current_path, current_branch)
-            && let Some(child_id) = branch.strip_prefix("phoenix/agent/")
+            && let Some(child_id) = branch.strip_prefix("phx/agent/")
         {
             result.push(WorktreeInfo {
                 path,

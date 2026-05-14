@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use phoenix::plugin::plugin_runtime::PluginRuntime;
+use phx::plugin::plugin_runtime::PluginRuntime;
 
 #[test]
 fn runtime_starts_empty() {
@@ -64,7 +64,7 @@ fn install_plugin(binary_name: &str, plugin_name: &str) -> Option<tempfile::Temp
 
 #[test]
 fn load_and_invoke_plan_plugin() {
-    let Some(base) = install_plugin("phoenix-plugin-plan", "plan") else {
+    let Some(base) = install_plugin("phx-plugin-plan", "plan") else {
         return;
     };
 
@@ -85,7 +85,7 @@ fn load_and_invoke_plan_plugin() {
 
 #[test]
 fn load_and_invoke_now_tool_plugin() {
-    let Some(base) = install_plugin("phoenix-plugin-now", "now") else {
+    let Some(base) = install_plugin("phx-plugin-now", "now") else {
         return;
     };
 

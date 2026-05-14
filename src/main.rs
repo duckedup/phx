@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "phoenix",
+    name = "phx",
     version,
     about = "A lightweight, fast, minimalistic agent harness"
 )]
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     let _otel_handle = otel::init(otel::TelemetryInit {
         otlp_endpoint: None,
-        service_name: "phoenix".into(),
+        service_name: "phx".into(),
         ring_capacity: 4096,
     });
 

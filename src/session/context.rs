@@ -163,10 +163,10 @@ fn discover_rules_in(dir: &Path, source: RuleSource) -> Vec<Rule> {
 }
 
 pub fn discover_rules(home: &Path, project: &Path) -> Vec<Rule> {
-    let phoenix_home = home.join(".phoenix");
-    let phoenix_project = project.join(".phoenix");
-    let mut all = discover_rules_in(&phoenix_home, RuleSource::Global);
-    all.extend(discover_rules_in(&phoenix_project, RuleSource::Project));
+    let phx_home = home.join(".phx");
+    let phx_project = project.join(".phx");
+    let mut all = discover_rules_in(&phx_home, RuleSource::Global);
+    all.extend(discover_rules_in(&phx_project, RuleSource::Project));
     all
 }
 
@@ -657,11 +657,11 @@ mod tests {
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();
 
-        let global_rules = home.path().join(".phoenix/rules");
+        let global_rules = home.path().join(".phx/rules");
         std::fs::create_dir_all(&global_rules).unwrap();
         std::fs::write(global_rules.join("style.md"), "Always use tabs.").unwrap();
 
-        let project_rules = project.path().join(".phoenix/rules");
+        let project_rules = project.path().join(".phx/rules");
         std::fs::create_dir_all(&project_rules).unwrap();
         std::fs::write(
             project_rules.join("testing.md"),
@@ -754,13 +754,13 @@ mod tests {
         let project = PathBuf::from("/project");
         let rules = vec![
             Rule {
-                path: PathBuf::from("/home/.phoenix/rules/style.md"),
+                path: PathBuf::from("/home/.phx/rules/style.md"),
                 content: "Use tabs.".into(),
                 globs: None,
                 source: RuleSource::Global,
             },
             Rule {
-                path: PathBuf::from("/project/.phoenix/rules/testing.md"),
+                path: PathBuf::from("/project/.phx/rules/testing.md"),
                 content: "Use vitest.".into(),
                 globs: Some(vec!["**/*.test.ts".into()]),
                 source: RuleSource::Project,
@@ -830,7 +830,7 @@ mod tests {
     fn context_state_deduplication() {
         let project = PathBuf::from("/project");
         let rules = vec![Rule {
-            path: PathBuf::from("/home/.phoenix/rules/style.md"),
+            path: PathBuf::from("/home/.phx/rules/style.md"),
             content: "Use tabs.".into(),
             globs: None,
             source: RuleSource::Global,

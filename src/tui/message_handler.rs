@@ -451,7 +451,7 @@ pub fn handle_command(app: &mut App, input: &str) {
                     &crate::config::paths::user_home(),
                 );
                 // Ensure project plugin dir is included (install may create it)
-                let project_plugin_dir = app.project.join(".phoenix/plugins");
+                let project_plugin_dir = app.project.join(".phx/plugins");
                 if !plugin_dirs.contains(&project_plugin_dir) {
                     plugin_dirs.push(project_plugin_dir);
                 }
@@ -654,10 +654,10 @@ pub fn build_conductor_picker_items(
     items
 }
 
-const CONDUCTOR_TAG: &str = "[phoenix:conductor]";
+const CONDUCTOR_TAG: &str = "[phx:conductor]";
 
 const CONDUCTOR_SYSTEM_PROMPT: &str = "\
-[phoenix:conductor]\n\
+[phx:conductor]\n\
 You are now the CONDUCTOR.\n\
 \n\
 You have access to these orchestration tools:\n\
@@ -884,7 +884,7 @@ fn validate_jira_tracker() -> TrackerStatus {
 fn spec_mode_context() -> String {
     "Task coordination: No ticket system configured — using spec file mode.\n\
      When decomposing work, the conductor will create a spec file for each sub-task \
-     in the project directory (e.g. `.phoenix/specs/task-name.md`). Each spec file \
+     in the project directory (e.g. `.phx/specs/task-name.md`). Each spec file \
      contains the task description, acceptance criteria, and status.\n\
      \n\
      Spec file format:\n\
@@ -1342,7 +1342,7 @@ pub async fn send_message(
                             .and_then(|rt| rt.lock().request_dynamic_ui(&tc.name, &tc.args_json));
 
                         if let Some(fields) = dynamic_ui {
-                            let config = phoenix_shared::ui_field_types::ToolUiConfig::new(fields);
+                            let config = phx_shared::ui_field_types::ToolUiConfig::new(fields);
                             let form_state = crate::tui::ui::tool_form::ToolFormState::from_ui(
                                 tc.name.clone(),
                                 String::new(),

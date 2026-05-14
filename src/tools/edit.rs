@@ -252,7 +252,7 @@ mod tests {
         let result = EditTool
             .invoke(
                 json!({
-                    "file_path": "/tmp/nonexistent_phoenix_edit_test.txt",
+                    "file_path": "/tmp/nonexistent_phx_edit_test.txt",
                     "old_string": "a",
                     "new_string": "b"
                 }),
