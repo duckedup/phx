@@ -44,6 +44,7 @@ pub fn start_conversation(app: &mut App, text: String) {
 
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
+    let tool_router = crate::session::tool_router::ToolRouter::from_config(&app.config);
     let cfg = crate::session::conversation::ConvConfig {
         provider,
         tools: app.tools.clone(),
@@ -52,6 +53,7 @@ pub fn start_conversation(app: &mut App, text: String) {
         config: app.config.clone(),
         system_prompt_override: None,
         plugin_runtime: app.plugin_runtime.clone(),
+        tool_router,
     };
 
     let rx =
@@ -352,6 +354,46 @@ pub fn handle_command(app: &mut App, input: &str) {
         crate::commands::CommandResult::ConnectWizard => {
             app.onboarding = Some(crate::tui::onboarding::OnboardingState::new());
         }
+        crate::commands::CommandResult::Route(result) => {
+            use crate::commands::route::{RouteResult, apply};
+            match &result {
+                RouteResult::Table(entries) => {
+                    if entries.is_empty() {
+                        app.show_toast("No tool routes configured");
+                    } else {
+                        let lines: Vec<String> = entries
+                            .iter()
+                            .map(|e| {
+                                if let Some(ref m) = e.model {
+                                    format!("  {} → {}/{}", e.tool, e.provider, m)
+                                } else {
+                                    format!("  {} → {}", e.tool, e.provider)
+                                }
+                            })
+                            .collect();
+                        if let Some(tab) = app.current_tab_mut() {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: format!("Tool routes:\n{}", lines.join("\n")),
+                            }));
+                        }
+                    }
+                }
+                RouteResult::Error(msg) => {
+                    app.show_toast(msg.clone());
+                }
+                _ => {
+                    if let Some(toast_msg) = apply(&result, &mut app.config) {
+                        let config_path = crate::config::paths::user_config_file();
+                        let _ = crate::config::writer::save_tool_routing(
+                            &config_path,
+                            &app.config.tool_routing,
+                        );
+                        app.show_toast(toast_msg);
+                    }
+                }
+            }
+        }
         crate::commands::CommandResult::Conductor => {
             handle_conductor_command(app);
         }
@@ -586,29 +628,11 @@ fn handle_conductor_command(app: &mut App) {
     if needs_onboarding {
         let items = build_conductor_picker_items(&app.config);
         if items.is_empty() {
-            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: "No providers configured. Use /connect first.".into(),
-                }));
-            }
+            app.show_toast("No providers configured — use /connect first");
             return;
         }
 
-        use crate::tui::picker::{PickerItem, PickerMode, PickerState};
-        let picker_items: Vec<PickerItem> = items
-            .into_iter()
-            .map(|(id, label, desc)| PickerItem {
-                id,
-                label,
-                description: desc,
-                source_tag: None,
-            })
-            .collect();
-        app.picker = Some(PickerState::new(
-            picker_items,
-            PickerMode::ConductorModelPick,
-        ));
+        app.conductor_setup = Some(crate::tui::conductor_setup::ConductorSetup::new(items));
     } else {
         activate_conductor(app);
         app.show_toast("Conductor mode");

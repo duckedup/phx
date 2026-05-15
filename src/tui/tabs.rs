@@ -25,6 +25,7 @@ pub enum ChatItem {
     Line(ChatLine),
     Assistant(AssistantLine),
     Widget(WidgetKind),
+    ContextLoaded(Vec<String>),
 }
 
 impl From<ChatLine> for ChatItem {
@@ -92,10 +93,7 @@ impl Tab {
                 }
             }
             SessionEvent::ContextLoaded(names) => {
-                self.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: Role::System,
-                    content: format!("Context loaded: {}", names.join(", ")),
-                }));
+                self.chat_lines.push(ChatItem::ContextLoaded(names));
             }
             SessionEvent::ContextCompacted { removed, remaining } => {
                 self.chat_lines.push(ChatItem::Line(ChatLine {

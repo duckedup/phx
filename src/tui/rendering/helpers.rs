@@ -50,7 +50,7 @@ pub fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     result
 }
 
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES: &[&str] = &["⟡", "✦", "◈", "✦", "⟡", "◇", "✧", "◇"];
 
 pub fn spinner_frame(idx: usize) -> &'static str {
     SPINNER_FRAMES[idx % SPINNER_FRAMES.len()]

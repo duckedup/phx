@@ -20,6 +20,7 @@ use crate::tools::traits::ToolRegistry;
 use crate::tui::components::{
     chat_view, command_completion, input_box, modal_picker, sidebar, status_bar, toast,
 };
+use crate::tui::conductor_setup::{self, ConductorSetup};
 use crate::tui::layout;
 use crate::tui::message_handler;
 use crate::tui::models_page::{self, ModelsPageState};
@@ -75,6 +76,7 @@ pub struct App {
     pub panels: std::collections::HashMap<String, crate::shared::ui_types::PanelState>,
     pub panel_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::plugin::host_handler::PanelUpdate>>,
+    pub conductor_setup: Option<ConductorSetup>,
     pub pending_conductor_activate: bool,
     pub agent_receivers: Vec<AgentReceiver>,
     pub pending_model_selection: Option<usize>,
@@ -203,6 +205,7 @@ impl App {
             sidebar_area: None,
             panels: std::collections::HashMap::new(),
             panel_rx: None,
+            conductor_setup: None,
             pending_conductor_activate: false,
             agent_receivers: Vec::new(),
             pending_model_selection: None,
@@ -382,12 +385,7 @@ impl App {
                     }
                     ConvEvent::ContextLoaded(names) => {
                         if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: crate::tui::rendering::helpers::format_context_tree(
-                                    &names,
-                                ),
-                            }));
+                            tab.chat_lines.push(ChatItem::ContextLoaded(names));
                         }
                     }
                     ConvEvent::ContextCompacted { removed, remaining } => {
@@ -610,8 +608,9 @@ impl App {
                     model,
                     api_key,
                     env_hint,
+                    base_url,
                 } => {
-                    self.complete_onboarding(name, kind, model, api_key, env_hint);
+                    self.complete_onboarding(name, kind, model, api_key, env_hint, base_url);
                     if let Some(idx) = self.pending_model_selection.take() {
                         self.apply_model_selection(&idx.to_string());
                     }
@@ -621,6 +620,38 @@ impl App {
                     self.pending_model_selection = None;
                 }
                 onboarding::Action::None => {}
+            }
+            return true;
+        }
+
+        if self.conductor_setup.is_some() {
+            let action = self.conductor_setup.as_mut().unwrap().handle_key(key);
+            match action {
+                conductor_setup::SetupAction::Complete {
+                    conductor_provider,
+                    conductor_model,
+                    agent_provider,
+                    agent_model,
+                    tracker,
+                } => {
+                    self.config.conductor.conductor_provider = Some(conductor_provider);
+                    self.config.conductor.conductor_model = Some(conductor_model);
+                    self.config.conductor.agent_provider = Some(agent_provider);
+                    self.config.conductor.agent_model = Some(agent_model);
+                    self.config.conductor.tracker = tracker;
+                    let config_path = crate::config::paths::user_config_file();
+                    let _ = crate::config::writer::save_conductor_config(
+                        &config_path,
+                        &self.config.conductor,
+                    );
+                    self.conductor_setup = None;
+                    self.pending_conductor_activate = true;
+                    self.show_toast("Conductor configured");
+                }
+                conductor_setup::SetupAction::Cancelled => {
+                    self.conductor_setup = None;
+                }
+                conductor_setup::SetupAction::None => {}
             }
             return true;
         }
@@ -636,8 +667,6 @@ impl App {
                 PickerMode::Theme
                 | PickerMode::Model
                 | PickerMode::Session
-                | PickerMode::ConductorModelPick
-                | PickerMode::ConductorAgent
                 | PickerMode::ConductorTracker => {
                     let action = modal_picker::handle_key(self.picker.as_mut().unwrap(), key);
                     self.apply_picker_action(action);
@@ -914,8 +943,6 @@ impl App {
                 PickerMode::Theme
                 | PickerMode::Model
                 | PickerMode::Session
-                | PickerMode::ConductorModelPick
-                | PickerMode::ConductorAgent
                 | PickerMode::ConductorTracker => {
                     modal_picker::render_modal_picker(frame, picker, &self.theme);
                 }
@@ -957,6 +984,9 @@ impl App {
         if let Some(ref ob) = self.onboarding {
             ob.render(frame, &self.theme);
         }
+        if let Some(ref cs) = self.conductor_setup {
+            cs.render(frame, &self.theme);
+        }
     }
 
     // ─── Picker / theme / model / onboarding helpers ─────────────────────
@@ -985,64 +1015,6 @@ impl App {
                     }
                     Some(PickerMode::Session) => {
                         self.pending_session_resume = Some(selected.id.clone());
-                    }
-                    Some(PickerMode::ConductorModelPick) => {
-                        if let Some((provider, model)) = selected.id.split_once('/') {
-                            self.config.conductor.conductor_provider = Some(provider.to_string());
-                            self.config.conductor.conductor_model = Some(model.to_string());
-                            self.show_toast(format!("Conductor: {}", selected.label));
-                        }
-                        let items = message_handler::build_conductor_picker_items(&self.config);
-                        let picker_items: Vec<PickerItem> = items
-                            .into_iter()
-                            .map(|(id, label, desc)| PickerItem {
-                                id,
-                                label,
-                                description: desc,
-                                source_tag: None,
-                            })
-                            .collect();
-                        self.picker =
-                            Some(PickerState::new(picker_items, PickerMode::ConductorAgent));
-                        return;
-                    }
-                    Some(PickerMode::ConductorAgent) => {
-                        if let Some((provider, model)) = selected.id.split_once('/') {
-                            self.config.conductor.agent_provider = Some(provider.to_string());
-                            self.config.conductor.agent_model = Some(model.to_string());
-                            self.show_toast(format!("Sub-agents: {}", selected.label));
-                        }
-                        let tracker_items = vec![
-                            PickerItem {
-                                id: "beads".into(),
-                                label: "Beads (bd)".into(),
-                                description: "Local git-native issue tracking".into(),
-                                source_tag: None,
-                            },
-                            PickerItem {
-                                id: "linear".into(),
-                                label: "Linear".into(),
-                                description: "Linear project management (MCP)".into(),
-                                source_tag: None,
-                            },
-                            PickerItem {
-                                id: "jira".into(),
-                                label: "Jira".into(),
-                                description: "Atlassian Jira".into(),
-                                source_tag: None,
-                            },
-                            PickerItem {
-                                id: "none".into(),
-                                label: "None".into(),
-                                description: "No issue tracker — tasks given directly".into(),
-                                source_tag: None,
-                            },
-                        ];
-                        self.picker = Some(PickerState::new(
-                            tracker_items,
-                            PickerMode::ConductorTracker,
-                        ));
-                        return;
                     }
                     Some(PickerMode::ConductorTracker) => {
                         let tracker = if selected.id == "none" {
@@ -1213,12 +1185,7 @@ impl App {
                         tracing::warn!("failed to persist model choice: {e}");
                     }
 
-                    if let Some(tab) = self.current_tab_mut() {
-                        tab.chat_lines.push(ChatItem::Line(ChatLine {
-                            role: crate::session::message::Role::System,
-                            content: format!("Model: {display}"),
-                        }));
-                    }
+                    self.show_toast(format!("Model: {display}"));
                 }
                 Err(crate::providers::traits::ProviderError::MissingCredential) => {
                     let kind = profile.kind;
@@ -1258,6 +1225,7 @@ impl App {
         model: String,
         api_key: Option<String>,
         env_hint: String,
+        base_url: Option<String>,
     ) {
         use crate::config::schema::{AuthEntry, ProviderProfile};
 
@@ -1274,6 +1242,7 @@ impl App {
             model: model.clone(),
             active: true,
             auth,
+            base_url,
             ..Default::default()
         };
 
@@ -1538,6 +1507,9 @@ async fn run_loop(
 
         app.drain_panels();
         app.drain_conversations();
+        if let Some(ref mut ob) = app.onboarding {
+            ob.poll_models();
+        }
         for tab in &mut app.tabs {
             crate::tui::rendering::helpers::drain_stream_buffer(tab);
         }
@@ -1683,8 +1655,6 @@ async fn run_loop(
                                     PickerMode::Theme
                                     | PickerMode::Model
                                     | PickerMode::Session
-                                    | PickerMode::ConductorModelPick
-                                    | PickerMode::ConductorAgent
                                     | PickerMode::ConductorTracker => {
                                         let action = modal_picker::handle_click(
                                             picker,
