@@ -50,6 +50,7 @@ pub fn build_item_display_lines(
             build_assistant_display_lines(lines, al, theme, content_width, pad)
         }
         ChatItem::Widget(w) => build_widget_display_lines(lines, w, theme, content_width, pad),
+        ChatItem::ContextLoaded(names) => build_context_loaded_lines(lines, names, theme, pad),
     }
 }
 
@@ -67,6 +68,37 @@ fn build_widget_display_lines(
         content_width,
         pad,
     );
+}
+
+fn build_context_loaded_lines(
+    lines: &mut Vec<DisplayLine>,
+    names: &[String],
+    theme: &Theme,
+    pad: u16,
+) {
+    let indent = " ".repeat(pad as usize);
+    let dim = Style::default().fg(theme.dim());
+    let accent = Style::default().fg(theme.accent);
+    let info_style = Style::default().fg(theme.info);
+
+    lines.push(DisplayLine::empty());
+    lines.push(DisplayLine::multi(vec![
+        (format!("{indent}  "), Style::default()),
+        ("◆ ".to_string(), accent),
+        ("context resolved".to_string(), dim),
+    ]));
+
+    for (i, name) in names.iter().enumerate() {
+        let is_last = i + 1 == names.len();
+        let connector = if is_last { "╰" } else { "├" };
+        lines.push(DisplayLine::multi(vec![
+            (format!("{indent}    "), Style::default()),
+            (format!("{connector} "), dim),
+            (name.clone(), info_style),
+        ]));
+    }
+
+    lines.push(DisplayLine::empty());
 }
 
 fn build_assistant_display_lines(

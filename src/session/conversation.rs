@@ -49,6 +49,7 @@ pub struct ConvConfig {
     pub system_prompt_override: Option<String>,
     pub plugin_runtime:
         Option<Arc<parking_lot::Mutex<crate::plugin::plugin_runtime::PluginRuntime>>>,
+    pub tool_router: Option<crate::session::tool_router::ToolRouter>,
 }
 
 pub fn spawn_conversation(
@@ -71,7 +72,10 @@ pub fn spawn_conversation(
             config,
             system_prompt_override,
             plugin_runtime,
+            tool_router,
         } = cfg;
+
+        let mut current_provider: Arc<dyn Provider> = Arc::clone(&provider);
 
         loop {
             if cancel.load(Ordering::Relaxed) {
@@ -79,7 +83,7 @@ pub fn spawn_conversation(
                 return;
             }
 
-            let tool_schemas: Vec<ToolSchema> = tools
+            let all_tool_schemas: Vec<ToolSchema> = tools
                 .read()
                 .list_schemas()
                 .into_iter()
@@ -89,6 +93,20 @@ pub fn spawn_conversation(
                     parameters: s.parameters,
                 })
                 .collect();
+
+            let tool_schemas: Vec<ToolSchema> = if !Arc::ptr_eq(&current_provider, &provider) {
+                if let Some(ref router) = tool_router {
+                    all_tool_schemas
+                        .iter()
+                        .filter(|s| router.is_routed(&s.name))
+                        .cloned()
+                        .collect()
+                } else {
+                    all_tool_schemas.clone()
+                }
+            } else {
+                all_tool_schemas
+            };
 
             let base_prompt = if let Some(ref override_prompt) = system_prompt_override {
                 Some(override_prompt.clone())
@@ -195,7 +213,7 @@ pub fn spawn_conversation(
                 system_prompt,
             };
 
-            let stream = match provider.send(opts).await {
+            let stream = match current_provider.send(opts).await {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
@@ -338,6 +356,21 @@ pub fn spawn_conversation(
                 }
 
                 if got_tool_use_stop {
+                    current_provider = Arc::clone(&provider);
+
+                    if let Some(ref router) = tool_router {
+                        let routed: Vec<Arc<dyn Provider>> = pending_tool_calls
+                            .iter()
+                            .filter_map(|tc| router.provider_for_tool(&tc.name))
+                            .collect();
+                        if !routed.is_empty()
+                            && routed.len() == pending_tool_calls.len()
+                            && routed.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1]))
+                        {
+                            current_provider = routed[0].clone();
+                        }
+                    }
+
                     continue;
                 }
             }

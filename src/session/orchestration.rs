@@ -258,6 +258,7 @@ impl SessionPool {
 
             use crate::session::conversation::ConvConfig;
 
+            let tool_router = crate::session::tool_router::ToolRouter::from_config(&config);
             let conv_cfg = ConvConfig {
                 provider,
                 tools,
@@ -266,6 +267,7 @@ impl SessionPool {
                 config,
                 system_prompt_override,
                 plugin_runtime: None,
+                tool_router,
             };
             let conv_rx = crate::session::conversation::spawn_conversation(
                 session,

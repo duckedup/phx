@@ -126,6 +126,24 @@ pub fn save_conductor_config(
     Ok(())
 }
 
+pub fn save_tool_routing(
+    path: &Path,
+    tool_routing: &std::collections::BTreeMap<String, super::schema::ToolRoute>,
+) -> Result<(), ConfigError> {
+    let mut cfg = if path.exists() {
+        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::io(path, e))?;
+        serde_json::from_str::<Config>(&text).map_err(ConfigError::Parse)?
+    } else {
+        Config::default()
+    };
+
+    cfg.tool_routing = tool_routing.clone();
+
+    save(&cfg, path)?;
+    debug!("saved tool routing to {}", path.display());
+    Ok(())
+}
+
 /// Write `data` to a temp file next to `target`, then atomically rename.
 fn atomic_write(target: &Path, data: &[u8]) -> Result<(), ConfigError> {
     // Ensure parent directory exists.

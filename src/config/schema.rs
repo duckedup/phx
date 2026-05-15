@@ -363,6 +363,17 @@ impl Default for ConductorConfig {
 }
 
 // ---------------------------------------------------------------------------
+// ToolRoute
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolRoute {
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Config (top-level)
 // ---------------------------------------------------------------------------
 
@@ -380,9 +391,10 @@ pub struct Config {
     pub plugins: PluginsConfig,
     #[serde(default)]
     pub conductor: ConductorConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_routing: BTreeMap<String, ToolRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    /// Tracks which files contributed to this config (populated by the loader).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<PathBuf>,
 }
@@ -490,6 +502,9 @@ impl Config {
         }
         if other.conductor != ConductorConfig::default() {
             self.conductor = other.conductor;
+        }
+        for (tool, route) in other.tool_routing {
+            self.tool_routing.insert(tool, route);
         }
         if other.theme.is_some() {
             self.theme = other.theme;

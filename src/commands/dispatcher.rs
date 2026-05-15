@@ -1,4 +1,4 @@
-use crate::commands::{connect, model, session_cmd, skill, theme};
+use crate::commands::{connect, model, route, session_cmd, skill, theme};
 use crate::config::schema::{Config, ProviderProfile};
 use crate::plugin::PluginManager;
 use crate::plugin::plugin_runtime::PluginRuntime;
@@ -67,6 +67,7 @@ pub enum CommandResult {
     CompactSession,
     Cleared,
     Compacted,
+    Route(route::RouteResult),
     NotACommand,
 }
 
@@ -118,6 +119,7 @@ pub fn dispatch_with_plugins(
         "sessions" => session_cmd::handle_resume(store, project),
         "clear" => session_cmd::handle_clear(),
         "compact" => session_cmd::handle_compact(),
+        "route" => CommandResult::Route(route::handle(args, config)),
         "conductor" => CommandResult::Conductor,
         "solo" => CommandResult::Solo,
         "reload" => CommandResult::ReloadPlugins,
@@ -219,6 +221,12 @@ pub fn list_commands_with_plugins(
         CommandInfo {
             name: "context".into(),
             summary: "List tools and skills".into(),
+            is_skill: false,
+            source: CommandSource::Builtin,
+        },
+        CommandInfo {
+            name: "route".into(),
+            summary: "Route tools to specific providers".into(),
             is_skill: false,
             source: CommandSource::Builtin,
         },
