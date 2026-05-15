@@ -30,7 +30,7 @@ pub fn dialog_block(theme: &Theme) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme.accent))
         .style(Style::default().bg(theme.background))
-        .padding(Padding::new(2, 2, 1, 0))
+        .padding(Padding::new(2, 1, 1, 0))
 }
 
 // ── Step indicator ──────────────────────────────────────────────
@@ -60,10 +60,7 @@ pub fn step_indicator<'a>(labels: &[&'a str], current: usize, theme: &Theme) -> 
         spans.push(Span::styled(format!("{dot} "), style));
         spans.push(Span::styled(*label, label_style));
         if i + 1 < labels.len() {
-            spans.push(Span::styled(
-                " ― ",
-                Style::default().fg(Theme::blend(theme.foreground, theme.background, 0.7)),
-            ));
+            spans.push(Span::styled("   ", Style::default()));
         }
     }
     Line::from(spans)

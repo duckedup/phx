@@ -118,7 +118,7 @@ pub fn spawn_conversation(
                     .and_then(|p| std::fs::read_to_string(p).ok())
                     .or_else(|| {
                         Some(
-                            "You are Phoenix, a fast and capable coding assistant running in a terminal.\n\
+                            "You are phx, a fast and capable coding assistant running in a terminal.\n\
                              \n\
                              You have access to tools for reading files, writing files, editing files, and \
                              running shell commands. Use them to help the user with software engineering tasks.\n\

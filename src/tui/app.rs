@@ -69,6 +69,7 @@ pub struct App {
     pub is_reloading: bool,
     pub reload_task: Option<tokio::task::JoinHandle<ReloadOutput>>,
     pub conductor_mode: bool,
+    pub panel_focused: bool,
     pub session_pool: Arc<SessionPool>,
     pub orch_ctx: Arc<crate::tools::orchestration::OrchestrationContext>,
     pub sidebar_state: sidebar::SidebarState,
@@ -142,6 +143,7 @@ impl App {
             parent_provider: parking_lot::RwLock::new(parent_provider),
             parent_tools: parking_lot::RwLock::new(tool_registry.clone()),
             agents: parking_lot::RwLock::new(Vec::new()),
+            plan_approved: std::sync::atomic::AtomicBool::new(false),
         });
         crate::tools::orchestration::register_orchestration_tools(
             &mut tool_registry,
@@ -199,6 +201,7 @@ impl App {
             is_reloading: false,
             reload_task: None,
             conductor_mode: false,
+            panel_focused: false,
             session_pool: pool,
             orch_ctx,
             sidebar_state: sidebar::SidebarState::new(),
@@ -216,15 +219,7 @@ impl App {
     }
 
     pub fn show_sidebar(&self) -> bool {
-        if self.conductor_mode {
-            return true;
-        }
-        self.session_pool.try_check().is_some_and(|agents| {
-            agents.iter().any(|a| {
-                a.status == crate::session::orchestration::ChildStatus::Running
-                    || a.status == crate::session::orchestration::ChildStatus::Queued
-            })
-        })
+        false
     }
 
     pub fn current_tab(&self) -> Option<&Tab> {
@@ -333,7 +328,11 @@ impl App {
         let mut finished = Vec::new();
 
         for (i, agent) in self.agent_receivers.iter_mut().enumerate() {
-            let tab_idx = agent.tab_index;
+            let tab_idx = agent
+                .session_id
+                .as_ref()
+                .and_then(|sid| self.tabs.iter().position(|t| t.id == *sid))
+                .unwrap_or(agent.tab_index);
             while let Ok(event) = agent.rx.try_recv() {
                 match event {
                     ConvEvent::StreamToken(t) => {
@@ -708,6 +707,70 @@ impl App {
             }
         }
 
+        if self.panel_focused && self.conductor_mode {
+            match key.code {
+                KeyCode::Up => {
+                    let agents = &self.sidebar_state.agents;
+                    if let sidebar::SidebarSelection::Agent(ref id) = self.sidebar_state.selected
+                        && let Some(pos) = agents.iter().position(|a| &a.session_id == id)
+                    {
+                        if pos > 0 {
+                            self.sidebar_state.selected = sidebar::SidebarSelection::Agent(
+                                agents[pos - 1].session_id.clone(),
+                            );
+                        } else {
+                            self.sidebar_state.selected = sidebar::SidebarSelection::Conductor;
+                        }
+                    }
+                    return true;
+                }
+                KeyCode::Down => {
+                    let agents = &self.sidebar_state.agents;
+                    match &self.sidebar_state.selected {
+                        sidebar::SidebarSelection::Conductor if !agents.is_empty() => {
+                            self.sidebar_state.selected =
+                                sidebar::SidebarSelection::Agent(agents[0].session_id.clone());
+                        }
+                        sidebar::SidebarSelection::Agent(id)
+                            if let Some(pos) = agents.iter().position(|a| &a.session_id == id)
+                                && pos + 1 < agents.len() =>
+                        {
+                            self.sidebar_state.selected = sidebar::SidebarSelection::Agent(
+                                agents[pos + 1].session_id.clone(),
+                            );
+                        }
+                        _ => {}
+                    }
+                    return true;
+                }
+                KeyCode::Enter => {
+                    match &self.sidebar_state.selected {
+                        sidebar::SidebarSelection::Conductor => {
+                            self.active_tab = 0;
+                        }
+                        sidebar::SidebarSelection::Agent(id) => {
+                            if let Some(idx) = self.tabs.iter().position(|t| t.id == *id) {
+                                self.active_tab = idx;
+                            }
+                        }
+                    }
+                    self.panel_focused = false;
+                    return true;
+                }
+                KeyCode::Left | KeyCode::Esc => {
+                    self.panel_focused = false;
+                    return true;
+                }
+                _ => {}
+            }
+            return true;
+        }
+
+        if self.conductor_mode && key.code == KeyCode::Right {
+            self.panel_focused = true;
+            return true;
+        }
+
         match key.code {
             KeyCode::BackTab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 let rt_clone = self.plugin_runtime.as_ref().map(Arc::clone);
@@ -752,6 +815,8 @@ impl App {
                 if let Some(tab) = self.current_tab_mut() {
                     if tab.input.history_idx.is_some() || tab.input.line_count() == 1 {
                         tab.input.history_up();
+                        self.picker = None;
+                        return false;
                     } else {
                         tab.input.handle_key_event(key);
                     }
@@ -761,6 +826,8 @@ impl App {
                 if let Some(tab) = self.current_tab_mut() {
                     if tab.input.history_idx.is_some() || tab.input.line_count() == 1 {
                         tab.input.history_down();
+                        self.picker = None;
+                        return false;
                     } else {
                         tab.input.handle_key_event(key);
                     }
@@ -820,12 +887,19 @@ impl App {
     // ─── Rendering ───────────────────────────────────────────────────────
 
     fn input_text_rect(&self) -> Rect {
-        let prompt_len = 4u16; // "  > "
+        let pad_x = 2u16;
+        let border = 1u16;
+        let inner_pad = 1u16;
+        let prompt_len = 2u16; // "> "
+        let x_offset = pad_x + border + inner_pad + prompt_len;
         Rect {
-            x: self.input_area.x + prompt_len,
-            y: self.input_area.y + 1, // skip separator
-            width: self.input_area.width.saturating_sub(prompt_len),
-            height: self.input_area.height.saturating_sub(1),
+            x: self.input_area.x + x_offset,
+            y: self.input_area.y + border,
+            width: self
+                .input_area
+                .width
+                .saturating_sub(x_offset + pad_x + border + inner_pad),
+            height: self.input_area.height.saturating_sub(border * 2 + 1),
         }
     }
 
@@ -838,48 +912,95 @@ impl App {
     pub fn render(&self, frame: &mut Frame) {
         let area = frame.area();
 
+        frame.render_widget(ratatui::widgets::Clear, area);
         frame.render_widget(
             Block::default().style(Style::default().bg(self.theme.background)),
             area,
         );
 
-        let content_area = if self.show_sidebar() {
-            let (sb_area, content) = layout::split_sidebar(area);
-            if sb_area.width > 0 {
-                sidebar::render_sidebar(frame, sb_area, &self.sidebar_state, &self.theme);
-            }
-            content
+        let body_area = area;
+
+        let agent_panel_h = if self.conductor_mode {
+            let per_agent = 2u16;
+            let header = 3u16;
+            let border = 2u16;
+            let min_h = header + border;
+            let h = header + (self.sidebar_state.agents.len() as u16 * per_agent) + border;
+            h.max(min_h).min(body_area.height / 3)
         } else {
-            area
+            0
         };
 
         let chunks = if let Some(ref form) = self.tool_form {
             let fh = tool_form::form_height(form);
-            layout::main_layout_with_form(content_area, fh)
+            layout::main_layout_with_form(body_area, fh)
         } else {
-            layout::main_layout(content_area, self.input_line_count())
+            layout::main_layout(body_area, self.input_line_count())
         };
 
         let provider_info = crate::config::loader::active_provider(&self.config)
             .map(|(name, p)| format!("{name}/{}", p.model))
             .unwrap_or_else(|| "no provider".into());
 
-        chat_view::render_chat(
-            frame,
+        let chat_pad = 2u16;
+        let chat_top_pad = 1u16;
+        let chat_area = Rect {
+            x: chunks[0].x + chat_pad,
+            y: chunks[0].y + chat_top_pad,
+            width: chunks[0].width.saturating_sub(chat_pad * 2),
+            height: chunks[0].height.saturating_sub(chat_top_pad),
+        };
+
+        let panel_rect = if agent_panel_h > 0 {
+            let panel_w = 40u16.min(chat_area.width.saturating_sub(4));
+            Some(Rect {
+                x: chat_area.x + chat_area.width - panel_w,
+                y: chat_area.y + chat_area.height - agent_panel_h,
+                width: panel_w,
+                height: agent_panel_h,
+            })
+        } else {
+            None
+        };
+
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(self.theme.background)),
             chunks[0],
+        );
+
+        chat_view::render_chat_with_panel(
+            frame,
+            chat_area,
             &self.display_lines,
             self.effective_scroll(),
             &self.theme,
+            panel_rect,
         );
 
         if let Some(ref sel) = self.selection {
             crate::tui::selection::render_selection_overlay(
                 frame,
-                chunks[0],
+                chat_area,
                 sel,
                 &self.display_lines,
                 self.effective_scroll(),
                 &self.theme,
+            );
+        }
+
+        if let Some(pa) = panel_rect {
+            let active_sid = self
+                .agent_receivers
+                .iter()
+                .find(|a| a.tab_index == self.active_tab)
+                .and_then(|a| a.session_id.as_deref());
+            sidebar::render_agent_panel(
+                frame,
+                pa,
+                &self.sidebar_state,
+                &self.theme,
+                self.panel_focused,
+                active_sid,
             );
         }
 
@@ -924,6 +1045,8 @@ impl App {
             cost: session_cost,
             context: session_context,
             is_running: self.is_running,
+            conductor_mode: self.conductor_mode,
+            agent_count: self.sidebar_state.agents.len(),
             provider_info: &provider_info,
             frame_tick: self.frame_tick,
         };
@@ -933,11 +1056,13 @@ impl App {
         if let Some(ref picker) = self.picker {
             match picker.mode {
                 PickerMode::CommandComplete => {
+                    let reserve = panel_rect.map_or(0, |p| p.width + 4);
                     command_completion::render_command_completion(
                         frame,
                         chunks[1],
                         picker,
                         &self.theme,
+                        reserve,
                     );
                 }
                 PickerMode::Theme
@@ -950,20 +1075,33 @@ impl App {
         }
 
         if self.is_reloading {
-            use crate::tui::rendering::helpers::spinner_frame;
+            use crate::tui::rendering::helpers::{spinner_color, spinner_frame};
             let frame_idx = (self.frame_tick / 4) as usize;
             let spin = spinner_frame(frame_idx);
+            let color = spinner_color(frame_idx, &self.theme);
             let msg = "reloading";
             let text = format!("  {spin} {msg}  ");
             let width = text.chars().count().min(chunks[1].width as usize) as u16;
             let x = chunks[1].x + (chunks[1].width.saturating_sub(width)) / 2;
             let y = chunks[1].y.saturating_sub(1);
             let bg = self.theme.status_bar_bg();
-            let fg = self.theme.status_bar_fg();
-            let line = ratatui::text::Line::from(ratatui::text::Span::styled(
-                text,
-                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-            ));
+            let line = ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled("  ", Style::default().bg(bg)),
+                ratatui::text::Span::styled(
+                    spin,
+                    Style::default()
+                        .fg(color)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                ratatui::text::Span::styled(
+                    format!(" {msg}  "),
+                    Style::default()
+                        .fg(self.theme.status_bar_fg())
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
             let area = Rect {
                 x,
                 y,
@@ -1466,27 +1604,44 @@ async fn run_loop(
             .current_tab()
             .map(|t| t.input.line_count() as u16)
             .unwrap_or(1);
-        let content_area = if app.show_sidebar() {
-            let (sb_area, content) = layout::split_sidebar(area);
-            app.sidebar_area = if sb_area.width > 0 {
-                Some(sb_area)
-            } else {
-                None
-            };
-            content
-        } else {
-            app.sidebar_area = None;
-            area
-        };
+        app.sidebar_area = None;
         let chunks = if let Some(ref form) = app.tool_form {
             let fh = tool_form::form_height(form);
-            layout::main_layout_with_form(content_area, fh)
+            layout::main_layout_with_form(area, fh)
         } else {
-            layout::main_layout(content_area, input_lines)
+            layout::main_layout(area, input_lines)
         };
         app.chat_area_height = chunks[0].height;
         app.chat_area = chunks[0];
         app.input_area = chunks[1];
+
+        app.sidebar_area = if app.conductor_mode {
+            let chat_pad = 2u16;
+            let chat_top_pad = 1u16;
+            let ca = Rect {
+                x: chunks[0].x + chat_pad,
+                y: chunks[0].y + chat_top_pad,
+                width: chunks[0].width.saturating_sub(chat_pad * 2),
+                height: chunks[0].height.saturating_sub(chat_top_pad),
+            };
+            let agent_count = app.sidebar_state.agents.len() as u16;
+            let per_agent = 2u16;
+            let header = 3u16;
+            let border = 2u16;
+            let min_h = header + border;
+            let h = (header + agent_count * per_agent + border)
+                .max(min_h)
+                .min(ca.height / 3);
+            let panel_w = 40u16.min(ca.width.saturating_sub(4));
+            Some(Rect {
+                x: ca.x + ca.width - panel_w,
+                y: ca.y + ca.height - h,
+                width: panel_w,
+                height: h,
+            })
+        } else {
+            None
+        };
         app.frame_tick = app.frame_tick.wrapping_add(1);
 
         // Pick up newly spawned agents and create tabs for them
@@ -1594,6 +1749,7 @@ async fn run_loop(
                                     app.session_pool.try_send_message(id, &input_text);
                                 }
                             } else if crate::commands::dispatcher::is_command(input_text.trim()) {
+                                app.picker = None;
                                 message_handler::handle_command(app, input_text.trim());
                             } else {
                                 message_handler::start_conversation(app, input_text);
@@ -1630,12 +1786,9 @@ async fn run_loop(
                                         app.active_tab = 0;
                                     }
                                     sidebar::SidebarSelection::Agent(id) => {
-                                        if let Some(agent) = app
-                                            .agent_receivers
-                                            .iter()
-                                            .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                                        if let Some(idx) = app.tabs.iter().position(|t| t.id == *id)
                                         {
-                                            app.active_tab = agent.tab_index;
+                                            app.active_tab = idx;
                                         }
                                     }
                                 }

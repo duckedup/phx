@@ -496,7 +496,7 @@ impl OnboardingState {
         frame.render_widget(block, popup);
 
         let rows = Layout::vertical([
-            Constraint::Length(3), // header
+            Constraint::Length(2), // header
             Constraint::Min(1),    // body
             Constraint::Length(1), // footer
         ])
@@ -522,18 +522,11 @@ impl OnboardingState {
             STEPS_CLOUD
         };
 
-        let title = Line::from(vec![
-            Span::styled(
-                "phx",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  setup", Style::default().fg(theme.dim())),
-        ]);
         let steps = d::step_indicator(labels, self.step.index(), theme);
-
-        frame.render_widget(Paragraph::new(vec![title, steps]), area);
+        frame.render_widget(
+            Paragraph::new(steps).alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

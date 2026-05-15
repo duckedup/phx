@@ -23,6 +23,7 @@ pub struct OrchestrationContext {
     pub parent_provider: RwLock<String>,
     pub parent_tools: RwLock<ToolRegistry>,
     pub agents: RwLock<Vec<crate::session::agents::AgentDefinition>>,
+    pub plan_approved: std::sync::atomic::AtomicBool,
 }
 
 pub fn register_orchestration_tools(registry: &mut ToolRegistry, ctx: Arc<OrchestrationContext>) {
@@ -100,6 +101,17 @@ impl Tool for SpawnAgentTool {
         args: Value,
         _input: &dyn InputRequester,
     ) -> Result<ToolResult, ToolError> {
+        if !self
+            .ctx
+            .plan_approved
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(ToolResult::error(
+                "Plan not approved. Present your plan to the user first, \
+                 then wait for them to say \"go\" or \"approved\" before spawning agents.",
+            ));
+        }
+
         let prompt = args["prompt"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'prompt'".into()))?
@@ -213,17 +225,23 @@ impl Tool for SpawnAgentTool {
             })
             .await;
 
-        let result = json!({
-            "session_id": id.0,
-            "provider": prov_name,
-            "model": model_name,
-            "agent": agent_name,
-            "status": "queued",
-            "worktree": worktree.as_ref().map(|w| w.path.to_string_lossy().to_string()),
-            "branch": worktree.as_ref().map(|w| &w.branch),
-        });
+        let agent_label = agent_name.unwrap_or("default");
+        let wt_info = worktree
+            .as_ref()
+            .map(|w| format!(" on branch {}", w.branch))
+            .unwrap_or_default();
 
-        Ok(ToolResult::success(result.to_string()))
+        let output = format!(
+            "◆ Agent spawned\n\
+             \n\
+               id       {}\n\
+               agent    {}\n\
+               model    {}/{}\n\
+               status   queued{}\n",
+            id.0, agent_label, prov_name, model_name, wt_info
+        );
+
+        Ok(ToolResult::success(output))
     }
 }
 
@@ -265,43 +283,30 @@ impl Tool for CheckAgentsTool {
                 .collect()
         });
 
-        let children = self.ctx.pool.check(ids.as_deref()).await;
+        let children = match self.ctx.pool.try_check_filtered(ids.as_deref()) {
+            Some(c) => c,
+            None => self.ctx.pool.check(ids.as_deref()).await,
+        };
+
+        if children.is_empty() {
+            return Ok(ToolResult::success("No agents."));
+        }
 
         let total = children.len();
-        let running = children
-            .iter()
-            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Running)
-            .count();
-        let done = children
-            .iter()
-            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Done)
-            .count();
-        let queued = children
-            .iter()
-            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Queued)
-            .count();
-        let error = children
-            .iter()
-            .filter(|c| {
-                matches!(
-                    c.status,
-                    crate::session::orchestration::ChildStatus::Error(_)
-                )
-            })
-            .count();
+        let mut running = 0usize;
+        let mut done = 0usize;
 
-        let result = json!({
-            "children": children,
-            "summary": {
-                "total": total,
-                "running": running,
-                "done": done,
-                "queued": queued,
-                "error": error,
+        for child in &children {
+            match &child.status {
+                crate::session::orchestration::ChildStatus::Running => running += 1,
+                crate::session::orchestration::ChildStatus::Done => done += 1,
+                _ => {}
             }
-        });
+        }
 
-        Ok(ToolResult::success(result.to_string()))
+        Ok(ToolResult::success(format!(
+            "{total} agents: {running} running, {done} done"
+        )))
     }
 }
 

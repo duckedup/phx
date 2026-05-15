@@ -1,12 +1,27 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
+use crate::session::message::Role;
 use crate::tui::layout::CHAT_PADDING;
 use crate::tui::rendering::display::{DisplayLine, build_item_display_lines};
-use crate::tui::rendering::helpers::spinner_frame;
+use crate::tui::rendering::helpers::{spinner_color, spinner_frame};
 use crate::tui::rendering::markdown::render_markdown;
-use crate::tui::tabs::Tab;
+use crate::tui::tabs::{ChatItem, ChatLine, Tab};
 use crate::tui::theme::Theme;
+
+fn is_check_agents_call(item: &ChatItem) -> bool {
+    matches!(item, ChatItem::Line(ChatLine { role: Role::ToolCall, content }) if content.contains("check_agents"))
+}
+
+fn is_tool_result(item: &ChatItem) -> bool {
+    matches!(
+        item,
+        ChatItem::Line(ChatLine {
+            role: Role::ToolResult,
+            ..
+        })
+    )
+}
 
 pub fn render_chat(
     frame: &mut Frame,
@@ -15,30 +30,113 @@ pub fn render_chat(
     effective_scroll: usize,
     theme: &Theme,
 ) {
-    frame.render_widget(Clear, area);
+    render_chat_with_panel(frame, area, display_lines, effective_scroll, theme, None);
+}
 
+pub fn render_chat_with_panel(
+    frame: &mut Frame,
+    area: Rect,
+    display_lines: &[DisplayLine],
+    effective_scroll: usize,
+    theme: &Theme,
+    panel: Option<Rect>,
+) {
     let visible = area.height as usize;
-    let width = area.width as usize;
+    let full_width = area.width as usize;
 
-    let visible_lines: Vec<Line<'static>> = display_lines
+    for (i, dl) in display_lines
         .iter()
         .skip(effective_scroll)
         .take(visible)
-        .map(|dl| {
-            let mut line = dl.to_line();
-            let text_width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-            if text_width < width {
-                line.spans.push(Span::styled(
-                    " ".repeat(width - text_width),
+        .enumerate()
+    {
+        let y = area.y + i as u16;
+        let row_width = if let Some(p) = panel {
+            if y >= p.y && y < p.y + p.height {
+                (p.x.saturating_sub(area.x)) as usize
+            } else {
+                full_width
+            }
+        } else {
+            full_width
+        };
+
+        let line = if row_width == 0 {
+            Line::from("")
+        } else {
+            let mut l = dl.to_line();
+            let text_width: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if text_width > row_width {
+                l = truncate_line(&l, row_width);
+            }
+            let actual: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if actual < row_width {
+                l.spans.push(Span::styled(
+                    " ".repeat(row_width - actual),
                     Style::default().bg(theme.background),
                 ));
             }
-            line
-        })
-        .collect();
+            l
+        };
 
-    let chat = Paragraph::new(visible_lines).style(Style::default().bg(theme.background));
-    frame.render_widget(chat, area);
+        let row_rect = Rect {
+            x: area.x,
+            y,
+            width: full_width as u16,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(theme.background)),
+            row_rect,
+        );
+    }
+
+    let rendered = display_lines
+        .len()
+        .saturating_sub(effective_scroll)
+        .min(visible);
+    for i in rendered..visible {
+        let y = area.y + i as u16;
+        let row_width = if let Some(p) = panel {
+            if y >= p.y && y < p.y + p.height {
+                (p.x.saturating_sub(area.x)) as usize
+            } else {
+                full_width
+            }
+        } else {
+            full_width
+        };
+        let row_rect = Rect {
+            x: area.x,
+            y,
+            width: row_width as u16,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(theme.background)),
+            row_rect,
+        );
+    }
+}
+
+fn truncate_line(line: &Line<'static>, max_chars: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut remaining = max_chars;
+    for span in &line.spans {
+        let count = span.content.chars().count();
+        if remaining == 0 {
+            break;
+        }
+        if count <= remaining {
+            spans.push(span.clone());
+            remaining -= count;
+        } else {
+            let truncated: String = span.content.chars().take(remaining).collect();
+            spans.push(Span::styled(truncated, span.style));
+            remaining = 0;
+        }
+    }
+    Line::from(spans)
 }
 
 pub fn compute_display_lines(
@@ -47,7 +145,7 @@ pub fn compute_display_lines(
     is_running: bool,
     frame_tick: u64,
     width: u16,
-    turn_count: u32,
+    _turn_count: u32,
 ) -> Vec<DisplayLine> {
     let pad = CHAT_PADDING;
     let content_width = (width as usize).saturating_sub(pad as usize * 2);
@@ -70,28 +168,38 @@ pub fn compute_display_lines(
 
     let mut lines = Vec::new();
 
-    for item in &tab.chat_lines {
-        build_item_display_lines(&mut lines, item, theme, content_width, pad);
+    let items = &tab.chat_lines;
+    let mut i = 0;
+    while i < items.len() {
+        if is_check_agents_call(&items[i]) {
+            let mut last_call = i;
+            let mut last_result = None;
+            let mut j = i;
+            while j < items.len() {
+                if is_check_agents_call(&items[j]) {
+                    last_call = j;
+                    if j + 1 < items.len() && is_tool_result(&items[j + 1]) {
+                        last_result = Some(j + 1);
+                        j += 2;
+                    } else {
+                        j += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            build_item_display_lines(&mut lines, &items[last_call], theme, content_width, pad);
+            if let Some(ri) = last_result {
+                build_item_display_lines(&mut lines, &items[ri], theme, content_width, pad);
+            }
+            i = j;
+        } else {
+            build_item_display_lines(&mut lines, &items[i], theme, content_width, pad);
+            i += 1;
+        }
     }
 
     if !tab.streaming_text.is_empty() {
-        let mut label_spans = vec![
-            (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
-            ("✦ ".to_string(), Style::default().fg(theme.warning)),
-            (
-                "phx".to_string(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
-        if turn_count > 0 {
-            label_spans.push((
-                format!(" · T{turn_count}"),
-                Style::default().fg(theme.dim()),
-            ));
-        }
-        lines.push(DisplayLine::multi(label_spans));
         let body_indent = format!("{}  ", " ".repeat(pad as usize));
         let md_lines = render_markdown(
             &tab.streaming_text,
@@ -106,18 +214,47 @@ pub fn compute_display_lines(
     if is_thinking {
         let frame_idx = (frame_tick / 4) as usize;
         let spin = spinner_frame(frame_idx);
-        let thinking_msgs = ["thinking", "thinking.", "thinking..", "thinking..."];
-        let msg = thinking_msgs[(frame_tick / 12) as usize % thinking_msgs.len()];
-        lines.push(DisplayLine::multi(vec![
-            (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
-            (
-                format!("{spin} "),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            (msg.to_string(), Style::default().fg(theme.dim())),
-        ]));
+        let color = spinner_color(frame_idx, theme);
+
+        let last_was_check = items
+            .iter()
+            .rev()
+            .find(|item| {
+                matches!(
+                    item,
+                    ChatItem::Line(ChatLine {
+                        role: Role::ToolCall,
+                        ..
+                    })
+                )
+            })
+            .is_some_and(is_check_agents_call);
+
+        if last_was_check {
+            let dots = &["   ", ".  ", ".. ", "..."][(frame_tick / 8) as usize % 4];
+            lines.push(DisplayLine::multi(vec![
+                (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
+                (
+                    format!("{spin} "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                (
+                    format!("monitoring agents{dots}"),
+                    Style::default().fg(theme.dim()),
+                ),
+            ]));
+        } else {
+            let thinking_msgs = ["thinking", "thinking.", "thinking..", "thinking..."];
+            let msg = thinking_msgs[(frame_tick / 12) as usize % thinking_msgs.len()];
+            lines.push(DisplayLine::multi(vec![
+                (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
+                (
+                    format!("{spin} "),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                (msg.to_string(), Style::default().fg(theme.dim())),
+            ]));
+        }
     }
 
     lines

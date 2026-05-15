@@ -299,6 +299,17 @@ impl SessionPool {
             .collect()
     }
 
+    pub fn try_check_filtered(&self, ids: Option<&[String]>) -> Option<Vec<ChildInfo>> {
+        let children = self.children.try_lock().ok()?;
+        Some(
+            children
+                .iter()
+                .filter(|(id, _)| ids.is_none_or(|ids| ids.contains(id)))
+                .map(|(_, child)| child.to_info())
+                .collect(),
+        )
+    }
+
     pub fn try_check(&self) -> Option<Vec<ChildInfo>> {
         let children = self.children.try_lock().ok()?;
         Some(

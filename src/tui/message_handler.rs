@@ -42,6 +42,30 @@ pub fn start_conversation(app: &mut App, text: String) {
         tab.add_user_message(text.clone());
     }
 
+    if app.conductor_mode {
+        let lower = text.trim().to_lowercase();
+        let is_approval = matches!(
+            lower.as_str(),
+            "go" | "yes"
+                | "approved"
+                | "approve"
+                | "lgtm"
+                | "do it"
+                | "ship it"
+                | "proceed"
+                | "looks good"
+                | "go ahead"
+                | "start"
+                | "run it"
+                | "execute"
+        );
+        if is_approval {
+            app.orch_ctx
+                .plan_approved
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let tool_router = crate::session::tool_router::ToolRouter::from_config(&app.config);
@@ -69,7 +93,7 @@ pub fn start_conversation(app: &mut App, text: String) {
 }
 
 pub fn default_system_prompt() -> &'static str {
-    "You are Phoenix, a fast and capable coding assistant running in a terminal.\n\
+    "You are phx, a fast and capable coding assistant running in a terminal.\n\
      \n\
      You have access to tools for reading files, writing files, editing files, and \
      running shell commands. Use them to help the user with software engineering tasks.\n\
@@ -682,28 +706,43 @@ const CONDUCTOR_TAG: &str = "[phx:conductor]";
 
 const CONDUCTOR_SYSTEM_PROMPT: &str = "\
 [phx:conductor]\n\
-You are now the CONDUCTOR.\n\
+You are the CONDUCTOR — an orchestrator that plans work, gets user approval, then delegates to agents.\n\
 \n\
-You have access to these orchestration tools:\n\
-- spawn_agent: Spawn a child agent on any configured provider. Each child runs in an isolated git worktree.\n\
-- check_agents: Poll the status of all child agents (running, done, error, queued).\n\
-- collect_agent: Retrieve the final output and worktree diff from a completed child agent.\n\
-- cancel_agent: Cancel a running or queued child agent.\n\
-- merge_agent: Merge a completed child's worktree branch back into the parent branch.\n\
+## Tools\n\
+- spawn_agent: Spawn a child agent in an isolated git worktree.\n\
+- check_agents: Check status of all agents (returns a one-line summary — do NOT call repeatedly in a loop).\n\
+- collect_agent: Get final output + diff from a completed agent.\n\
+- cancel_agent: Cancel a running/queued agent.\n\
+- merge_agent: Merge a completed agent's branch back into the parent.\n\
 \n\
-Workflow:\n\
-1. Understand the task and break it into independent sub-tasks.\n\
-2. Spawn an agent for each sub-task with a clear, self-contained prompt.\n\
-3. Monitor progress with check_agents.\n\
-4. Collect results when agents complete.\n\
-5. Merge successful worktrees back, resolve conflicts if needed.\n\
-6. Synthesize the results and report back to the user.\n\
+## Workflow — ALWAYS follow this order:\n\
 \n\
-Guidelines:\n\
-- Give each agent enough context to work independently.\n\
-- Choose the right provider/model for each task (use cheaper models for simple tasks).\n\
-- Keep the user informed about progress.\n\
-- If an agent fails, diagnose and retry or reassign.";
+### 1. Plan\n\
+When the user gives you a task, analyze it and create a plan:\n\
+- Break the work into independent sub-tasks\n\
+- For each sub-task, describe what the agent will do\n\
+- Present the plan to the user in a clear numbered list\n\
+\n\
+### 2. Approve\n\
+Ask the user to approve the plan before spawning any agents.\n\
+Wait for explicit confirmation (\"go\", \"yes\", \"approved\", etc.).\n\
+If the user suggests changes, update the plan and ask again.\n\
+NEVER spawn agents without user approval.\n\
+\n\
+### 3. Execute\n\
+Once approved:\n\
+- Spawn one agent per sub-task with a detailed, self-contained prompt\n\
+- Call check_agents ONCE, then WAIT — do not poll in a loop\n\
+- When you see agents are done (from a subsequent check), collect results\n\
+- Merge successful worktrees back\n\
+- Report results to the user\n\
+\n\
+## Guidelines\n\
+- Be concise — the user can see agent status in the panel\n\
+- Give each agent enough context to work independently\n\
+- Choose cheaper models for simple tasks\n\
+- If an agent fails, tell the user and ask how to proceed\n\
+- Do NOT call check_agents more than once between user messages";
 
 pub fn activate_conductor(app: &mut App) {
     toggle_conductor_mode(app, true);
@@ -715,6 +754,9 @@ fn deactivate_conductor_mode(app: &mut App) {
 
 fn toggle_conductor_mode(app: &mut App, activate: bool) {
     app.conductor_mode = activate;
+    app.orch_ctx
+        .plan_approved
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     if !activate {
         if let Some(session) = &mut app.session {

@@ -111,20 +111,6 @@ fn build_assistant_display_lines(
     let indent = " ".repeat(pad as usize);
     let body_indent = format!("{}  ", indent);
 
-    let mut label_spans = vec![
-        (format!("{}  ", indent), Style::default()),
-        ("✦ ".to_string(), Style::default().fg(theme.warning)),
-        (
-            "phx".to_string(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if al.turn > 0 {
-        label_spans.push((format!(" · T{}", al.turn), Style::default().fg(theme.dim())));
-    }
-    lines.push(DisplayLine::multi(label_spans));
     let md_lines = render_markdown(
         &al.content,
         theme,

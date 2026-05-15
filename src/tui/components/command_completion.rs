@@ -66,6 +66,7 @@ pub fn render_command_completion(
     input_area: Rect,
     picker: &PickerState,
     theme: &Theme,
+    reserve_right: u16,
 ) {
     let max_visible = 8usize;
     let count = picker.visible_count().min(max_visible);
@@ -73,10 +74,11 @@ pub fn render_command_completion(
         return;
     }
 
+    let pad_x = 2u16;
     let popup_height = count as u16 + 2;
-    let popup_width = input_area.width.min(50);
+    let popup_width = input_area.width.saturating_sub(pad_x * 2 + reserve_right);
     let popup_area = Rect {
-        x: input_area.x,
+        x: input_area.x + pad_x,
         y: input_area.y.saturating_sub(popup_height),
         width: popup_width,
         height: popup_height,
@@ -126,7 +128,7 @@ pub fn render_command_completion(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.primary))
+        .border_style(Style::default().fg(Theme::blend(theme.accent, theme.background, 0.5)))
         .border_type(BorderType::Rounded)
         .style(Style::default().bg(theme.background));
 
