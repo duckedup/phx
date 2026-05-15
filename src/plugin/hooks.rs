@@ -163,7 +163,7 @@ impl Default for HookDispatcher {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

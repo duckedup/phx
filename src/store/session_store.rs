@@ -335,7 +335,7 @@ async fn fsync_path(path: &Path) -> StoreResult<()> {
 // Tests
 // ===========================================================================
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use chrono::TimeZone;

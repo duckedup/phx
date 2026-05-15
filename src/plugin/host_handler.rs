@@ -176,7 +176,7 @@ impl HostHandler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::config::schema::Config;

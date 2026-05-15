@@ -67,7 +67,7 @@ pub fn register_skill_hooks(skills: &[Skill], dispatcher: &super::hooks::HookDis
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::session::skills::SkillSource;

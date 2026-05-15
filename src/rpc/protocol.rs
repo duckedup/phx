@@ -136,7 +136,7 @@ pub async fn write_error_line(
     write_event_line(writer, id, "error", serde_json::json!({"message": message})).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

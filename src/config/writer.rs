@@ -172,7 +172,7 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<(), ConfigError> {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::config::schema::*;

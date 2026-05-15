@@ -127,7 +127,7 @@ pub fn active_provider_usable(cfg: &Config) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::config::schema::*;

@@ -189,7 +189,7 @@ impl Provider for MockProvider {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use futures::StreamExt;

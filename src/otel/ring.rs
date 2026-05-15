@@ -261,6 +261,7 @@ mod tests {
         assert_eq!(snap[0].target, "test");
     }
 
+    #[cfg_attr(miri, ignore)]
     #[tokio::test]
     async fn test_subscribe_receives_events() {
         let ring = RingBuffer::new(16);
@@ -278,6 +279,7 @@ mod tests {
         assert_eq!(received.level, EventLevel::Warn);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[tokio::test]
     async fn test_subscribe_multiple_events() {
         let ring = RingBuffer::new(16);

@@ -524,7 +524,7 @@ impl Session {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::providers::traits::{Event, MockProvider, Usage};

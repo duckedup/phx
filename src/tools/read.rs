@@ -108,7 +108,7 @@ impl Tool for ReadTool {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::tools::traits::NoopInputRequester;

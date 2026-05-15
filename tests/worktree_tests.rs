@@ -1,3 +1,5 @@
+#![cfg(not(miri))]
+
 use phx::worktree::{MergeStrategy, WorktreeManager};
 use tempfile::TempDir;
 

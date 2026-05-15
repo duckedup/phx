@@ -1,3 +1,5 @@
+#![cfg(not(miri))]
+
 use std::path::Path;
 
 use phx::plugin::plugin_runtime::PluginRuntime;

@@ -1042,7 +1042,7 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 
