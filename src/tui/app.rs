@@ -667,8 +667,6 @@ impl App {
                 PickerMode::Theme
                 | PickerMode::Model
                 | PickerMode::Session
-                | PickerMode::ConductorModelPick
-                | PickerMode::ConductorAgent
                 | PickerMode::ConductorTracker => {
                     let action = modal_picker::handle_key(self.picker.as_mut().unwrap(), key);
                     self.apply_picker_action(action);
@@ -945,8 +943,6 @@ impl App {
                 PickerMode::Theme
                 | PickerMode::Model
                 | PickerMode::Session
-                | PickerMode::ConductorModelPick
-                | PickerMode::ConductorAgent
                 | PickerMode::ConductorTracker => {
                     modal_picker::render_modal_picker(frame, picker, &self.theme);
                 }
@@ -1019,58 +1015,6 @@ impl App {
                     }
                     Some(PickerMode::Session) => {
                         self.pending_session_resume = Some(selected.id.clone());
-                    }
-                    Some(PickerMode::ConductorModelPick) => {
-                        if let Some((provider, model)) = selected.id.split_once('/') {
-                            self.config.conductor.conductor_provider = Some(provider.to_string());
-                            self.config.conductor.conductor_model = Some(model.to_string());
-                            self.show_toast(format!("Conductor: {}", selected.label));
-                        }
-                        let items = message_handler::build_conductor_picker_items(&self.config);
-                        let picker_items: Vec<PickerItem> = items
-                            .into_iter()
-                            .map(|(id, label, desc)| PickerItem {
-                                id,
-                                label,
-                                description: desc,
-                                source_tag: None,
-                            })
-                            .collect();
-                        self.picker =
-                            Some(PickerState::new(picker_items, PickerMode::ConductorAgent));
-                        return;
-                    }
-                    Some(PickerMode::ConductorAgent) => {
-                        if let Some((provider, model)) = selected.id.split_once('/') {
-                            self.config.conductor.agent_provider = Some(provider.to_string());
-                            self.config.conductor.agent_model = Some(model.to_string());
-                            self.show_toast(format!("Sub-agents: {}", selected.label));
-                        }
-                        let tracker_items = vec![
-                            PickerItem {
-                                id: "beads".into(),
-                                label: "Beads".into(),
-                                description: "Git-native issue tracking (bd CLI)".into(),
-                                source_tag: None,
-                            },
-                            PickerItem {
-                                id: "linear".into(),
-                                label: "Linear".into(),
-                                description: "Linear project management (linear-mg CLI)".into(),
-                                source_tag: None,
-                            },
-                            PickerItem {
-                                id: "none".into(),
-                                label: "None".into(),
-                                description: "No tracker — tasks given directly".into(),
-                                source_tag: None,
-                            },
-                        ];
-                        self.picker = Some(PickerState::new(
-                            tracker_items,
-                            PickerMode::ConductorTracker,
-                        ));
-                        return;
                     }
                     Some(PickerMode::ConductorTracker) => {
                         let tracker = if selected.id == "none" {
@@ -1563,6 +1507,9 @@ async fn run_loop(
 
         app.drain_panels();
         app.drain_conversations();
+        if let Some(ref mut ob) = app.onboarding {
+            ob.poll_models();
+        }
         for tab in &mut app.tabs {
             crate::tui::rendering::helpers::drain_stream_buffer(tab);
         }
@@ -1708,8 +1655,6 @@ async fn run_loop(
                                     PickerMode::Theme
                                     | PickerMode::Model
                                     | PickerMode::Session
-                                    | PickerMode::ConductorModelPick
-                                    | PickerMode::ConductorAgent
                                     | PickerMode::ConductorTracker => {
                                         let action = modal_picker::handle_click(
                                             picker,

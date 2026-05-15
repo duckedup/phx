@@ -62,12 +62,4 @@ impl ToolRouter {
     pub fn is_routed(&self, tool_name: &str) -> bool {
         self.routes.contains_key(tool_name)
     }
-
-    pub fn routed_tool_names(&self, provider_name: &str) -> Vec<String> {
-        self.routes
-            .iter()
-            .filter(|(_, pn)| *pn == provider_name)
-            .map(|(tool, _)| tool.clone())
-            .collect()
-    }
 }

@@ -6,8 +6,6 @@ pub enum PickerMode {
     Session,
     Theme,
     CommandComplete,
-    ConductorModelPick,
-    ConductorAgent,
     ConductorTracker,
 }
 

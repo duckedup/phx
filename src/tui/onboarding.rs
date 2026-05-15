@@ -1,3 +1,4 @@
+use std::sync::mpsc;
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -72,6 +73,7 @@ enum Step {
     Provider,
     BaseUrl,
     ApiKey,
+    Fetching,
     Model,
     CustomModel,
 }
@@ -81,7 +83,7 @@ impl Step {
         match self {
             Step::Provider => 0,
             Step::BaseUrl | Step::ApiKey => 1,
-            Step::Model | Step::CustomModel => 2,
+            Step::Fetching | Step::Model | Step::CustomModel => 2,
         }
     }
 }
@@ -100,6 +102,7 @@ pub struct OnboardingState {
     models: Vec<String>,
     model_selected: usize,
     fetch_error: Option<String>,
+    model_rx: Option<mpsc::Receiver<Result<Vec<String>, String>>>,
 }
 
 pub enum Action {
@@ -131,6 +134,7 @@ impl OnboardingState {
             models: Vec::new(),
             model_selected: 0,
             fetch_error: None,
+            model_rx: None,
         }
     }
 
@@ -150,6 +154,58 @@ impl OnboardingState {
             models: Vec::new(),
             model_selected: 0,
             fetch_error: None,
+            model_rx: None,
+        }
+    }
+
+    pub fn poll_models(&mut self) {
+        let rx = match self.model_rx.take() {
+            Some(rx) => rx,
+            None => return,
+        };
+        match rx.try_recv() {
+            Ok(result) => self.apply_fetch_result(result),
+            Err(mpsc::TryRecvError::Empty) => {
+                self.model_rx = Some(rx);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.apply_fetch_result(Err("model fetch failed".into()));
+            }
+        }
+    }
+
+    fn apply_fetch_result(&mut self, result: Result<Vec<String>, String>) {
+        let preset = &PRESETS[self.selected];
+        match result {
+            Ok(m) if !m.is_empty() => {
+                self.models = m;
+                self.step = Step::Model;
+            }
+            Ok(_) => {
+                self.fetch_error = Some(if preset.kind == ProviderKind::Ollama {
+                    "No models found — run: ollama pull <model>".into()
+                } else {
+                    "No models returned by API".into()
+                });
+                self.models = static_models_for(preset.kind);
+                self.transition_to_model_or_custom();
+            }
+            Err(e) => {
+                self.fetch_error = Some(e);
+                self.models = static_models_for(preset.kind);
+                self.transition_to_model_or_custom();
+            }
+        }
+    }
+
+    fn transition_to_model_or_custom(&mut self) {
+        let preset = &PRESETS[self.selected];
+        if self.models.is_empty() {
+            self.model_buf = preset.default_model.to_string();
+            self.model_cursor = self.model_buf.len();
+            self.step = Step::CustomModel;
+        } else {
+            self.step = Step::Model;
         }
     }
 
@@ -160,6 +216,7 @@ impl OnboardingState {
             Step::Provider => self.handle_provider_key(key),
             Step::BaseUrl => self.handle_baseurl_key(key),
             Step::ApiKey => self.handle_apikey_key(key),
+            Step::Fetching => self.handle_fetching_key(key),
             Step::Model => self.handle_model_key(key),
             Step::CustomModel => self.handle_custom_model_key(key),
         }
@@ -219,29 +276,14 @@ impl OnboardingState {
         let api_key = self.resolve_api_key();
         let base_url = self.resolve_base_url();
 
-        match fetch_provider_models(preset.kind, api_key.as_deref(), base_url.as_deref()) {
-            Ok(m) if !m.is_empty() => self.models = m,
-            Ok(_) => {
-                self.fetch_error = Some(if preset.kind == ProviderKind::Ollama {
-                    "No models found — run: ollama pull <model>".into()
-                } else {
-                    "No models returned by API".into()
-                });
-                self.models = static_models_for(preset.kind);
-            }
-            Err(e) => {
-                self.fetch_error = Some(e);
-                self.models = static_models_for(preset.kind);
-            }
-        }
-
-        if self.models.is_empty() {
-            self.model_buf = preset.default_model.to_string();
-            self.model_cursor = self.model_buf.len();
-            self.step = Step::CustomModel;
-        } else {
-            self.step = Step::Model;
-        }
+        let (tx, rx) = mpsc::channel();
+        let kind = preset.kind;
+        std::thread::spawn(move || {
+            let result = fetch_models_blocking(kind, api_key.as_deref(), base_url.as_deref());
+            let _ = tx.send(result);
+        });
+        self.model_rx = Some(rx);
+        self.step = Step::Fetching;
     }
 
     fn finish(&self) -> Action {
@@ -340,6 +382,19 @@ impl OnboardingState {
             }
             KeyCode::Esc => self.step = Step::Provider,
             _ => {}
+        }
+        Action::None
+    }
+
+    fn handle_fetching_key(&mut self, key: KeyEvent) -> Action {
+        if key.code == KeyCode::Esc {
+            self.model_rx = None;
+            let preset = &PRESETS[self.selected];
+            self.step = if preset.kind.is_local() {
+                Step::BaseUrl
+            } else {
+                Step::ApiKey
+            };
         }
         Action::None
     }
@@ -452,6 +507,7 @@ impl OnboardingState {
             Step::Provider => self.render_provider(frame, rows[1], theme),
             Step::BaseUrl => self.render_baseurl(frame, rows[1], theme),
             Step::ApiKey => self.render_apikey(frame, rows[1], theme),
+            Step::Fetching => self.render_fetching(frame, rows[1], theme),
             Step::Model => self.render_model(frame, rows[1], theme),
             Step::CustomModel => self.render_custom_model(frame, rows[1], theme),
         }
@@ -484,6 +540,7 @@ impl OnboardingState {
         let hints = match self.step {
             Step::Provider => "↑↓ navigate  ⏎ select  esc quit",
             Step::BaseUrl | Step::ApiKey | Step::CustomModel => "⏎ confirm  esc back",
+            Step::Fetching => "esc cancel",
             Step::Model => "↑↓ navigate  ⏎ select  esc back",
         };
         let dim = Style::default().fg(theme.dim());
@@ -590,6 +647,16 @@ impl OnboardingState {
         frame.render_widget(Paragraph::new(lines), area);
     }
 
+    fn render_fetching(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let preset = &PRESETS[self.selected];
+        let lines = vec![
+            Line::from(""),
+            d::heading("Fetching models", theme),
+            d::hint_owned(format!("Connecting to {}...", preset.display), theme),
+        ];
+        frame.render_widget(Paragraph::new(lines), area);
+    }
+
     fn render_model(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let has_error = self.fetch_error.is_some();
         let overhead: usize = if has_error { 5 } else { 3 };
@@ -693,18 +760,6 @@ fn static_models_for(kind: ProviderKind) -> Vec<String> {
 
 // ── Dynamic model fetching ──────────────────────────────────────
 
-fn fetch_provider_models(
-    kind: ProviderKind,
-    api_key: Option<&str>,
-    base_url: Option<&str>,
-) -> Result<Vec<String>, String> {
-    let api_key = api_key.map(String::from);
-    let base_url = base_url.map(String::from);
-    std::thread::spawn(move || fetch_models_blocking(kind, api_key.as_deref(), base_url.as_deref()))
-        .join()
-        .map_err(|_| "model fetch thread panicked".to_string())?
-}
-
 fn fetch_models_blocking(
     kind: ProviderKind,
     api_key: Option<&str>,
@@ -774,9 +829,8 @@ fn fetch_models_blocking(
         ProviderKind::Gemini => {
             let key = api_key.ok_or("API key required")?;
             let resp = client
-                .get(format!(
-                    "https://generativelanguage.googleapis.com/v1beta/models?key={key}"
-                ))
+                .get("https://generativelanguage.googleapis.com/v1beta/models")
+                .header("x-goog-api-key", key)
                 .send()
                 .map_err(|e| format!("Gemini API error: {e}"))?;
             let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
