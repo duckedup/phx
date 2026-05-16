@@ -39,7 +39,10 @@ pub fn register_orchestration_tools(registry: &mut ToolRegistry, ctx: Arc<Orches
     registry.register(Arc::new(CancelAgentTool {
         ctx: Arc::clone(&ctx),
     }));
-    registry.register(Arc::new(MergeAgentTool { ctx }));
+    registry.register(Arc::new(MergeAgentTool {
+        ctx: Arc::clone(&ctx),
+    }));
+    registry.register(Arc::new(WaitAgentsTool { ctx }));
 }
 
 // ---------------------------------------------------------------------------
@@ -530,5 +533,122 @@ impl Tool for MergeAgentTool {
             })
             .to_string(),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wait_agents — event-driven wait for all agents to complete
+// ---------------------------------------------------------------------------
+
+pub struct WaitAgentsTool {
+    ctx: Arc<OrchestrationContext>,
+}
+
+#[async_trait]
+impl Tool for WaitAgentsTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "wait_agents".into(),
+            description: "Wait for all running agents to complete. \
+                          Blocks until every agent is done or errored, then returns a summary. \
+                          Use this instead of polling check_agents in a loop."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Maximum seconds to wait. Default: 300 (5 minutes)."
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        args: Value,
+        _input: &dyn InputRequester,
+    ) -> Result<ToolResult, ToolError> {
+        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+
+        let mut rx = self.ctx.pool.subscribe_done();
+
+        let pending: Vec<String> = self
+            .ctx
+            .pool
+            .try_check_filtered(None)
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| {
+                c.status == crate::session::orchestration::ChildStatus::Running
+                    || c.status == crate::session::orchestration::ChildStatus::Queued
+            })
+            .map(|c| c.session_id.clone())
+            .collect();
+
+        if pending.is_empty() {
+            let all = self.ctx.pool.try_check_filtered(None).unwrap_or_default();
+            let done = all
+                .iter()
+                .filter(|c| c.status == crate::session::orchestration::ChildStatus::Done)
+                .count();
+            let errored = all
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c.status,
+                        crate::session::orchestration::ChildStatus::Error(_)
+                    )
+                })
+                .count();
+            return Ok(ToolResult::success(format!(
+                "All agents finished. {done} done, {errored} errors."
+            )));
+        }
+
+        let mut remaining: std::collections::HashSet<String> = pending.into_iter().collect();
+        let total = remaining.len();
+
+        let result = tokio::time::timeout(timeout, async {
+            while !remaining.is_empty() {
+                match rx.recv().await {
+                    Ok(done) => {
+                        remaining.remove(&done.session_id);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        })
+        .await;
+
+        let finished = total - remaining.len();
+        let all = self.ctx.pool.try_check_filtered(None).unwrap_or_default();
+        let done = all
+            .iter()
+            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Done)
+            .count();
+        let errored = all
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    crate::session::orchestration::ChildStatus::Error(_)
+                )
+            })
+            .count();
+
+        if result.is_err() {
+            Ok(ToolResult::success(format!(
+                "Timed out after {timeout_secs}s. {finished}/{total} finished. {done} done, {errored} errors, {} still running.",
+                remaining.len()
+            )))
+        } else {
+            Ok(ToolResult::success(format!(
+                "All agents finished. {done} done, {errored} errors."
+            )))
+        }
     }
 }

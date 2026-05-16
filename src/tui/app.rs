@@ -419,6 +419,8 @@ impl App {
                         if tab_idx == 0 {
                             self.session = Some(session);
                             self.is_running = false;
+                        } else if let Some(sid) = &agent.session_id {
+                            self.session_pool.mark_done(sid, false);
                         }
                         finished.push(i);
                         break;
@@ -427,6 +429,8 @@ impl App {
                         if tab_idx == 0 {
                             self.session = Some(session);
                             self.is_running = false;
+                        } else if let Some(sid) = &agent.session_id {
+                            self.session_pool.mark_done(sid, true);
                         }
                         finished.push(i);
                         break;

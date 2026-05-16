@@ -135,24 +135,37 @@ pub struct AgentSpawned {
     pub conv_rx: tokio::sync::mpsc::UnboundedReceiver<crate::session::conversation::ConvEvent>,
 }
 
+#[derive(Clone, Debug)]
+pub struct AgentDone {
+    pub session_id: String,
+    pub success: bool,
+}
+
 pub struct SessionPool {
     children: Arc<Mutex<HashMap<String, ChildHandle>>>,
     semaphore: Arc<Semaphore>,
     pub worktrees: Option<WorktreeManager>,
     spawned_tx: tokio::sync::mpsc::UnboundedSender<AgentSpawned>,
     spawned_rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<AgentSpawned>>,
+    done_tx: tokio::sync::broadcast::Sender<AgentDone>,
 }
 
 impl SessionPool {
     pub fn new(max_concurrent: usize, worktrees: Option<WorktreeManager>) -> Self {
         let (spawned_tx, spawned_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (done_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             children: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             worktrees,
             spawned_tx,
             spawned_rx: Mutex::new(spawned_rx),
+            done_tx,
         }
+    }
+
+    pub fn subscribe_done(&self) -> tokio::sync::broadcast::Receiver<AgentDone> {
+        self.done_tx.subscribe()
     }
 
     pub fn drain_spawned(&self) -> Vec<AgentSpawned> {
@@ -308,6 +321,22 @@ impl SessionPool {
                 .map(|(_, child)| child.to_info())
                 .collect(),
         )
+    }
+
+    pub fn mark_done(&self, session_id: &str, success: bool) {
+        if let Ok(mut children) = self.children.try_lock()
+            && let Some(handle) = children.get_mut(session_id)
+        {
+            handle.status = if success {
+                ChildStatus::Done
+            } else {
+                ChildStatus::Error("cancelled".into())
+            };
+        }
+        let _ = self.done_tx.send(AgentDone {
+            session_id: session_id.to_string(),
+            success,
+        });
     }
 
     pub fn try_check(&self) -> Option<Vec<ChildInfo>> {
