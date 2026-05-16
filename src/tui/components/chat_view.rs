@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 use crate::session::message::Role;
+use crate::session::orchestration::{ChildInfo, ChildStatus};
 use crate::tui::layout::CHAT_PADDING;
 use crate::tui::rendering::display::{DisplayLine, build_item_display_lines};
 use crate::tui::rendering::helpers::{spinner_color, spinner_frame};
@@ -139,6 +140,100 @@ fn truncate_line(line: &Line<'static>, max_chars: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+// ---------------------------------------------------------------------------
+// Live agent tree — rebuilds from pool state every frame
+// ---------------------------------------------------------------------------
+
+fn build_live_agents_tree(
+    lines: &mut Vec<DisplayLine>,
+    agents: &[ChildInfo],
+    theme: &Theme,
+    pad: u16,
+    frame_tick: u64,
+) {
+    let indent = " ".repeat(pad as usize);
+    let dim = Style::default().fg(theme.dim());
+
+    if agents.is_empty() {
+        return;
+    }
+
+    let header_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+
+    lines.push(DisplayLine::multi(vec![
+        (format!("{indent}  "), Style::default()),
+        ("Agents".to_string(), header_style),
+    ]));
+
+    for (i, agent) in agents.iter().enumerate() {
+        let is_last = i + 1 == agents.len();
+        let connector = if is_last { "╰" } else { "├" };
+        let is_working =
+            agent.status == ChildStatus::Running || agent.status == ChildStatus::Queued;
+
+        let (status_icon, status_style) = if is_working {
+            let frame_idx = ((frame_tick / 4) + i as u64) as usize;
+            let spin = spinner_frame(frame_idx);
+            let color = spinner_color(frame_idx, theme);
+            (
+                spin.to_string(),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
+        } else if agent.status == ChildStatus::Done {
+            ("✓".to_string(), Style::default().fg(theme.success))
+        } else {
+            ("✗".to_string(), Style::default().fg(theme.error))
+        };
+
+        let status_text = match &agent.status {
+            ChildStatus::Running => "working",
+            ChildStatus::Queued => "queued",
+            ChildStatus::Done => "done",
+            ChildStatus::Error(_) => "error",
+            ChildStatus::Cancelled => "cancelled",
+        };
+
+        let status_label = if is_working {
+            let dots_idx = ((frame_tick / 8) + i as u64) as usize % 4;
+            let dots = ["   ", ".  ", ".. ", "..."][dots_idx];
+            format!("{status_text}{dots}")
+        } else {
+            status_text.to_string()
+        };
+
+        let elapsed = format!("{:.0}s", agent.elapsed_s);
+
+        let mut parts = vec![
+            (format!("{indent}  "), Style::default()),
+            (format!("{connector}── "), dim),
+            (format!("{status_icon} "), status_style),
+            (agent.task.clone(), Style::default().fg(theme.foreground)),
+            (
+                format!(" {status_label}"),
+                if is_working {
+                    Style::default().fg(theme.accent)
+                } else {
+                    dim
+                },
+            ),
+            (format!(" {elapsed}"), dim),
+        ];
+
+        if let Some(tool) = &agent.active_tool {
+            parts.push((format!(" ({tool})"), dim));
+        }
+
+        lines.push(DisplayLine::multi(parts));
+    }
+    lines.push(DisplayLine::empty());
+}
+
+// ---------------------------------------------------------------------------
+// Main display line computation
+// ---------------------------------------------------------------------------
+
 pub fn compute_display_lines(
     tab: Option<&Tab>,
     theme: &Theme,
@@ -146,6 +241,7 @@ pub fn compute_display_lines(
     frame_tick: u64,
     width: u16,
     _turn_count: u32,
+    live_agents: &[ChildInfo],
 ) -> Vec<DisplayLine> {
     let pad = CHAT_PADDING;
     let content_width = (width as usize).saturating_sub(pad as usize * 2);
@@ -169,17 +265,20 @@ pub fn compute_display_lines(
     let mut lines = Vec::new();
 
     let items = &tab.chat_lines;
+
+    // Find the LAST check_agents call — only that one renders the live tree
+    let last_check_idx = items
+        .iter()
+        .rposition(|item| is_check_agents_call(item));
+
     let mut i = 0;
     while i < items.len() {
         if is_check_agents_call(&items[i]) {
-            let mut last_call = i;
-            let mut last_result = None;
+            // Skip the call and its result
             let mut j = i;
             while j < items.len() {
                 if is_check_agents_call(&items[j]) {
-                    last_call = j;
                     if j + 1 < items.len() && is_tool_result(&items[j + 1]) {
-                        last_result = Some(j + 1);
                         j += 2;
                     } else {
                         j += 1;
@@ -188,9 +287,11 @@ pub fn compute_display_lines(
                     break;
                 }
             }
-            build_item_display_lines(&mut lines, &items[last_call], theme, content_width, pad);
-            if let Some(ri) = last_result {
-                build_item_display_lines(&mut lines, &items[ri], theme, content_width, pad);
+            // Only render the live tree at the LAST check_agents position
+            if Some(i) == last_check_idx
+                || (last_check_idx.is_some_and(|li| li > i && li < j))
+            {
+                build_live_agents_tree(&mut lines, live_agents, theme, pad, frame_tick);
             }
             i = j;
         } else {
@@ -216,45 +317,16 @@ pub fn compute_display_lines(
         let spin = spinner_frame(frame_idx);
         let color = spinner_color(frame_idx, theme);
 
-        let last_was_check = items
-            .iter()
-            .rev()
-            .find(|item| {
-                matches!(
-                    item,
-                    ChatItem::Line(ChatLine {
-                        role: Role::ToolCall,
-                        ..
-                    })
-                )
-            })
-            .is_some_and(is_check_agents_call);
-
-        if last_was_check {
-            let dots = &["   ", ".  ", ".. ", "..."][(frame_tick / 8) as usize % 4];
-            lines.push(DisplayLine::multi(vec![
-                (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
-                (
-                    format!("{spin} "),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                (
-                    format!("monitoring agents{dots}"),
-                    Style::default().fg(theme.dim()),
-                ),
-            ]));
-        } else {
-            let thinking_msgs = ["thinking", "thinking.", "thinking..", "thinking..."];
-            let msg = thinking_msgs[(frame_tick / 12) as usize % thinking_msgs.len()];
-            lines.push(DisplayLine::multi(vec![
-                (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
-                (
-                    format!("{spin} "),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                (msg.to_string(), Style::default().fg(theme.dim())),
-            ]));
-        }
+        let thinking_msgs = ["thinking", "thinking.", "thinking..", "thinking..."];
+        let msg = thinking_msgs[(frame_tick / 12) as usize % thinking_msgs.len()];
+        lines.push(DisplayLine::multi(vec![
+            (format!("{}  ", " ".repeat(pad as usize)), Style::default()),
+            (
+                format!("{spin} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            (msg.to_string(), Style::default().fg(theme.dim())),
+        ]));
     }
 
     lines

@@ -217,6 +217,7 @@ where
 mod tests {
     use super::*;
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_ring_capacity_eviction() {
         let ring = RingBuffer::new(3);
@@ -246,6 +247,7 @@ mod tests {
         assert!(ring.snapshot().is_empty());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_ring_under_capacity() {
         let ring = RingBuffer::new(10);
@@ -309,6 +311,7 @@ mod tests {
         assert_eq!(EventLevel::from(&Level::ERROR), EventLevel::Error);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_capacity_one() {
         let ring = RingBuffer::new(1);

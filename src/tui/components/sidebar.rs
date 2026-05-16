@@ -193,22 +193,21 @@ pub fn hit_test(area: Rect, row: u16, col: u16, state: &SidebarState) -> Option<
         return None;
     }
 
-    // inner_y: 0-based line inside the border (top border = 1 row)
     let inner_y = (row - area.y).saturating_sub(1) as usize;
 
-    // Line 0: ◆ Conductor
-    if inner_y == 0 {
+    // Line 0: Conductor row
+    // Line 1: "waiting…" or blank
+    // Line 2: separator
+    // Line 3+: agents (2 lines each: name + detail)
+    if inner_y <= 1 {
         return Some(SidebarSelection::Conductor);
     }
 
-    // Line 1: "waiting…" (no agents) or blank
-    // Line 2: blank separator (only when agents exist)
-    let agent_start = if state.agents.is_empty() {
+    if state.agents.is_empty() {
         return None;
-    } else {
-        2
-    };
+    }
 
+    let agent_start = 3;
     for (i, agent) in state.agents.iter().enumerate() {
         let line = agent_start + i * 2;
         if inner_y >= line && inner_y < line + 2 {

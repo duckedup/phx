@@ -84,17 +84,17 @@ pub fn parse(input: &str) -> (&str, &str) {
     }
 }
 
-pub fn dispatch(
+pub async fn dispatch(
     input: &str,
     config: &Config,
     skills: &[Skill],
     store: &SessionStore,
     project: &Path,
 ) -> CommandResult {
-    dispatch_with_plugins(input, config, skills, store, project, None, None)
+    dispatch_with_plugins(input, config, skills, store, project, None, None).await
 }
 
-pub fn dispatch_with_plugins(
+pub async fn dispatch_with_plugins(
     input: &str,
     config: &Config,
     skills: &[Skill],
@@ -115,8 +115,8 @@ pub fn dispatch_with_plugins(
         "skill" => skill::handle_skill(args, skills),
         "theme" => theme::handle_theme(args),
         "connect" => connect::handle_connect(),
-        "resume" => session_cmd::handle_resume(store, project),
-        "sessions" => session_cmd::handle_resume(store, project),
+        "resume" => session_cmd::handle_resume(store, project).await,
+        "sessions" => session_cmd::handle_resume(store, project).await,
         "clear" => session_cmd::handle_clear(),
         "compact" => session_cmd::handle_compact(),
         "route" => CommandResult::Route(route::handle(args, config)),
@@ -331,11 +331,12 @@ mod tests {
         assert_eq!(parse("/skill  my-skill  "), ("skill", "my-skill"));
     }
 
-    #[test]
-    fn dispatch_unknown_command() {
+    #[cfg_attr(miri, ignore)]
+    #[tokio::test]
+    async fn dispatch_unknown_command() {
         let config = Config::default();
         let store = SessionStore::new(std::path::PathBuf::from("/tmp/test"));
-        let result = dispatch("/nonexistent", &config, &[], &store, Path::new("/test"));
+        let result = dispatch("/nonexistent", &config, &[], &store, Path::new("/test")).await;
         matches!(result, CommandResult::Error(_));
     }
 

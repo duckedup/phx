@@ -22,8 +22,6 @@ pub struct OrchestrationContext {
     pub project: PathBuf,
     pub parent_provider: RwLock<String>,
     pub parent_tools: RwLock<ToolRegistry>,
-    pub agents: RwLock<Vec<crate::session::agents::AgentDefinition>>,
-    pub plan_approved: std::sync::atomic::AtomicBool,
 }
 
 pub fn register_orchestration_tools(registry: &mut ToolRegistry, ctx: Arc<OrchestrationContext>) {
@@ -42,7 +40,6 @@ pub fn register_orchestration_tools(registry: &mut ToolRegistry, ctx: Arc<Orches
     registry.register(Arc::new(MergeAgentTool {
         ctx: Arc::clone(&ctx),
     }));
-    registry.register(Arc::new(WaitAgentsTool { ctx }));
 }
 
 // ---------------------------------------------------------------------------
@@ -88,10 +85,6 @@ impl Tool for SpawnAgentTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "File paths to pre-load into the child's conversation."
-                    },
-                    "agent": {
-                        "type": "string",
-                        "description": "Name of a custom agent definition to use. Overrides system prompt, tools, and optionally provider/model with the agent's configuration."
                     }
                 },
                 "required": ["prompt"]
@@ -104,17 +97,6 @@ impl Tool for SpawnAgentTool {
         args: Value,
         _input: &dyn InputRequester,
     ) -> Result<ToolResult, ToolError> {
-        if !self
-            .ctx
-            .plan_approved
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Ok(ToolResult::error(
-                "Plan not approved. Present your plan to the user first, \
-                 then wait for them to say \"go\" or \"approved\" before spawning agents.",
-            ));
-        }
-
         let prompt = args["prompt"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'prompt'".into()))?
@@ -132,28 +114,14 @@ impl Tool for SpawnAgentTool {
                     .collect()
             })
             .unwrap_or_default();
-        let agent_name = args["agent"].as_str();
-
-        let agent_def = if let Some(name) = agent_name {
-            let agents = self.ctx.agents.read();
-            let def = crate::session::agents::find_agent(&agents, name)
-                .ok_or_else(|| ToolError::InvalidArgs(format!("unknown custom agent: {name}")))?
-                .clone();
-            Some(def)
-        } else {
-            None
-        };
 
         let config = self.ctx.config.read().clone();
         let parent_provider = self.ctx.parent_provider.read().clone();
 
         let effective_provider = provider_name
-            .or(agent_def.as_ref().and_then(|d| d.provider.as_deref()))
             .or(config.conductor.agent_provider.as_deref())
             .unwrap_or(&parent_provider);
-        let effective_model = model_override
-            .or(agent_def.as_ref().and_then(|d| d.model.as_deref()))
-            .or(config.conductor.agent_model.as_deref());
+        let effective_model = model_override.or(config.conductor.agent_model.as_deref());
 
         let (provider, prov_name, model_name) = SessionPool::resolve_provider(
             &config,
@@ -171,39 +139,18 @@ impl Tool for SpawnAgentTool {
 
         let tools = {
             let parent_tools = self.ctx.parent_tools.read();
-            let reg = if let Some(ref def) = agent_def {
-                if def.tools.is_empty() {
-                    parent_tools.clone()
-                } else {
-                    let mut reg = ToolRegistry::new();
-                    for tool_name in &def.tools {
-                        if let Some(tool) = parent_tools.get(tool_name) {
-                            reg.register(tool);
-                        } else if let Some(tool) = super::lookup(tool_name) {
-                            reg.register(tool);
-                        } else {
-                            tracing::warn!(
-                                "custom agent '{}': unknown tool '{}'",
-                                def.name,
-                                tool_name
-                            );
-                        }
-                    }
-                    reg
-                }
-            } else {
-                parent_tools.clone()
-            };
-            std::sync::Arc::new(parking_lot::RwLock::new(reg))
+            std::sync::Arc::new(parking_lot::RwLock::new(parent_tools.clone()))
         };
 
-        let system_prompt_override = agent_def.as_ref().map(|d| d.system_prompt.clone());
+        let system_prompt_override = None;
 
         let worktree = if use_worktree {
-            self.ctx.pool.worktrees.as_ref().and_then(|mgr| {
+            if let Some(mgr) = &self.ctx.pool.worktrees {
                 let child_id = format!("{}", uuid::Uuid::now_v7().simple());
-                mgr.create(&child_id).ok()
-            })
+                mgr.create(&child_id).await.ok()
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -228,7 +175,7 @@ impl Tool for SpawnAgentTool {
             })
             .await;
 
-        let agent_label = agent_name.unwrap_or("default");
+        let agent_label = "default";
         let wt_info = worktree
             .as_ref()
             .map(|w| format!(" on branch {}", w.branch))
@@ -295,21 +242,29 @@ impl Tool for CheckAgentsTool {
             return Ok(ToolResult::success("No agents."));
         }
 
-        let total = children.len();
-        let mut running = 0usize;
-        let mut done = 0usize;
-
+        let mut lines = Vec::new();
         for child in &children {
-            match &child.status {
-                crate::session::orchestration::ChildStatus::Running => running += 1,
-                crate::session::orchestration::ChildStatus::Done => done += 1,
-                _ => {}
-            }
+            let status_str = match &child.status {
+                crate::session::orchestration::ChildStatus::Queued => "queued",
+                crate::session::orchestration::ChildStatus::Running => "working",
+                crate::session::orchestration::ChildStatus::Done => "done",
+                crate::session::orchestration::ChildStatus::Error(_) => "error",
+                crate::session::orchestration::ChildStatus::Cancelled => "cancelled",
+            };
+            let elapsed = format!("{:.0}s", child.elapsed_s);
+            let tool_info = child
+                .active_tool
+                .as_deref()
+                .map(|t| format!(" ({t})"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{}\t{}\t{}\t{}",
+                child.task, status_str, elapsed, tool_info
+            ));
         }
 
-        Ok(ToolResult::success(format!(
-            "{total} agents: {running} running, {done} done"
-        )))
+        let output = format!("check_agents\n{}", lines.join("\n"));
+        Ok(ToolResult::success(output))
     }
 }
 
@@ -362,7 +317,7 @@ impl Tool for CollectAgentTool {
 
         if let (Some(branch), Some(mgr)) = (&info.worktree_branch, &self.ctx.pool.worktrees) {
             let child_id = branch.strip_prefix("phx/agent/").unwrap_or(session_id);
-            if let Ok(diff) = mgr.diff_summary(child_id, "HEAD") {
+            if let Ok(diff) = mgr.diff_summary(child_id, "HEAD").await {
                 result["worktree_diff"] = json!({
                     "branch": branch,
                     "files_changed": diff.files_changed,
@@ -515,10 +470,13 @@ impl Tool for MergeAgentTool {
             })?;
 
         // Auto-commit any remaining changes
-        let _ = mgr.auto_commit(child_id, &format!("phx: agent {child_id} — final"));
+        let _ = mgr
+            .auto_commit(child_id, &format!("phx: agent {child_id} — final"))
+            .await;
 
         let merge_result = mgr
             .merge(child_id, strategy, message, cleanup)
+            .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
         Ok(ToolResult::success(
@@ -533,122 +491,5 @@ impl Tool for MergeAgentTool {
             })
             .to_string(),
         ))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// wait_agents — event-driven wait for all agents to complete
-// ---------------------------------------------------------------------------
-
-pub struct WaitAgentsTool {
-    ctx: Arc<OrchestrationContext>,
-}
-
-#[async_trait]
-impl Tool for WaitAgentsTool {
-    fn schema(&self) -> ToolSchema {
-        ToolSchema {
-            name: "wait_agents".into(),
-            description: "Wait for all running agents to complete. \
-                          Blocks until every agent is done or errored, then returns a summary. \
-                          Use this instead of polling check_agents in a loop."
-                .into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "timeout_secs": {
-                        "type": "integer",
-                        "description": "Maximum seconds to wait. Default: 300 (5 minutes)."
-                    }
-                }
-            }),
-        }
-    }
-
-    async fn invoke(
-        &self,
-        args: Value,
-        _input: &dyn InputRequester,
-    ) -> Result<ToolResult, ToolError> {
-        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(300);
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-
-        let mut rx = self.ctx.pool.subscribe_done();
-
-        let pending: Vec<String> = self
-            .ctx
-            .pool
-            .try_check_filtered(None)
-            .unwrap_or_default()
-            .iter()
-            .filter(|c| {
-                c.status == crate::session::orchestration::ChildStatus::Running
-                    || c.status == crate::session::orchestration::ChildStatus::Queued
-            })
-            .map(|c| c.session_id.clone())
-            .collect();
-
-        if pending.is_empty() {
-            let all = self.ctx.pool.try_check_filtered(None).unwrap_or_default();
-            let done = all
-                .iter()
-                .filter(|c| c.status == crate::session::orchestration::ChildStatus::Done)
-                .count();
-            let errored = all
-                .iter()
-                .filter(|c| {
-                    matches!(
-                        c.status,
-                        crate::session::orchestration::ChildStatus::Error(_)
-                    )
-                })
-                .count();
-            return Ok(ToolResult::success(format!(
-                "All agents finished. {done} done, {errored} errors."
-            )));
-        }
-
-        let mut remaining: std::collections::HashSet<String> = pending.into_iter().collect();
-        let total = remaining.len();
-
-        let result = tokio::time::timeout(timeout, async {
-            while !remaining.is_empty() {
-                match rx.recv().await {
-                    Ok(done) => {
-                        remaining.remove(&done.session_id);
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                }
-            }
-        })
-        .await;
-
-        let finished = total - remaining.len();
-        let all = self.ctx.pool.try_check_filtered(None).unwrap_or_default();
-        let done = all
-            .iter()
-            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Done)
-            .count();
-        let errored = all
-            .iter()
-            .filter(|c| {
-                matches!(
-                    c.status,
-                    crate::session::orchestration::ChildStatus::Error(_)
-                )
-            })
-            .count();
-
-        if result.is_err() {
-            Ok(ToolResult::success(format!(
-                "Timed out after {timeout_secs}s. {finished}/{total} finished. {done} done, {errored} errors, {} still running.",
-                remaining.len()
-            )))
-        } else {
-            Ok(ToolResult::success(format!(
-                "All agents finished. {done} done, {errored} errors."
-            )))
-        }
     }
 }

@@ -258,7 +258,7 @@ impl SessionPool {
                 let mut context_block = String::new();
                 for file_path in &context_files {
                     let read_path = work_dir.join(file_path);
-                    if let Ok(content) = std::fs::read_to_string(&read_path) {
+                    if let Ok(content) = tokio::fs::read_to_string(&read_path).await {
                         context_block.push_str(&format!("--- {file_path} ---\n{content}\n\n"));
                     }
                 }
@@ -389,7 +389,7 @@ impl SessionPool {
         child.status = ChildStatus::Cancelled;
 
         if let (Some(wt), Some(mgr)) = (&child.worktree, &self.worktrees) {
-            let _ = mgr.remove(&wt.child_id, true);
+            let _ = mgr.remove(&wt.child_id, true).await;
         }
 
         Ok(())
@@ -401,7 +401,7 @@ impl SessionPool {
             child.cancel_flag.store(true, Ordering::Relaxed);
             child.status = ChildStatus::Cancelled;
             if let (Some(wt), Some(mgr)) = (&child.worktree, &self.worktrees) {
-                let _ = mgr.remove(&wt.child_id, true);
+                let _ = mgr.remove(&wt.child_id, true).await;
             }
         }
     }

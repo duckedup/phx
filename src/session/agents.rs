@@ -210,7 +210,7 @@ pub fn build_agent_catalog(agents: &[AgentDefinition]) -> String {
     catalog
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

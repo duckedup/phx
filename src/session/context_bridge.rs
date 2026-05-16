@@ -75,7 +75,7 @@ pub fn apply_mutation(session: &mut Session, mutation: ContextMutation) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::config::schema::SessionProfile;

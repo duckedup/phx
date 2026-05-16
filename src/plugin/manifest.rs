@@ -117,7 +117,7 @@ pub fn resolve_bin(manifest: &PluginManifest, plugin_dir: &Path) -> PathBuf {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

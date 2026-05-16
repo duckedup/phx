@@ -47,23 +47,15 @@ impl HookSubscriber for SkillHookSubscriber {
 }
 
 pub fn register_skill_hooks(skills: &[Skill], dispatcher: &super::hooks::HookDispatcher) {
-    let rt = tokio::runtime::Handle::try_current();
     for skill in skills.iter().filter(|s| !s.hooks.is_empty()) {
         let subscriber = Arc::new(SkillHookSubscriber::new(skill.clone()));
         let subscribe = skill.hooks.clone();
         let can_block = skill.can_block.clone();
-        if let Ok(handle) = &rt {
-            handle.block_on(dispatcher.register_subscriber(
-                subscriber as Arc<dyn HookSubscriber>,
-                subscribe,
-                can_block,
-            ));
-        } else {
-            tracing::warn!(
-                "no tokio runtime available to register skill hook '{}'",
-                skill.name
-            );
-        }
+        dispatcher.register_subscriber_sync(
+            subscriber as Arc<dyn HookSubscriber>,
+            subscribe,
+            can_block,
+        );
     }
 }
 

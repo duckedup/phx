@@ -3,14 +3,8 @@ use std::path::Path;
 use crate::commands::dispatcher::{CommandResult, SessionChoice};
 use crate::store::session_store::SessionStore;
 
-pub fn handle_resume(store: &SessionStore, project: &Path) -> CommandResult {
-    let rt = tokio::runtime::Handle::try_current();
-    let sessions = match rt {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(store.list(project))),
-        Err(_) => return CommandResult::Error("no async runtime".into()),
-    };
-
-    match sessions {
+pub async fn handle_resume(store: &SessionStore, project: &Path) -> CommandResult {
+    match store.list(project).await {
         Ok(sessions) => {
             let choices: Vec<SessionChoice> = sessions
                 .into_iter()

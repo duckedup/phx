@@ -6,7 +6,6 @@ pub enum PickerMode {
     Session,
     Theme,
     CommandComplete,
-    ConductorTracker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

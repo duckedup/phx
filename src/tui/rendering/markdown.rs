@@ -12,7 +12,7 @@ pub fn render_markdown(
 ) -> Vec<DisplayLine> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
-    let code_bg = Theme::darken(theme.background, 0.75);
+    let code_bg = Theme::blend(theme.foreground, theme.background, 0.92);
 
     for line in text.split('\n') {
         let trimmed = line.trim_start();

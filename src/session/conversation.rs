@@ -16,6 +16,10 @@ use crate::session::skills;
 use crate::store::session_store::SessionStore;
 use crate::tools::traits::ToolRegistry;
 
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
 pub enum ConvEvent {
     StreamToken(String),
     AssistantMessage(String),
@@ -52,6 +56,18 @@ pub struct ConvConfig {
     pub tool_router: Option<crate::session::tool_router::ToolRouter>,
 }
 
+// ---------------------------------------------------------------------------
+// Internal: marble that flows through the conveyor
+// ---------------------------------------------------------------------------
+
+enum ToolDone {
+    Result(crate::session::message::ToolResult),
+}
+
+// ---------------------------------------------------------------------------
+// Conveyor belt
+// ---------------------------------------------------------------------------
+
 pub fn spawn_conversation(
     mut session: Session,
     text: String,
@@ -77,135 +93,29 @@ pub fn spawn_conversation(
 
         let mut current_provider: Arc<dyn Provider> = Arc::clone(&provider);
 
+        // The belt keeps spinning until the LLM says "done" with no tool calls,
+        // or an error / cancellation stops it.
         loop {
             if cancel.load(Ordering::Relaxed) {
                 let _ = tx.send(ConvEvent::Cancelled(session));
                 return;
             }
 
-            let all_tool_schemas: Vec<ToolSchema> = tools
-                .read()
-                .list_schemas()
-                .into_iter()
-                .map(|s| ToolSchema {
-                    name: s.name.to_string(),
-                    description: s.description.to_string(),
-                    parameters: s.parameters,
-                })
-                .collect();
+            // --- Build context & prepare the LLM call ---
+            let tool_schemas =
+                collect_tool_schemas(&tools, &current_provider, &provider, &tool_router);
 
-            let tool_schemas: Vec<ToolSchema> = if !Arc::ptr_eq(&current_provider, &provider) {
-                if let Some(ref router) = tool_router {
-                    all_tool_schemas
-                        .iter()
-                        .filter(|s| router.is_routed(&s.name))
-                        .cloned()
-                        .collect()
-                } else {
-                    all_tool_schemas.clone()
-                }
-            } else {
-                all_tool_schemas
-            };
-
-            let base_prompt = if let Some(ref override_prompt) = system_prompt_override {
-                Some(override_prompt.clone())
-            } else {
-                session
-                    .profile
-                    .system_prompt_path
-                    .as_ref()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .or_else(|| {
-                        Some(
-                            "You are phx, a fast and capable coding assistant running in a terminal.\n\
-                             \n\
-                             You have access to tools for reading files, writing files, editing files, and \
-                             running shell commands. Use them to help the user with software engineering tasks.\n\
-                             \n\
-                             Guidelines:\n\
-                             - Be concise. The user is in a terminal — respect their screen space.\n\
-                             - When editing code, preserve existing style and conventions.\n\
-                             - Prefer editing existing files over creating new ones.\n\
-                             - Use the bash tool for commands; use read/write/edit tools for files.\n\
-                             - Show your work: explain what you're doing briefly, then do it.\n\
-                             - If a task is ambiguous, make a reasonable assumption and proceed.\n\
-                             - When you encounter errors, diagnose the root cause before retrying."
-                                .to_string(),
-                        )
-                    })
-            };
-
-            let home = crate::config::paths::config_dir()
-                .parent()
-                .unwrap_or(std::path::Path::new("/"))
-                .to_path_buf();
-            let skill_list = skills::discover_layered(
-                Some(&project),
-                &crate::config::paths::user_home(),
-                &config.skills.dirs,
-            );
-            let ctx = context::build_context(
-                &home,
-                &project,
+            let system_prompt = build_system_prompt(
+                &session.profile,
                 &session.messages,
                 &mut session.context_state,
-                &skill_list,
+                &project,
+                &config,
+                &system_prompt_override,
+                &tx,
             );
 
-            let system_prompt = base_prompt.map(|base| {
-                if ctx.system_prompt_suffix.is_empty() {
-                    base
-                } else {
-                    format!("{base}\n\n{}", ctx.system_prompt_suffix)
-                }
-            });
-
-            if !ctx.newly_loaded.is_empty() {
-                let _ = tx.send(ConvEvent::ContextLoaded(ctx.newly_loaded));
-            }
-
-            let active_profile = crate::config::loader::active_provider(&config)
-                .map(|(_, p)| p.clone())
-                .unwrap_or_default();
-            let limits = context::resolve_context_limits(
-                &session.model_name,
-                &active_profile,
-                &session.profile,
-            );
-            let prompt_ref = system_prompt.as_deref().unwrap_or("");
-            let compaction = context::enforce_limits(&mut session.messages, prompt_ref, &limits);
-            if compaction.was_compacted {
-                let _ = tx.send(ConvEvent::ContextCompacted {
-                    removed: compaction.removed_count,
-                    remaining: compaction.remaining_count,
-                });
-            }
-
-            let provider_messages: Vec<ProviderMessage> = session
-                .messages
-                .iter()
-                .map(|m| ProviderMessage {
-                    role: match m.role {
-                        Role::System => ProviderRole::System,
-                        Role::User => ProviderRole::User,
-                        Role::Assistant => ProviderRole::Assistant,
-                        Role::ToolCall => ProviderRole::Assistant,
-                        Role::ToolResult => ProviderRole::Tool,
-                    },
-                    content: m.content.clone(),
-                    tool_call: m.tool_call.as_ref().map(|tc| ProviderToolCall {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        args_json: tc.args_json.clone(),
-                    }),
-                    tool_result: m.tool_result.as_ref().map(|tr| ProviderToolResult {
-                        id: tr.id.clone(),
-                        output: tr.output.clone(),
-                        is_error: tr.is_error,
-                    }),
-                })
-                .collect();
+            let provider_messages = build_provider_messages(&session);
 
             let opts = SendOptions {
                 messages: provider_messages,
@@ -213,6 +123,7 @@ pub fn spawn_conversation(
                 system_prompt,
             };
 
+            // --- Send to LLM, get the stream ---
             let stream = match current_provider.send(opts).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -228,6 +139,7 @@ pub fn spawn_conversation(
             let mut pending_tool_calls: Vec<crate::session::message::ToolCall> = vec![];
             let mut got_tool_use_stop = false;
 
+            // --- Phase 1: Drain the LLM stream (tokens + tool call declarations) ---
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     let _ = tx.send(ConvEvent::Cancelled(session));
@@ -277,6 +189,7 @@ pub fn spawn_conversation(
                 return;
             }
 
+            // --- Persist assistant text ---
             if !assistant_text.is_empty() {
                 let _ = tx.send(ConvEvent::AssistantMessage(assistant_text.clone()));
                 let msg = Message::assistant(std::mem::take(&mut assistant_text));
@@ -284,66 +197,48 @@ pub fn spawn_conversation(
                 session.add_message(msg);
             }
 
+            // --- Phase 2: Fire tools on real threads, collect via channel ---
             if !pending_tool_calls.is_empty() {
                 for tc in &pending_tool_calls {
                     let tc_msg = Message::tool_call(tc.clone());
                     session.persist_message(&store, &project, &tc_msg).await;
                     session.add_message(tc_msg);
+                    let _ = tx.send(ConvEvent::ToolCall(format!("🔧 {}", tc.name)));
+                }
 
-                    let summary = format!("🔧 {}", tc.name);
-                    let _ = tx.send(ConvEvent::ToolCall(summary));
+                // Channel where completed tools drop their marble
+                let (tool_tx, mut tool_rx) = mpsc::channel::<ToolDone>(pending_tool_calls.len());
 
-                    let dynamic_ui = plugin_runtime
-                        .as_ref()
-                        .and_then(|rt| rt.lock().request_dynamic_ui(&tc.name, &tc.args_json));
+                // Check interactive UI info under lock (fast HashMap lookup)
+                let ui_infos: Vec<Option<_>> = pending_tool_calls
+                    .iter()
+                    .map(|tc| {
+                        plugin_runtime
+                            .as_ref()
+                            .and_then(|rt| rt.lock().dynamic_ui_info(&tc.name))
+                    })
+                    .collect();
 
-                    let tr = if let Some(fields) = dynamic_ui {
-                        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                        let _ = tx.send(ConvEvent::InteractiveUi {
-                            call_id: tc.id.clone(),
-                            tool_name: tc.name.clone(),
-                            fields,
-                            response_tx,
-                        });
-                        match response_rx.await {
-                            Ok(Some(answers)) => crate::session::message::ToolResult {
-                                id: tc.id.clone(),
-                                output: answers,
-                                is_error: false,
-                            },
-                            _ => crate::session::message::ToolResult {
-                                id: tc.id.clone(),
-                                output: "User cancelled.".into(),
-                                is_error: true,
-                            },
-                        }
-                    } else {
-                        let maybe_tool = tools.read().get(&tc.name);
-                        if let Some(tool) = maybe_tool {
-                            let args: serde_json::Value =
-                                serde_json::from_str(&tc.args_json).unwrap_or_default();
-                            let noop = crate::tools::traits::NoopInputRequester;
-                            match tool.invoke(args, &noop).await {
-                                Ok(r) => crate::session::message::ToolResult {
-                                    id: tc.id.clone(),
-                                    output: r.output,
-                                    is_error: r.is_error,
-                                },
-                                Err(e) => crate::session::message::ToolResult {
-                                    id: tc.id.clone(),
-                                    output: e.to_string(),
-                                    is_error: true,
-                                },
-                            }
-                        } else {
-                            crate::session::message::ToolResult {
-                                id: tc.id.clone(),
-                                output: format!("unknown tool: {}", tc.name),
-                                is_error: true,
-                            }
-                        }
-                    };
+                // Spawn each tool on its own task — tokio distributes across cores
+                for (tc, ui_info) in pending_tool_calls.iter().zip(ui_infos) {
+                    let tool_tx = tool_tx.clone();
+                    let tools = Arc::clone(&tools);
+                    let conv_tx = tx.clone();
+                    let tc_id = tc.id.clone();
+                    let tc_name = tc.name.clone();
+                    let tc_args = tc.args_json.clone();
 
+                    tokio::spawn(async move {
+                        let result =
+                            execute_tool(&tc_id, &tc_name, &tc_args, ui_info, &tools, &conv_tx)
+                                .await;
+                        let _ = tool_tx.send(ToolDone::Result(result)).await;
+                    });
+                }
+                drop(tool_tx); // close sender so rx drains when all tasks finish
+
+                // Collect results as they arrive — marbles coming back on the belt
+                while let Some(ToolDone::Result(tr)) = tool_rx.recv().await {
                     let output_display = truncate_str(&tr.output, 2000);
                     let _ = tx.send(ConvEvent::ToolResult {
                         output: output_display,
@@ -355,10 +250,11 @@ pub fn spawn_conversation(
                     session.add_message(tr_msg);
                 }
 
+                // --- Marble goes back to the top: send results to LLM ---
                 if got_tool_use_stop {
                     current_provider = Arc::clone(&provider);
 
-                    if let Some(ref router) = tool_router {
+                    if let Some(router) = &tool_router {
                         let routed: Vec<Arc<dyn Provider>> = pending_tool_calls
                             .iter()
                             .filter_map(|tc| router.provider_for_tool(&tc.name))
@@ -371,11 +267,11 @@ pub fn spawn_conversation(
                         }
                     }
 
-                    continue;
+                    continue; // belt spins again
                 }
             }
 
-            break;
+            break; // LLM said end_turn with no tools — belt stops
         }
 
         session.persist_state(&store, &project).await;
@@ -383,6 +279,201 @@ pub fn spawn_conversation(
     });
 
     rx
+}
+
+// ---------------------------------------------------------------------------
+// Tool execution — runs on its own spawned task (own thread/core)
+// ---------------------------------------------------------------------------
+
+async fn execute_tool(
+    tc_id: &str,
+    tc_name: &str,
+    tc_args: &str,
+    ui_info: Option<(PathBuf, Vec<String>, PathBuf)>,
+    tools: &Arc<parking_lot::RwLock<ToolRegistry>>,
+    conv_tx: &mpsc::UnboundedSender<ConvEvent>,
+) -> crate::session::message::ToolResult {
+    // Interactive UI path
+    if let Some((path, args, project_dir)) = ui_info {
+        let fields = crate::plugin::plugin_runtime::request_dynamic_ui_async(
+            &path,
+            &args,
+            tc_name,
+            tc_args,
+            &project_dir,
+        )
+        .await;
+        if let Some(fields) = fields {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let _ = conv_tx.send(ConvEvent::InteractiveUi {
+                call_id: tc_id.to_string(),
+                tool_name: tc_name.to_string(),
+                fields,
+                response_tx,
+            });
+            return match response_rx.await {
+                Ok(Some(answers)) => crate::session::message::ToolResult {
+                    id: tc_id.to_string(),
+                    output: answers,
+                    is_error: false,
+                },
+                _ => crate::session::message::ToolResult {
+                    id: tc_id.to_string(),
+                    output: "User cancelled.".into(),
+                    is_error: true,
+                },
+            };
+        }
+    }
+
+    // Standard tool path — lock only for the HashMap lookup, release before invoke
+    let maybe_tool = tools.read().get(tc_name);
+    if let Some(tool) = maybe_tool {
+        let args: serde_json::Value = serde_json::from_str(tc_args).unwrap_or_default();
+        let noop = crate::tools::traits::NoopInputRequester;
+        match tool.invoke(args, &noop).await {
+            Ok(r) => crate::session::message::ToolResult {
+                id: tc_id.to_string(),
+                output: r.output,
+                is_error: r.is_error,
+            },
+            Err(e) => crate::session::message::ToolResult {
+                id: tc_id.to_string(),
+                output: e.to_string(),
+                is_error: true,
+            },
+        }
+    } else {
+        crate::session::message::ToolResult {
+            id: tc_id.to_string(),
+            output: format!("unknown tool: {tc_name}"),
+            is_error: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — context building (pure functions, no I/O in hot path)
+// ---------------------------------------------------------------------------
+
+fn collect_tool_schemas(
+    tools: &Arc<parking_lot::RwLock<ToolRegistry>>,
+    current_provider: &Arc<dyn Provider>,
+    default_provider: &Arc<dyn Provider>,
+    tool_router: &Option<crate::session::tool_router::ToolRouter>,
+) -> Vec<ToolSchema> {
+    let all: Vec<ToolSchema> = tools
+        .read()
+        .list_schemas()
+        .into_iter()
+        .map(|s| ToolSchema {
+            name: s.name.to_string(),
+            description: s.description.to_string(),
+            parameters: s.parameters,
+        })
+        .collect();
+
+    if !Arc::ptr_eq(current_provider, default_provider)
+        && let Some(router) = tool_router
+    {
+        return all
+            .iter()
+            .filter(|s| router.is_routed(&s.name))
+            .cloned()
+            .collect();
+    }
+    all
+}
+
+fn build_system_prompt(
+    profile: &crate::config::schema::SessionProfile,
+    messages: &[Message],
+    context_state: &mut crate::session::context::ContextState,
+    project: &std::path::Path,
+    config: &crate::config::schema::Config,
+    system_prompt_override: &Option<String>,
+    tx: &mpsc::UnboundedSender<ConvEvent>,
+) -> Option<String> {
+    let base_prompt = if let Some(override_prompt) = system_prompt_override {
+        Some(override_prompt.clone())
+    } else {
+        profile
+            .system_prompt_path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .or_else(|| {
+                Some(
+                    "You are phx, a fast and capable coding assistant running in a terminal.\n\
+                     \n\
+                     You have access to tools for reading files, writing files, editing files, \
+                     running shell commands, and spawning sub-agents. Use them to help the user \
+                     with software engineering tasks.\n\
+                     \n\
+                     Guidelines:\n\
+                     - Be concise. The user is in a terminal — respect their screen space.\n\
+                     - When editing code, preserve existing style and conventions.\n\
+                     - Prefer editing existing files over creating new ones.\n\
+                     - Use the bash tool for commands; use read/write/edit tools for files.\n\
+                     - Show your work: explain what you're doing briefly, then do it.\n\
+                     - If a task is ambiguous, make a reasonable assumption and proceed.\n\
+                     - When you encounter errors, diagnose the root cause before retrying.\n\
+                     - For large tasks, use spawn_agent to delegate sub-tasks to parallel agents.\n\
+                     - Use check_agents to see live status. Use collect_agent to get results when done.\n\
+                     - Use merge_agent to merge a completed agent's worktree branch back."
+                        .to_string(),
+                )
+            })
+    };
+
+    let home = crate::config::paths::config_dir()
+        .parent()
+        .unwrap_or(std::path::Path::new("/"))
+        .to_path_buf();
+    let skill_list = skills::discover_layered(
+        Some(project),
+        &crate::config::paths::user_home(),
+        &config.skills.dirs,
+    );
+    let ctx = context::build_context(&home, project, messages, context_state, &skill_list);
+
+    if !ctx.newly_loaded.is_empty() {
+        let _ = tx.send(ConvEvent::ContextLoaded(ctx.newly_loaded));
+    }
+
+    base_prompt.map(|base| {
+        if ctx.system_prompt_suffix.is_empty() {
+            base
+        } else {
+            format!("{base}\n\n{}", ctx.system_prompt_suffix)
+        }
+    })
+}
+
+fn build_provider_messages(session: &Session) -> Vec<ProviderMessage> {
+    session
+        .messages
+        .iter()
+        .map(|m| ProviderMessage {
+            role: match m.role {
+                Role::System => ProviderRole::System,
+                Role::User => ProviderRole::User,
+                Role::Assistant => ProviderRole::Assistant,
+                Role::ToolCall => ProviderRole::Assistant,
+                Role::ToolResult => ProviderRole::Tool,
+            },
+            content: m.content.clone(),
+            tool_call: m.tool_call.as_ref().map(|tc| ProviderToolCall {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                args_json: tc.args_json.clone(),
+            }),
+            tool_result: m.tool_result.as_ref().map(|tr| ProviderToolResult {
+                id: tr.id.clone(),
+                output: tr.output.clone(),
+                is_error: tr.is_error,
+            }),
+        })
+        .collect()
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {

@@ -20,7 +20,6 @@ use crate::tools::traits::ToolRegistry;
 use crate::tui::components::{
     chat_view, command_completion, input_box, modal_picker, sidebar, status_bar, toast,
 };
-use crate::tui::conductor_setup::{self, ConductorSetup};
 use crate::tui::layout;
 use crate::tui::message_handler;
 use crate::tui::models_page::{self, ModelsPageState};
@@ -77,8 +76,6 @@ pub struct App {
     pub panels: std::collections::HashMap<String, crate::shared::ui_types::PanelState>,
     pub panel_rx:
         Option<tokio::sync::mpsc::UnboundedReceiver<crate::plugin::host_handler::PanelUpdate>>,
-    pub conductor_setup: Option<ConductorSetup>,
-    pub pending_conductor_activate: bool,
     pub agent_receivers: Vec<AgentReceiver>,
     pub pending_model_selection: Option<usize>,
     pub models_page: Option<ModelsPageState>,
@@ -142,8 +139,6 @@ impl App {
             project: project.clone(),
             parent_provider: parking_lot::RwLock::new(parent_provider),
             parent_tools: parking_lot::RwLock::new(tool_registry.clone()),
-            agents: parking_lot::RwLock::new(Vec::new()),
-            plan_approved: std::sync::atomic::AtomicBool::new(false),
         });
         crate::tools::orchestration::register_orchestration_tools(
             &mut tool_registry,
@@ -200,7 +195,7 @@ impl App {
             toast: None,
             is_reloading: false,
             reload_task: None,
-            conductor_mode: false,
+            conductor_mode: true,
             panel_focused: false,
             session_pool: pool,
             orch_ctx,
@@ -208,8 +203,6 @@ impl App {
             sidebar_area: None,
             panels: std::collections::HashMap::new(),
             panel_rx: None,
-            conductor_setup: None,
-            pending_conductor_activate: false,
             agent_receivers: Vec::new(),
             pending_model_selection: None,
             models_page: None,
@@ -219,7 +212,7 @@ impl App {
     }
 
     pub fn show_sidebar(&self) -> bool {
-        false
+        self.conductor_mode && !self.sidebar_state.agents.is_empty()
     }
 
     pub fn current_tab(&self) -> Option<&Tab> {
@@ -292,6 +285,7 @@ impl App {
             self.frame_tick,
             width,
             turn_count,
+            &self.sidebar_state.agents,
         );
     }
 
@@ -446,20 +440,42 @@ impl App {
 
     // ─── Key handling ────────────────────────────────────────────────────
 
-    pub fn invoke_tool_command(&mut self, tool_name: &str, args_json: &str) {
+    pub async fn invoke_tool_command(&mut self, tool_name: &str, args_json: &str) {
         if tool_name == "conductor" {
-            message_handler::handle_command(self, "/conductor");
+            message_handler::handle_command(self, "/conductor").await;
             return;
         }
         if let Some(rt) = self.plugin_runtime.as_ref().map(Arc::clone) {
-            match rt.lock().toggle_tool(tool_name, args_json) {
-                Ok(result) => self.apply_tool_result(result),
+            let toggle_info = rt.lock().prepare_toggle(tool_name);
+            match toggle_info {
+                Ok((is_exit, resolved, exec_kind, project_dir)) => {
+                    let result = if is_exit {
+                        crate::plugin::plugin_runtime::exit_tool_async(
+                            Some(exec_kind),
+                            &resolved,
+                            &project_dir,
+                        )
+                        .await
+                    } else {
+                        crate::plugin::plugin_runtime::invoke_tool_async(
+                            exec_kind,
+                            &resolved,
+                            args_json,
+                            &project_dir,
+                        )
+                        .await
+                    };
+                    match result {
+                        Ok(result) => self.apply_tool_result(result),
+                        Err(e) => self.show_toast(format!("Plugin error: {e}")),
+                    }
+                }
                 Err(e) => self.show_toast(format!("Plugin error: {e}")),
             }
         }
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+    pub async fn handle_key(&mut self, key: KeyEvent) -> bool {
         if let Some(ref mut form) = self.tool_form
             && key.modifiers.contains(KeyModifiers::SUPER)
         {
@@ -500,7 +516,7 @@ impl App {
                         let args = form.collect_json();
                         let args_str = args.to_string();
                         self.tool_form = None;
-                        self.invoke_tool_command(&name, &args_str);
+                        self.invoke_tool_command(&name, &args_str).await;
                     }
                 }
                 tool_form::FormAction::Cancel => {
@@ -612,8 +628,17 @@ impl App {
                     api_key,
                     env_hint,
                     base_url,
+                    subagent_model,
                 } => {
-                    self.complete_onboarding(name, kind, model, api_key, env_hint, base_url);
+                    self.complete_onboarding(
+                        name,
+                        kind,
+                        model,
+                        api_key,
+                        env_hint,
+                        base_url,
+                        subagent_model,
+                    );
                     if let Some(idx) = self.pending_model_selection.take() {
                         self.apply_model_selection(&idx.to_string());
                     }
@@ -627,38 +652,6 @@ impl App {
             return true;
         }
 
-        if self.conductor_setup.is_some() {
-            let action = self.conductor_setup.as_mut().unwrap().handle_key(key);
-            match action {
-                conductor_setup::SetupAction::Complete {
-                    conductor_provider,
-                    conductor_model,
-                    agent_provider,
-                    agent_model,
-                    tracker,
-                } => {
-                    self.config.conductor.conductor_provider = Some(conductor_provider);
-                    self.config.conductor.conductor_model = Some(conductor_model);
-                    self.config.conductor.agent_provider = Some(agent_provider);
-                    self.config.conductor.agent_model = Some(agent_model);
-                    self.config.conductor.tracker = tracker;
-                    let config_path = crate::config::paths::user_config_file();
-                    let _ = crate::config::writer::save_conductor_config(
-                        &config_path,
-                        &self.config.conductor,
-                    );
-                    self.conductor_setup = None;
-                    self.pending_conductor_activate = true;
-                    self.show_toast("Conductor configured");
-                }
-                conductor_setup::SetupAction::Cancelled => {
-                    self.conductor_setup = None;
-                }
-                conductor_setup::SetupAction::None => {}
-            }
-            return true;
-        }
-
         if self.models_page.is_some() {
             let action = self.models_page.as_mut().unwrap().handle_key(key);
             self.apply_models_page_action(action);
@@ -667,10 +660,7 @@ impl App {
 
         if let Some(ref picker) = self.picker {
             match picker.mode {
-                PickerMode::Theme
-                | PickerMode::Model
-                | PickerMode::Session
-                | PickerMode::ConductorTracker => {
+                PickerMode::Theme | PickerMode::Model | PickerMode::Session => {
                     let action = modal_picker::handle_key(self.picker.as_mut().unwrap(), key);
                     self.apply_picker_action(action);
                     return true;
@@ -755,6 +745,12 @@ impl App {
                         sidebar::SidebarSelection::Agent(id) => {
                             if let Some(idx) = self.tabs.iter().position(|t| t.id == *id) {
                                 self.active_tab = idx;
+                            } else if let Some(agent) = self
+                                .agent_receivers
+                                .iter()
+                                .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                            {
+                                self.active_tab = agent.tab_index;
                             }
                         }
                     }
@@ -765,14 +761,21 @@ impl App {
                     self.panel_focused = false;
                     return true;
                 }
-                _ => {}
+                _ => {
+                    self.panel_focused = false;
+                }
             }
-            return true;
         }
 
         if self.conductor_mode && key.code == KeyCode::Right {
-            self.panel_focused = true;
-            return true;
+            let input_empty = self
+                .current_tab()
+                .map(|t| t.input.buffer_text().is_empty())
+                .unwrap_or(true);
+            if input_empty {
+                self.panel_focused = true;
+                return true;
+            }
         }
 
         match key.code {
@@ -786,8 +789,30 @@ impl App {
                 if let Some(tool_name) = tool_name
                     && let Some(rt) = rt_clone
                 {
-                    match rt.lock().toggle_tool(&tool_name, "{}") {
-                        Ok(result) => self.apply_tool_result(result),
+                    let toggle_info = rt.lock().prepare_toggle(&tool_name);
+                    match toggle_info {
+                        Ok((is_exit, resolved, exec_kind, project_dir)) => {
+                            let result = if is_exit {
+                                crate::plugin::plugin_runtime::exit_tool_async(
+                                    Some(exec_kind),
+                                    &resolved,
+                                    &project_dir,
+                                )
+                                .await
+                            } else {
+                                crate::plugin::plugin_runtime::invoke_tool_async(
+                                    exec_kind,
+                                    &resolved,
+                                    "{}",
+                                    &project_dir,
+                                )
+                                .await
+                            };
+                            match result {
+                                Ok(result) => self.apply_tool_result(result),
+                                Err(e) => self.show_toast(format!("Plugin error: {e}")),
+                            }
+                        }
                         Err(e) => self.show_toast(format!("Plugin error: {e}")),
                     }
                 }
@@ -799,12 +824,12 @@ impl App {
             }
             KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.conductor_mode {
-                    message_handler::handle_command(self, "/solo");
+                    message_handler::handle_command(self, "/solo").await;
                 }
             }
             KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if !self.conductor_mode {
-                    message_handler::handle_command(self, "/conductor");
+                    message_handler::handle_command(self, "/conductor").await;
                 }
             }
             KeyCode::Char('w')
@@ -1069,10 +1094,7 @@ impl App {
                         reserve,
                     );
                 }
-                PickerMode::Theme
-                | PickerMode::Model
-                | PickerMode::Session
-                | PickerMode::ConductorTracker => {
+                PickerMode::Theme | PickerMode::Model | PickerMode::Session => {
                     modal_picker::render_modal_picker(frame, picker, &self.theme);
                 }
             }
@@ -1126,9 +1148,6 @@ impl App {
         if let Some(ref ob) = self.onboarding {
             ob.render(frame, &self.theme);
         }
-        if let Some(ref cs) = self.conductor_setup {
-            cs.render(frame, &self.theme);
-        }
     }
 
     // ─── Picker / theme / model / onboarding helpers ─────────────────────
@@ -1157,22 +1176,6 @@ impl App {
                     }
                     Some(PickerMode::Session) => {
                         self.pending_session_resume = Some(selected.id.clone());
-                    }
-                    Some(PickerMode::ConductorTracker) => {
-                        let tracker = if selected.id == "none" {
-                            None
-                        } else {
-                            Some(selected.id.clone())
-                        };
-                        self.config.conductor.tracker = tracker;
-
-                        let config_path = crate::config::paths::user_config_file();
-                        let _ = crate::config::writer::save_conductor_config(
-                            &config_path,
-                            &self.config.conductor,
-                        );
-                        self.show_toast(format!("Tracker: {}", selected.label));
-                        self.pending_conductor_activate = true;
                     }
                     _ => {}
                 }
@@ -1360,6 +1363,7 @@ impl App {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn complete_onboarding(
         &mut self,
         name: String,
@@ -1368,6 +1372,7 @@ impl App {
         api_key: Option<String>,
         env_hint: String,
         base_url: Option<String>,
+        subagent_model: Option<String>,
     ) {
         use crate::config::schema::{AuthEntry, ProviderProfile};
 
@@ -1398,6 +1403,13 @@ impl App {
             }
             self.onboarding = None;
             return;
+        }
+
+        if let Some(agent_model) = &subagent_model {
+            self.config.conductor.agent_provider = Some(name.clone());
+            self.config.conductor.agent_model = Some(agent_model.clone());
+            let _ =
+                crate::config::writer::save_conductor_config(&config_path, &self.config.conductor);
         }
 
         if let Ok(cfg) = crate::config::loader::load(None) {
@@ -1697,7 +1709,7 @@ async fn run_loop(
                                         == crate::session::orchestration::ChildStatus::Queued
                             });
                             if has_running {
-                                futures::executor::block_on(app.session_pool.cancel_all());
+                                app.session_pool.cancel_all().await;
                                 app.show_toast("All agents cancelled");
                                 continue;
                             }
@@ -1726,7 +1738,7 @@ async fn run_loop(
                         && !key.modifiers.contains(KeyModifiers::SHIFT)
                         && !key.modifiers.contains(KeyModifiers::ALT);
 
-                    let consumed = app.handle_key(key);
+                    let consumed = app.handle_key(key).await;
 
                     let is_agent_tab = app.active_tab > 0;
                     let can_submit =
@@ -1754,7 +1766,7 @@ async fn run_loop(
                                 }
                             } else if crate::commands::dispatcher::is_command(input_text.trim()) {
                                 app.picker = None;
-                                message_handler::handle_command(app, input_text.trim());
+                                message_handler::handle_command(app, input_text.trim()).await;
                             } else {
                                 message_handler::start_conversation(app, input_text);
                             }
@@ -1767,14 +1779,14 @@ async fn run_loop(
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
                             if let Some(tab) = app.current_tab_mut() {
-                                tab.scroll_up(3);
+                                tab.scroll_up(1);
                             }
                         }
                         MouseEventKind::ScrollDown => {
                             let total = app.display_lines.len();
                             let visible = app.chat_area_height as usize;
                             if let Some(tab) = app.current_tab_mut() {
-                                tab.scroll_down(3, total, visible);
+                                tab.scroll_down(1, total, visible);
                             }
                         }
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -1793,6 +1805,12 @@ async fn run_loop(
                                         if let Some(idx) = app.tabs.iter().position(|t| t.id == *id)
                                         {
                                             app.active_tab = idx;
+                                        } else if let Some(agent) = app
+                                            .agent_receivers
+                                            .iter()
+                                            .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                                        {
+                                            app.active_tab = agent.tab_index;
                                         }
                                     }
                                 }
@@ -1809,10 +1827,7 @@ async fn run_loop(
                             });
                             if let Some(ref picker) = app.picker {
                                 match picker.mode {
-                                    PickerMode::Theme
-                                    | PickerMode::Model
-                                    | PickerMode::Session
-                                    | PickerMode::ConductorTracker => {
+                                    PickerMode::Theme | PickerMode::Model | PickerMode::Session => {
                                         let action = modal_picker::handle_click(
                                             picker,
                                             area,
@@ -1936,11 +1951,6 @@ async fn run_loop(
 
         if let Some(text) = app.pending_skill_message.take() {
             message_handler::start_conversation(app, text);
-        }
-
-        if app.pending_conductor_activate {
-            app.pending_conductor_activate = false;
-            message_handler::activate_conductor(app);
         }
 
         if app.should_quit {

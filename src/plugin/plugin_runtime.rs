@@ -82,7 +82,7 @@ struct ToolMetaJson {
 }
 
 #[derive(Clone, Debug)]
-enum ToolExecKind {
+pub enum ToolExecKind {
     Shell(String),
     Bin { path: PathBuf, args: Vec<String> },
 }
@@ -554,6 +554,74 @@ impl PluginRuntime {
         result
     }
 
+    pub fn project_dir(&self) -> &Path {
+        &self.project_dir
+    }
+
+    pub fn tool_exec_info(&self, tool_name: &str) -> anyhow::Result<(ToolExecKind, PathBuf)> {
+        let plugin_key = self
+            .tool_index
+            .get(tool_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?
+            .clone();
+        let loaded = self
+            .plugins
+            .get(&plugin_key)
+            .ok_or_else(|| anyhow::anyhow!("plugin not found: {plugin_key}"))?;
+        let exec_kind = loaded
+            .tool_exec
+            .get(tool_name)
+            .ok_or_else(|| anyhow::anyhow!("no exec strategy for tool: {tool_name}"))?
+            .clone();
+        Ok((exec_kind, self.project_dir.clone()))
+    }
+
+    pub fn dynamic_ui_info(&self, tool_name: &str) -> Option<(PathBuf, Vec<String>, PathBuf)> {
+        let plugin_key = self.tool_index.get(tool_name)?;
+        let loaded = self.plugins.get(plugin_key)?;
+        let exec_kind = loaded.tool_exec.get(tool_name)?;
+        let ToolExecKind::Bin { path, args } = exec_kind else {
+            return None;
+        };
+        Some((path.clone(), args.clone(), self.project_dir.clone()))
+    }
+
+    pub fn prepare_toggle(
+        &mut self,
+        tool_name: &str,
+    ) -> anyhow::Result<(bool, String, ToolExecKind, PathBuf)> {
+        let resolved = self
+            .resolve_command_to_tool(tool_name)
+            .unwrap_or(tool_name)
+            .to_string();
+        let is_exit = self.active_tools.contains(&resolved);
+        if is_exit {
+            self.active_tools.remove(&resolved);
+        } else {
+            self.active_tools.insert(resolved.clone());
+        }
+        let (exec_kind, project_dir) = self.tool_exec_info(&resolved)?;
+        Ok((is_exit, resolved, exec_kind, project_dir))
+    }
+
+    pub fn prepare_exit(
+        &mut self,
+        tool_name: &str,
+    ) -> anyhow::Result<(Option<ToolExecKind>, PathBuf)> {
+        let plugin_key = self
+            .tool_index
+            .get(tool_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown tool: {tool_name}"))?
+            .clone();
+        let loaded = self
+            .plugins
+            .get(&plugin_key)
+            .ok_or_else(|| anyhow::anyhow!("plugin not found: {plugin_key}"))?;
+        let exec_kind = loaded.tool_exec.get(tool_name).cloned();
+        self.active_tools.remove(tool_name);
+        Ok((exec_kind, self.project_dir.clone()))
+    }
+
     pub fn tool_count(&self) -> usize {
         self.plugins.values().map(|p| p.tools.len()).sum()
     }
@@ -720,6 +788,187 @@ impl PluginRuntime {
 
         dirs
     }
+}
+
+// ---------------------------------------------------------------------------
+// Async execution (lock-free) — call these after releasing the Mutex
+// ---------------------------------------------------------------------------
+
+pub async fn invoke_tool_async(
+    exec_kind: ToolExecKind,
+    tool_name: &str,
+    args_json: &str,
+    project_dir: &Path,
+) -> anyhow::Result<ToolExecResult> {
+    match exec_kind {
+        ToolExecKind::Shell(template) => {
+            invoke_shell_async(tool_name, &template, args_json, project_dir).await
+        }
+        ToolExecKind::Bin { path, args } => {
+            invoke_binary_async(&path, &args, tool_name, args_json, project_dir).await
+        }
+    }
+}
+
+pub async fn invoke_shell_async(
+    tool_name: &str,
+    template: &str,
+    args_json: &str,
+    project_dir: &Path,
+) -> anyhow::Result<ToolExecResult> {
+    let args: serde_json::Value =
+        serde_json::from_str(args_json).unwrap_or(serde_json::Value::Object(Default::default()));
+    let cmd = substitute_template(template, &args);
+
+    let output = tokio::process::Command::new("sh")
+        .args(["-c", &cmd])
+        .current_dir(project_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run shell tool {tool_name}: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        let msg = if stderr.is_empty() { &stdout } else { &stderr };
+        return Ok(ToolExecResult {
+            output: msg.to_string(),
+            is_error: true,
+            toast: String::new(),
+            widget: String::new(),
+        });
+    }
+
+    Ok(ToolExecResult {
+        output: stdout,
+        is_error: false,
+        toast: String::new(),
+        widget: String::new(),
+    })
+}
+
+pub async fn invoke_binary_async(
+    binary_path: &Path,
+    static_args: &[String],
+    tool_name: &str,
+    args_json: &str,
+    project_dir: &Path,
+) -> anyhow::Result<ToolExecResult> {
+    let mut cmd = tokio::process::Command::new(binary_path);
+    cmd.args(static_args);
+    cmd.args(["invoke", tool_name, args_json]);
+    cmd.current_dir(project_dir);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = cmd.output().await.map_err(|e| {
+        anyhow::anyhow!(
+            "failed to invoke tool {tool_name} via {}: {e}",
+            binary_path.display()
+        )
+    })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if !stderr.is_empty() {
+            stderr.to_string()
+        } else if !stdout.is_empty() {
+            stdout.to_string()
+        } else {
+            format!(
+                "process exited with status {} (binary: {})",
+                output.status,
+                binary_path.display()
+            )
+        };
+        return Err(anyhow::anyhow!("tool {tool_name} error: {msg}"));
+    }
+
+    let result: ToolResultJson = serde_json::from_str(&stdout).unwrap_or(ToolResultJson {
+        output: stdout.to_string(),
+        is_error: false,
+        toast: String::new(),
+        widget: String::new(),
+    });
+
+    Ok(ToolExecResult {
+        output: result.output,
+        is_error: result.is_error,
+        toast: result.toast,
+        widget: result.widget,
+    })
+}
+
+pub async fn exit_tool_async(
+    exec_kind: Option<ToolExecKind>,
+    tool_name: &str,
+    project_dir: &Path,
+) -> anyhow::Result<ToolExecResult> {
+    let binary_path = match &exec_kind {
+        Some(ToolExecKind::Shell(_)) | None => return Ok(ToolExecResult::empty()),
+        Some(ToolExecKind::Bin { path, .. }) => path.clone(),
+    };
+
+    let output = tokio::process::Command::new(&binary_path)
+        .args(["exit", tool_name])
+        .current_dir(project_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to exit tool {tool_name} via {}: {e}",
+                binary_path.display()
+            )
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: ToolResultJson = serde_json::from_str(&stdout).unwrap_or(ToolResultJson {
+        output: String::new(),
+        is_error: false,
+        toast: String::new(),
+        widget: String::new(),
+    });
+
+    Ok(ToolExecResult {
+        output: result.output,
+        is_error: result.is_error,
+        toast: result.toast,
+        widget: result.widget,
+    })
+}
+
+pub async fn request_dynamic_ui_async(
+    binary_path: &Path,
+    static_args: &[String],
+    tool_name: &str,
+    args_json: &str,
+    project_dir: &Path,
+) -> Option<Vec<UiField>> {
+    let mut cmd = tokio::process::Command::new(binary_path);
+    cmd.args(static_args.iter());
+    cmd.args(["ui", tool_name, args_json]);
+    cmd.current_dir(project_dir);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = cmd.output().await.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<UiField> = serde_json::from_str(&stdout).ok()?;
+    if fields.is_empty() {
+        return None;
+    }
+    Some(fields)
 }
 
 fn resolve_command(command: &str, plugin_dir: &Path) -> PathBuf {
