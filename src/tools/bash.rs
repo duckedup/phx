@@ -53,6 +53,7 @@ impl Tool for BashTool {
             .arg(command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 

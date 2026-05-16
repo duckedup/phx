@@ -35,6 +35,7 @@ impl FileTab {
 pub struct FileViewerState {
     pub tabs: Vec<FileTab>,
     pub active_idx: Option<usize>,
+    pub hovered_close: Option<usize>,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
 }
@@ -44,6 +45,7 @@ impl FileViewerState {
         Self {
             tabs: Vec::new(),
             active_idx: None,
+            hovered_close: None,
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
         }
@@ -211,6 +213,17 @@ pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &FileViewerState, th
         let is_active = state.active_idx == Some(i);
         spans.push(Span::styled("    ", bg));
 
+        let close_hovered = state.hovered_close == Some(i);
+        let close_style = if close_hovered {
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD)
+        } else if is_active {
+            Style::default().fg(theme.error)
+        } else {
+            Style::default().fg(Theme::blend(dim, theme.background, 0.5))
+        };
+
         if is_active {
             spans.push(Span::styled(
                 "\u{25c6} ",
@@ -224,18 +237,14 @@ pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &FileViewerState, th
                     .fg(theme.foreground)
                     .add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::styled("  \u{00d7}", Style::default().fg(theme.error)));
         } else {
             spans.push(Span::styled("\u{25c7} ", Style::default().fg(dim)));
             spans.push(Span::styled(
                 tab.display_name.clone(),
                 Style::default().fg(dim),
             ));
-            spans.push(Span::styled(
-                "  \u{00d7}",
-                Style::default().fg(Theme::blend(dim, theme.background, 0.5)),
-            ));
         }
+        spans.push(Span::styled("  \u{00d7}", close_style));
     }
 
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
@@ -289,13 +298,12 @@ pub fn tab_bar_hit_test(
         return Some(TabBarHit::Chat);
     }
 
-    // "   " gap (3) between tabs
     let mut pos = chat_end;
     for (i, tab) in state.tabs.iter().enumerate() {
-        pos += 3; // "   " gap
+        pos += 4; // "    " gap
         let icon_len = 2; // "◆ "
         let name_len = tab.display_name.chars().count();
-        let close_len = 2; // " ×"
+        let close_len = 3; // "  ×"
 
         let tab_start = pos;
         let close_start = pos + icon_len + name_len;

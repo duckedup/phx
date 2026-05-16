@@ -231,24 +231,53 @@ pub fn spawn_conversation(
 
                 // Collect results in original tool-call order so the LLM sees
                 // deterministic tool_result sequences across runs.
-                for handle in handles {
-                    let tr = match handle.await {
-                        Ok(r) => r,
-                        Err(e) => crate::session::message::ToolResult {
-                            id: String::new(),
-                            output: format!("tool task panicked: {e}"),
-                            is_error: true,
-                        },
+                // Race each handle against the cancel flag so Esc kills
+                // long-running tools (e.g. bash) immediately.
+                let mut was_cancelled = false;
+                for mut handle in handles.drain(..) {
+                    if cancel.load(Ordering::Relaxed) {
+                        handle.abort();
+                        was_cancelled = true;
+                        continue;
+                    }
+                    let cancel_ref = Arc::clone(&cancel);
+                    let cancel_fut = async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            if cancel_ref.load(Ordering::Relaxed) {
+                                return;
+                            }
+                        }
                     };
-                    let output_display = truncate_str(&tr.output, 2000);
-                    let _ = tx.send(ConvEvent::ToolResult {
-                        output: output_display,
-                        is_error: tr.is_error,
-                    });
+                    tokio::select! {
+                        result = &mut handle => {
+                            let tr = match result {
+                                Ok(r) => r,
+                                Err(e) => crate::session::message::ToolResult {
+                                    id: String::new(),
+                                    output: format!("tool task panicked: {e}"),
+                                    is_error: true,
+                                },
+                            };
+                            let output_display = truncate_str(&tr.output, 2000);
+                            let _ = tx.send(ConvEvent::ToolResult {
+                                output: output_display,
+                                is_error: tr.is_error,
+                            });
 
-                    let tr_msg = Message::tool_result(tr);
-                    session.persist_message(&store, &project, &tr_msg).await;
-                    session.add_message(tr_msg);
+                            let tr_msg = Message::tool_result(tr);
+                            session.persist_message(&store, &project, &tr_msg).await;
+                            session.add_message(tr_msg);
+                        }
+                        _ = cancel_fut => {
+                            handle.abort();
+                            was_cancelled = true;
+                        }
+                    }
+                }
+                if was_cancelled {
+                    let _ = tx.send(ConvEvent::Cancelled(session));
+                    return;
                 }
 
                 // --- Marble goes back to the top: send results to LLM ---

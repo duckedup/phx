@@ -1901,8 +1901,15 @@ async fn run_loop(
                     let consumed = app.handle_key(key).await;
 
                     let is_agent_tab = app.active_tab > 0;
-                    let can_submit =
-                        is_plain_enter && !consumed && (!app.is_running || is_agent_tab);
+                    let input_is_command = app
+                        .current_tab()
+                        .map(|t| {
+                            crate::commands::dispatcher::is_command(t.input.buffer_text().trim())
+                        })
+                        .unwrap_or(false);
+                    let can_submit = is_plain_enter
+                        && !consumed
+                        && (input_is_command || !app.is_running || is_agent_tab);
 
                     if can_submit {
                         let input_text = app
@@ -1944,7 +1951,10 @@ async fn run_loop(
                     });
 
                     let in_tab_bar = app.tab_bar_area.is_some_and(|tb| {
-                        mouse.row == tb.y && mouse.column >= tb.x && mouse.column < tb.x + tb.width
+                        mouse.row >= tb.y
+                            && mouse.row < tb.y + tb.height
+                            && mouse.column >= tb.x
+                            && mouse.column < tb.x + tb.width
                     });
 
                     match mouse.kind {
@@ -2170,6 +2180,25 @@ async fn run_loop(
                             app.apply_picker_action(action);
                         }
                         MouseEventKind::Moved => {
+                            // Tab bar close button hover
+                            if let Some(tb_area) = app.tab_bar_area {
+                                if let Some(file_viewer::TabBarHit::CloseTab(idx)) =
+                                    file_viewer::tab_bar_hit_test(
+                                        tb_area,
+                                        mouse.row,
+                                        mouse.column,
+                                        &app.file_viewer,
+                                    )
+                                {
+                                    app.file_viewer.hovered_close = Some(idx);
+                                } else {
+                                    app.file_viewer.hovered_close = None;
+                                }
+                            } else {
+                                app.file_viewer.hovered_close = None;
+                            }
+
+                            // Chat file path hover
                             if !app.file_viewer.is_viewing_file() {
                                 let chat_area = padded_chat_area(app.chat_area);
                                 if mouse.row >= chat_area.y

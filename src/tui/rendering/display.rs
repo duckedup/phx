@@ -118,15 +118,9 @@ fn build_assistant_display_lines(
     content_width: usize,
     pad: u16,
 ) {
-    let indent = " ".repeat(pad as usize);
-    let body_indent = format!("{}  ", indent);
+    let body_indent = " ".repeat(pad as usize);
 
-    let md_lines = render_markdown(
-        &al.content,
-        theme,
-        &body_indent,
-        content_width.saturating_sub(2),
-    );
+    let md_lines = render_markdown(&al.content, theme, &body_indent, content_width);
     lines.extend(md_lines);
     lines.push(DisplayLine::empty());
 }
@@ -139,7 +133,6 @@ fn build_chat_display_lines(
     pad: u16,
 ) {
     let indent = " ".repeat(pad as usize);
-    let body_indent = format!("{}  ", indent);
 
     match cl.role {
         Role::User => {
@@ -180,13 +173,7 @@ fn build_chat_display_lines(
             lines.push(DisplayLine::empty());
         }
         Role::Assistant => {
-            // Assistant messages should use ChatItem::Assistant; this is a fallback.
-            let body_md = render_markdown(
-                &cl.content,
-                theme,
-                &body_indent,
-                content_width.saturating_sub(2),
-            );
+            let body_md = render_markdown(&cl.content, theme, &indent, content_width);
             lines.extend(body_md);
             lines.push(DisplayLine::empty());
         }
@@ -200,7 +187,7 @@ fn build_chat_display_lines(
             };
 
             let mut header = DisplayLine::multi(vec![
-                (format!("{}  ", indent), Style::default()),
+                (indent.to_string(), Style::default()),
                 (
                     "▶ ".to_string(),
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
@@ -214,11 +201,11 @@ fn build_chat_display_lines(
             lines.push(header);
 
             if !detail.is_empty() {
-                let result_width = content_width.saturating_sub(6);
+                let result_width = content_width.saturating_sub(4);
                 for wl in wrap_text(detail, result_width) {
                     let mut dl = DisplayLine::multi(vec![
                         (
-                            format!("{}  │ ", indent),
+                            format!("{indent}│ "),
                             Style::default().fg(theme.tool_border()),
                         ),
                         (wl, Style::default().fg(theme.dim())),
@@ -241,7 +228,7 @@ fn build_chat_display_lines(
                 } else {
                     theme.tool_border()
                 };
-                let result_width = content_width.saturating_sub(6);
+                let result_width = content_width.saturating_sub(4);
 
                 let output_lines: Vec<&str> = cl.content.lines().collect();
                 let max_display = 20;
@@ -265,7 +252,7 @@ fn build_chat_display_lines(
                 for (i, line_text) in show_lines.iter().enumerate() {
                     if truncated && i == 10 {
                         lines.push(DisplayLine::multi(vec![
-                            (format!("{}  │ ", indent), Style::default().fg(border_color)),
+                            (format!("{indent}│ "), Style::default().fg(border_color)),
                             (
                                 format!("... ({hidden_count} more lines)"),
                                 Style::default()
@@ -280,7 +267,7 @@ fn build_chat_display_lines(
                     for wl in wrapped {
                         let text_style = diff_line_style(&wl, theme, is_error);
                         lines.push(DisplayLine::multi(vec![
-                            (format!("{}  │ ", indent), Style::default().fg(border_color)),
+                            (format!("{indent}│ "), Style::default().fg(border_color)),
                             (wl, text_style),
                         ]));
                     }
@@ -292,7 +279,7 @@ fn build_chat_display_lines(
                     ("✓", theme.success)
                 };
                 lines.push(DisplayLine::multi(vec![
-                    (format!("{}  ╰ ", indent), Style::default().fg(border_color)),
+                    (format!("{indent}╰ "), Style::default().fg(border_color)),
                     (format!("{icon} done"), Style::default().fg(icon_color)),
                 ]));
             }
@@ -302,26 +289,23 @@ fn build_chat_display_lines(
             let sys_style = Style::default()
                 .fg(theme.dim())
                 .add_modifier(Modifier::ITALIC);
-            let wrap_width = content_width.saturating_sub(4);
+            let wrap_width = content_width.saturating_sub(2);
             let content_lines: Vec<&str> = cl.content.split('\n').collect();
             if content_lines.len() <= 1 {
-                let text = format!("{indent}  ── {} ──", cl.content);
+                let text = format!("{indent}── {} ──", cl.content);
                 lines.push(DisplayLine::styled(&text, sys_style));
             } else {
-                lines.push(DisplayLine::styled(&format!("{indent}  ──────"), sys_style));
+                lines.push(DisplayLine::styled(&format!("{indent}──────"), sys_style));
                 for content_line in &content_lines {
                     if content_line.is_empty() {
                         lines.push(DisplayLine::empty());
                     } else {
                         for wl in wrap_text(content_line, wrap_width) {
-                            lines.push(DisplayLine::styled(
-                                &format!("{body_indent}{wl}"),
-                                sys_style,
-                            ));
+                            lines.push(DisplayLine::styled(&format!("{indent}{wl}"), sys_style));
                         }
                     }
                 }
-                lines.push(DisplayLine::styled(&format!("{indent}  ──────"), sys_style));
+                lines.push(DisplayLine::styled(&format!("{indent}──────"), sys_style));
             }
             lines.push(DisplayLine::empty());
         }
