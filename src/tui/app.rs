@@ -947,50 +947,23 @@ impl App {
             area,
         );
 
-        let body_area = area;
-
-        let agent_panel_h = if self.conductor_mode {
-            let per_agent = 2u16;
-            let header = 3u16;
-            let border = 2u16;
-            let min_h = header + border;
-            let h = header + (self.sidebar_state.agents.len() as u16 * per_agent) + border;
-            h.max(min_h).min(body_area.height / 3)
-        } else {
-            0
-        };
-
         let chunks = if let Some(ref form) = self.tool_form {
             let fh = tool_form::form_height(form);
-            layout::main_layout_with_form(body_area, fh)
+            layout::main_layout_with_form(area, fh)
         } else {
-            layout::main_layout(body_area, self.input_line_count())
+            layout::main_layout(area, self.input_line_count())
         };
 
         let provider_info = crate::config::loader::active_provider(&self.config)
             .map(|(name, p)| format!("{name}/{}", p.model))
             .unwrap_or_else(|| "no provider".into());
 
-        let chat_pad = 2u16;
-        let chat_top_pad = 1u16;
-        let chat_area = Rect {
-            x: chunks[0].x + chat_pad,
-            y: chunks[0].y + chat_top_pad,
-            width: chunks[0].width.saturating_sub(chat_pad * 2),
-            height: chunks[0].height.saturating_sub(chat_top_pad),
-        };
-
-        let panel_rect = if agent_panel_h > 0 {
-            let panel_w = 40u16.min(chat_area.width.saturating_sub(4));
-            Some(Rect {
-                x: chat_area.x + chat_area.width - panel_w,
-                y: chat_area.y + chat_area.height - agent_panel_h,
-                width: panel_w,
-                height: agent_panel_h,
-            })
-        } else {
-            None
-        };
+        let chat_area = padded_chat_area(chunks[0]);
+        let panel_rect = agent_panel_rect(
+            self.conductor_mode,
+            self.sidebar_state.agents.len(),
+            chat_area,
+        );
 
         frame.render_widget(
             Paragraph::new("").style(Style::default().bg(self.theme.background)),
@@ -1511,6 +1484,37 @@ pub fn resolve_extra_plugin_dirs(
     }
 }
 
+fn padded_chat_area(raw: Rect) -> Rect {
+    let pad = 2u16;
+    let top_pad = 1u16;
+    Rect {
+        x: raw.x + pad,
+        y: raw.y + top_pad,
+        width: raw.width.saturating_sub(pad * 2),
+        height: raw.height.saturating_sub(top_pad),
+    }
+}
+
+fn agent_panel_rect(conductor_mode: bool, agent_count: usize, chat: Rect) -> Option<Rect> {
+    if !conductor_mode {
+        return None;
+    }
+    let per_agent = 2u16;
+    let header = 3u16;
+    let border = 2u16;
+    let min_h = header + border;
+    let h = (header + agent_count as u16 * per_agent + border)
+        .max(min_h)
+        .min(chat.height / 3);
+    let panel_w = 40u16.min(chat.width.saturating_sub(4));
+    Some(Rect {
+        x: chat.x + chat.width - panel_w,
+        y: chat.y + chat.height - h,
+        width: panel_w,
+        height: h,
+    })
+}
+
 pub async fn run(
     config: Config,
     _needs_onboarding: bool,
@@ -1631,33 +1635,11 @@ async fn run_loop(
         app.chat_area = chunks[0];
         app.input_area = chunks[1];
 
-        app.sidebar_area = if app.conductor_mode {
-            let chat_pad = 2u16;
-            let chat_top_pad = 1u16;
-            let ca = Rect {
-                x: chunks[0].x + chat_pad,
-                y: chunks[0].y + chat_top_pad,
-                width: chunks[0].width.saturating_sub(chat_pad * 2),
-                height: chunks[0].height.saturating_sub(chat_top_pad),
-            };
-            let agent_count = app.sidebar_state.agents.len() as u16;
-            let per_agent = 2u16;
-            let header = 3u16;
-            let border = 2u16;
-            let min_h = header + border;
-            let h = (header + agent_count * per_agent + border)
-                .max(min_h)
-                .min(ca.height / 3);
-            let panel_w = 40u16.min(ca.width.saturating_sub(4));
-            Some(Rect {
-                x: ca.x + ca.width - panel_w,
-                y: ca.y + ca.height - h,
-                width: panel_w,
-                height: h,
-            })
-        } else {
-            None
-        };
+        app.sidebar_area = agent_panel_rect(
+            app.conductor_mode,
+            app.sidebar_state.agents.len(),
+            padded_chat_area(chunks[0]),
+        );
         app.frame_tick = app.frame_tick.wrapping_add(1);
 
         // Pick up newly spawned agents and create tabs for them

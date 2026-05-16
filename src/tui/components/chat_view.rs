@@ -267,9 +267,7 @@ pub fn compute_display_lines(
     let items = &tab.chat_lines;
 
     // Find the LAST check_agents call — only that one renders the live tree
-    let last_check_idx = items
-        .iter()
-        .rposition(|item| is_check_agents_call(item));
+    let last_check_idx = items.iter().rposition(is_check_agents_call);
 
     let mut i = 0;
     while i < items.len() {
@@ -288,9 +286,7 @@ pub fn compute_display_lines(
                 }
             }
             // Only render the live tree at the LAST check_agents position
-            if Some(i) == last_check_idx
-                || (last_check_idx.is_some_and(|li| li > i && li < j))
-            {
+            if Some(i) == last_check_idx || (last_check_idx.is_some_and(|li| li > i && li < j)) {
                 build_live_agents_tree(&mut lines, live_agents, theme, pad, frame_tick);
             }
             i = j;

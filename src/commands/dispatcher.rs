@@ -91,32 +91,38 @@ pub async fn dispatch(
     store: &SessionStore,
     project: &Path,
 ) -> CommandResult {
-    dispatch_with_plugins(input, config, skills, store, project, None, None).await
+    match try_dispatch_sync(input, config, skills, store, project, None, None) {
+        Some(r) => r,
+        None => dispatch_async(input, store, project).await,
+    }
 }
 
-pub async fn dispatch_with_plugins(
+/// Resolve a command synchronously. Returns `None` only for commands that
+/// require an `.await` (resume/sessions) — the caller must follow up with
+/// [`dispatch_async`] in that case. This split lets callers hold short-lived
+/// locks (e.g. plugin runtime) without holding them across an await point.
+pub fn try_dispatch_sync(
     input: &str,
     config: &Config,
     skills: &[Skill],
-    store: &SessionStore,
-    project: &Path,
+    _store: &SessionStore,
+    _project: &Path,
     plugins: Option<&PluginManager>,
     plugin_runtime: Option<&PluginRuntime>,
-) -> CommandResult {
+) -> Option<CommandResult> {
     if !is_command(input) {
-        return CommandResult::NotACommand;
+        return Some(CommandResult::NotACommand);
     }
 
     let (name, args) = parse(input);
 
-    match name {
+    let result = match name {
         "model" => model::handle_model(args, config),
         "models" => CommandResult::ModelsPage,
         "skill" => skill::handle_skill(args, skills),
         "theme" => theme::handle_theme(args),
         "connect" => connect::handle_connect(),
-        "resume" => session_cmd::handle_resume(store, project).await,
-        "sessions" => session_cmd::handle_resume(store, project).await,
+        "resume" | "sessions" => return None,
         "clear" => session_cmd::handle_clear(),
         "compact" => session_cmd::handle_compact(),
         "route" => CommandResult::Route(route::handle(args, config)),
@@ -126,23 +132,22 @@ pub async fn dispatch_with_plugins(
         "context" => CommandResult::ContextInfo,
         "help" => CommandResult::Message(help_text(skills, plugins, plugin_runtime)),
         _ => {
-            // Check plugin commands
             if let Some(pm) = plugins
                 && pm.get_command_handler(name).is_some()
             {
-                return CommandResult::PluginCommand {
+                return Some(CommandResult::PluginCommand {
                     plugin_command: name.to_string(),
                     args: args.to_string(),
-                };
+                });
             }
 
             if let Some(rt) = plugin_runtime
                 && rt.has_command(name)
             {
-                return CommandResult::PluginToolCommand {
+                return Some(CommandResult::PluginToolCommand {
                     command: name.to_string(),
                     args: args.to_string(),
-                };
+                });
             }
 
             if let Some(s) = skills.iter().find(|s| s.name == name) {
@@ -157,6 +162,17 @@ pub async fn dispatch_with_plugins(
                 CommandResult::Error(format!("unknown command: {name}"))
             }
         }
+    };
+    Some(result)
+}
+
+/// Handle the async-only commands (resume/sessions). Called when
+/// `try_dispatch_sync` returns `None`.
+pub async fn dispatch_async(input: &str, store: &SessionStore, project: &Path) -> CommandResult {
+    let (name, _) = parse(input);
+    match name {
+        "resume" | "sessions" => session_cmd::handle_resume(store, project).await,
+        _ => CommandResult::Error(format!("unknown command: {name}")),
     }
 }
 

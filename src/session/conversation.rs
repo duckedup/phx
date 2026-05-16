@@ -57,14 +57,6 @@ pub struct ConvConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Internal: marble that flows through the conveyor
-// ---------------------------------------------------------------------------
-
-enum ToolDone {
-    Result(crate::session::message::ToolResult),
-}
-
-// ---------------------------------------------------------------------------
 // Conveyor belt
 // ---------------------------------------------------------------------------
 
@@ -105,8 +97,12 @@ pub fn spawn_conversation(
             let tool_schemas =
                 collect_tool_schemas(&tools, &current_provider, &provider, &tool_router);
 
+            let custom_prompt = match &session.profile.system_prompt_path {
+                Some(p) => tokio::fs::read_to_string(p).await.ok(),
+                None => None,
+            };
             let system_prompt = build_system_prompt(
-                &session.profile,
+                custom_prompt,
                 &session.messages,
                 &mut session.context_state,
                 &project,
@@ -206,9 +202,6 @@ pub fn spawn_conversation(
                     let _ = tx.send(ConvEvent::ToolCall(format!("🔧 {}", tc.name)));
                 }
 
-                // Channel where completed tools drop their marble
-                let (tool_tx, mut tool_rx) = mpsc::channel::<ToolDone>(pending_tool_calls.len());
-
                 // Check interactive UI info under lock (fast HashMap lookup)
                 let ui_infos: Vec<Option<_>> = pending_tool_calls
                     .iter()
@@ -219,26 +212,32 @@ pub fn spawn_conversation(
                     })
                     .collect();
 
-                // Spawn each tool on its own task — tokio distributes across cores
+                // Spawn each tool on its own task — tokio distributes across cores.
+                // Use JoinHandle vec to preserve call order when collecting results.
+                let mut handles = Vec::with_capacity(pending_tool_calls.len());
                 for (tc, ui_info) in pending_tool_calls.iter().zip(ui_infos) {
-                    let tool_tx = tool_tx.clone();
                     let tools = Arc::clone(&tools);
                     let conv_tx = tx.clone();
                     let tc_id = tc.id.clone();
                     let tc_name = tc.name.clone();
                     let tc_args = tc.args_json.clone();
 
-                    tokio::spawn(async move {
-                        let result =
-                            execute_tool(&tc_id, &tc_name, &tc_args, ui_info, &tools, &conv_tx)
-                                .await;
-                        let _ = tool_tx.send(ToolDone::Result(result)).await;
-                    });
+                    handles.push(tokio::spawn(async move {
+                        execute_tool(&tc_id, &tc_name, &tc_args, ui_info, &tools, &conv_tx).await
+                    }));
                 }
-                drop(tool_tx); // close sender so rx drains when all tasks finish
 
-                // Collect results as they arrive — marbles coming back on the belt
-                while let Some(ToolDone::Result(tr)) = tool_rx.recv().await {
+                // Collect results in original tool-call order so the LLM sees
+                // deterministic tool_result sequences across runs.
+                for handle in handles {
+                    let tr = match handle.await {
+                        Ok(r) => r,
+                        Err(e) => crate::session::message::ToolResult {
+                            id: String::new(),
+                            output: format!("tool task panicked: {e}"),
+                            is_error: true,
+                        },
+                    };
                     let output_display = truncate_str(&tr.output, 2000);
                     let _ = tx.send(ConvEvent::ToolResult {
                         output: output_display,
@@ -386,7 +385,7 @@ fn collect_tool_schemas(
 }
 
 fn build_system_prompt(
-    profile: &crate::config::schema::SessionProfile,
+    custom_prompt: Option<String>,
     messages: &[Message],
     context_state: &mut crate::session::context::ContextState,
     project: &std::path::Path,
@@ -397,32 +396,28 @@ fn build_system_prompt(
     let base_prompt = if let Some(override_prompt) = system_prompt_override {
         Some(override_prompt.clone())
     } else {
-        profile
-            .system_prompt_path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .or_else(|| {
-                Some(
-                    "You are phx, a fast and capable coding assistant running in a terminal.\n\
-                     \n\
-                     You have access to tools for reading files, writing files, editing files, \
-                     running shell commands, and spawning sub-agents. Use them to help the user \
-                     with software engineering tasks.\n\
-                     \n\
-                     Guidelines:\n\
-                     - Be concise. The user is in a terminal — respect their screen space.\n\
-                     - When editing code, preserve existing style and conventions.\n\
-                     - Prefer editing existing files over creating new ones.\n\
-                     - Use the bash tool for commands; use read/write/edit tools for files.\n\
-                     - Show your work: explain what you're doing briefly, then do it.\n\
-                     - If a task is ambiguous, make a reasonable assumption and proceed.\n\
-                     - When you encounter errors, diagnose the root cause before retrying.\n\
-                     - For large tasks, use spawn_agent to delegate sub-tasks to parallel agents.\n\
-                     - Use check_agents to see live status. Use collect_agent to get results when done.\n\
-                     - Use merge_agent to merge a completed agent's worktree branch back."
-                        .to_string(),
-                )
-            })
+        custom_prompt.or_else(|| {
+            Some(
+                "You are phx, a fast and capable coding assistant running in a terminal.\n\
+                 \n\
+                 You have access to tools for reading files, writing files, editing files, \
+                 running shell commands, and spawning sub-agents. Use them to help the user \
+                 with software engineering tasks.\n\
+                 \n\
+                 Guidelines:\n\
+                 - Be concise. The user is in a terminal — respect their screen space.\n\
+                 - When editing code, preserve existing style and conventions.\n\
+                 - Prefer editing existing files over creating new ones.\n\
+                 - Use the bash tool for commands; use read/write/edit tools for files.\n\
+                 - Show your work: explain what you're doing briefly, then do it.\n\
+                 - If a task is ambiguous, make a reasonable assumption and proceed.\n\
+                 - When you encounter errors, diagnose the root cause before retrying.\n\
+                 - For large tasks, use spawn_agent to delegate sub-tasks to parallel agents.\n\
+                 - Use check_agents to see live status. Use collect_agent to get results when done.\n\
+                 - Use merge_agent to merge a completed agent's worktree branch back."
+                    .to_string(),
+            )
+        })
     };
 
     let home = crate::config::paths::config_dir()

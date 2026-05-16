@@ -172,21 +172,27 @@ pub async fn handle_command(app: &mut App, input: &str) {
         &crate::config::paths::user_home(),
         &app.config.skills.dirs,
     );
-    #[allow(clippy::await_holding_lock)]
     let result = {
-        let rt_guard = app.plugin_runtime.as_ref().map(|rt| rt.lock());
-        let r = crate::commands::dispatcher::dispatch_with_plugins(
-            input,
-            &app.config,
-            &skills,
-            &app.store,
-            &app.project,
-            Some(&app.plugin_manager),
-            rt_guard.as_deref(),
-        )
-        .await;
-        drop(rt_guard);
-        r
+        // Resolve the command synchronously under the plugin lock, then drop it
+        // before any .await to avoid blocking the tokio runtime.
+        let sync_result = {
+            let rt_guard = app.plugin_runtime.as_ref().map(|rt| rt.lock());
+            crate::commands::dispatcher::try_dispatch_sync(
+                input,
+                &app.config,
+                &skills,
+                &app.store,
+                &app.project,
+                Some(&app.plugin_manager),
+                rt_guard.as_deref(),
+            )
+        };
+        match sync_result {
+            Some(r) => r,
+            None => {
+                crate::commands::dispatcher::dispatch_async(input, &app.store, &app.project).await
+            }
+        }
     };
 
     use crate::tui::picker::{PickerItem, PickerMode, PickerState};
