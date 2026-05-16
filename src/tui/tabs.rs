@@ -70,10 +70,13 @@ impl Tab {
             SessionEvent::Token(text) => {
                 self.streaming_text.push_str(&text);
             }
-            SessionEvent::ToolCallStart { name, .. } => {
+            SessionEvent::ToolCallStart {
+                name, args_json, ..
+            } => {
+                let summary = crate::tui::rendering::helpers::tool_call_summary(&name, &args_json);
                 self.chat_lines.push(ChatItem::Line(ChatLine {
                     role: Role::ToolCall,
-                    content: format!("Running: {name}"),
+                    content: summary,
                 }));
             }
             SessionEvent::ToolCallEnd { output, .. } => {

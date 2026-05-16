@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 
@@ -10,21 +12,29 @@ use crate::tui::theme::Theme;
 
 pub struct DisplayLine {
     pub spans: Vec<(String, Style)>,
+    pub file_path: Option<PathBuf>,
 }
 
 impl DisplayLine {
     pub fn styled(text: &str, style: Style) -> Self {
         Self {
             spans: vec![(text.to_string(), style)],
+            file_path: None,
         }
     }
 
     pub fn multi(parts: Vec<(String, Style)>) -> Self {
-        Self { spans: parts }
+        Self {
+            spans: parts,
+            file_path: None,
+        }
     }
 
     pub fn empty() -> Self {
-        Self { spans: vec![] }
+        Self {
+            spans: vec![],
+            file_path: None,
+        }
     }
 
     pub fn to_line(&self) -> Line<'static> {
@@ -181,17 +191,42 @@ fn build_chat_display_lines(
             lines.push(DisplayLine::empty());
         }
         Role::ToolCall => {
-            lines.push(DisplayLine::multi(vec![
+            let (tool_name, detail) = cl.content.split_once(" > ").unwrap_or((&cl.content, ""));
+            let clickable_path = match tool_name {
+                "write" | "read" | "edit" if !detail.is_empty() => {
+                    Some(PathBuf::from(detail.trim()))
+                }
+                _ => None,
+            };
+
+            let mut header = DisplayLine::multi(vec![
                 (format!("{}  ", indent), Style::default()),
                 (
                     "▶ ".to_string(),
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
                 ),
                 (
-                    cl.content.clone(),
+                    tool_name.to_string(),
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
                 ),
-            ]));
+            ]);
+            header.file_path = clickable_path.clone();
+            lines.push(header);
+
+            if !detail.is_empty() {
+                let result_width = content_width.saturating_sub(6);
+                for wl in wrap_text(detail, result_width) {
+                    let mut dl = DisplayLine::multi(vec![
+                        (
+                            format!("{}  │ ", indent),
+                            Style::default().fg(theme.tool_border()),
+                        ),
+                        (wl, Style::default().fg(theme.dim())),
+                    ]);
+                    dl.file_path = clickable_path.clone();
+                    lines.push(dl);
+                }
+            }
         }
         Role::ToolResult => {
             let is_error = cl.content.starts_with("Error:")

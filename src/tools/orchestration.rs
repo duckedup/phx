@@ -175,23 +175,17 @@ impl Tool for SpawnAgentTool {
             })
             .await;
 
-        let agent_label = "default";
-        let wt_info = worktree
-            .as_ref()
-            .map(|w| format!(" on branch {}", w.branch))
-            .unwrap_or_default();
+        let task_short: String = args["prompt"]
+            .as_str()
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
 
-        let output = format!(
-            "◆ Agent spawned\n\
-             \n\
-               id       {}\n\
-               agent    {}\n\
-               model    {}/{}\n\
-               status   queued{}\n",
-            id.0, agent_label, prov_name, model_name, wt_info
-        );
-
-        Ok(ToolResult::success(output))
+        Ok(ToolResult::success(format!(
+            "Spawned [{model_name}] {task_short}\nsession_id: {}",
+            id.0
+        )))
     }
 }
 
@@ -263,8 +257,7 @@ impl Tool for CheckAgentsTool {
             ));
         }
 
-        let output = format!("check_agents\n{}", lines.join("\n"));
-        Ok(ToolResult::success(output))
+        Ok(ToolResult::success(lines.join("\n")))
     }
 }
 
@@ -313,22 +306,46 @@ impl Tool for CollectAgentTool {
             .await
             .map_err(ToolError::ExecutionFailed)?;
 
-        let mut result = serde_json::to_value(&info).unwrap_or_default();
+        let status_str = match &info.status {
+            crate::session::orchestration::ChildStatus::Done => "done",
+            crate::session::orchestration::ChildStatus::Error(e) => e.as_str(),
+            crate::session::orchestration::ChildStatus::Cancelled => "cancelled",
+            crate::session::orchestration::ChildStatus::Running => "running",
+            crate::session::orchestration::ChildStatus::Queued => "queued",
+        };
+
+        let mut lines = vec![
+            format!("Task:     {}", info.task),
+            format!("Status:   {status_str}"),
+            format!("Model:    {}/{}", info.provider, info.model),
+            format!("Elapsed:  {:.1}s", info.elapsed_s),
+        ];
 
         if let (Some(branch), Some(mgr)) = (&info.worktree_branch, &self.ctx.pool.worktrees) {
             let child_id = branch.strip_prefix("phx/agent/").unwrap_or(session_id);
             if let Ok(diff) = mgr.diff_summary(child_id, "HEAD").await {
-                result["worktree_diff"] = json!({
-                    "branch": branch,
-                    "files_changed": diff.files_changed,
-                    "insertions": diff.insertions,
-                    "deletions": diff.deletions,
-                    "diff_summary": diff.summary,
-                });
+                lines.push(String::new());
+                lines.push(format!(
+                    "Changes:  {} files (+{} −{})",
+                    diff.files_changed, diff.insertions, diff.deletions
+                ));
+                lines.push(format!("Branch:   {branch}"));
+                if !diff.summary.is_empty() {
+                    lines.push(String::new());
+                    lines.push(diff.summary);
+                }
             }
         }
 
-        Ok(ToolResult::success(result.to_string()))
+        if let Some(output) = &info.output
+            && !output.is_empty()
+        {
+            lines.push(String::new());
+            lines.push("Output:".to_string());
+            lines.push(output.clone());
+        }
+
+        Ok(ToolResult::success(lines.join("\n")))
     }
 }
 
@@ -381,14 +398,7 @@ impl Tool for CancelAgentTool {
         let reason = args["reason"]
             .as_str()
             .unwrap_or("cancelled by orchestrator");
-        Ok(ToolResult::success(
-            json!({
-                "session_id": session_id,
-                "cancelled": true,
-                "reason": reason,
-            })
-            .to_string(),
-        ))
+        Ok(ToolResult::success(format!("Cancelled: {reason}")))
     }
 }
 
@@ -479,17 +489,21 @@ impl Tool for MergeAgentTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-        Ok(ToolResult::success(
-            json!({
-                "session_id": session_id,
-                "merged": true,
-                "strategy": args["strategy"].as_str().unwrap_or("squash"),
-                "commit": merge_result.commit,
-                "files_changed": merge_result.files_changed,
-                "conflicts": merge_result.conflicts,
-                "worktree_removed": cleanup,
-            })
-            .to_string(),
-        ))
+        let strategy_name = args["strategy"].as_str().unwrap_or("squash");
+        let mut lines = vec![
+            format!("Merged ({strategy_name})"),
+            format!("Files:    {}", merge_result.files_changed),
+        ];
+        if !merge_result.commit.is_empty() {
+            lines.push(format!("Commit:   {}", merge_result.commit));
+        }
+        if !merge_result.conflicts.is_empty() {
+            lines.push(format!("Conflicts: {}", merge_result.conflicts.join(", ")));
+        }
+        if cleanup {
+            lines.push("Worktree: cleaned up".to_string());
+        }
+
+        Ok(ToolResult::success(lines.join("\n")))
     }
 }

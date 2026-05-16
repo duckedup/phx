@@ -20,6 +20,7 @@ use crate::tools::traits::ToolRegistry;
 use crate::tui::components::{
     chat_view, command_completion, input_box, modal_picker, sidebar, status_bar, toast,
 };
+use crate::tui::file_viewer;
 use crate::tui::layout;
 use crate::tui::message_handler;
 use crate::tui::models_page::{self, ModelsPageState};
@@ -81,6 +82,9 @@ pub struct App {
     pub models_page: Option<ModelsPageState>,
     pub tool_form: Option<tool_form::ToolFormState>,
     pub interactive_response_tx: Option<tokio::sync::oneshot::Sender<Option<String>>>,
+    pub file_viewer: file_viewer::FileViewerState,
+    pub tab_bar_area: Option<Rect>,
+    pub hovered_line: Option<usize>,
 }
 
 pub struct AgentReceiver {
@@ -208,6 +212,9 @@ impl App {
             models_page: None,
             tool_form: None,
             interactive_response_tx: None,
+            file_viewer: file_viewer::FileViewerState::new(),
+            tab_bar_area: None,
+            hovered_line: None,
         }
     }
 
@@ -702,6 +709,10 @@ impl App {
         }
 
         if self.panel_focused && self.conductor_mode {
+            let panel_visible = self
+                .sidebar_area
+                .map(|r| r.height.saturating_sub(2) as usize)
+                .unwrap_or(10);
             match key.code {
                 KeyCode::Up => {
                     let agents = &self.sidebar_state.agents;
@@ -716,6 +727,7 @@ impl App {
                             self.sidebar_state.selected = sidebar::SidebarSelection::Conductor;
                         }
                     }
+                    self.sidebar_state.ensure_selected_visible(panel_visible);
                     return true;
                 }
                 KeyCode::Down => {
@@ -734,6 +746,32 @@ impl App {
                             );
                         }
                         _ => {}
+                    }
+                    self.sidebar_state.ensure_selected_visible(panel_visible);
+                    return true;
+                }
+                KeyCode::Delete | KeyCode::Backspace => {
+                    if let sidebar::SidebarSelection::Agent(ref id) = self.sidebar_state.selected {
+                        let id = id.clone();
+                        let agents = &self.sidebar_state.agents;
+                        let is_finished =
+                            agents.iter().find(|a| a.session_id == id).is_some_and(|a| {
+                                matches!(
+                                    a.status,
+                                    crate::session::orchestration::ChildStatus::Done
+                                        | crate::session::orchestration::ChildStatus::Error(_)
+                                        | crate::session::orchestration::ChildStatus::Cancelled
+                                )
+                            });
+                        if is_finished {
+                            let was_active =
+                                self.tabs.get(self.active_tab).is_some_and(|t| t.id == id);
+                            self.sidebar_state.dismiss(&id);
+                            self.sidebar_state.selected = sidebar::SidebarSelection::Conductor;
+                            if was_active {
+                                self.active_tab = 0;
+                            }
+                        }
                     }
                     return true;
                 }
@@ -775,6 +813,67 @@ impl App {
             if input_empty {
                 self.panel_focused = true;
                 return true;
+            }
+        }
+
+        if self.file_viewer.is_viewing_file() {
+            match key.code {
+                KeyCode::Esc => {
+                    self.file_viewer.switch_to_chat();
+                    return true;
+                }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(idx) = self.file_viewer.active_idx {
+                        self.file_viewer.close_tab(idx);
+                    }
+                    return true;
+                }
+                KeyCode::PageUp | KeyCode::Up => {
+                    let n = if key.code == KeyCode::PageUp { 10 } else { 1 };
+                    if let Some(tab) = self.file_viewer.active_tab_mut() {
+                        tab.scroll_up(n);
+                    }
+                    return true;
+                }
+                KeyCode::PageDown | KeyCode::Down => {
+                    let visible = self.chat_area_height as usize;
+                    let n = if key.code == KeyCode::PageDown { 10 } else { 1 };
+                    if let Some(tab) = self.file_viewer.active_tab_mut() {
+                        tab.scroll_down(n, visible);
+                    }
+                    return true;
+                }
+                KeyCode::Home => {
+                    if let Some(tab) = self.file_viewer.active_tab_mut() {
+                        tab.scroll_offset = 0;
+                    }
+                    return true;
+                }
+                KeyCode::End => {
+                    let visible = self.chat_area_height as usize;
+                    if let Some(tab) = self.file_viewer.active_tab_mut() {
+                        tab.scroll_offset = tab.total_lines.saturating_sub(visible);
+                    }
+                    return true;
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    let visible = self.chat_area_height as usize;
+                    let half = visible / 2;
+                    if let Some(tab) = self.file_viewer.active_tab_mut() {
+                        tab.scroll_down(half, visible);
+                    }
+                    return true;
+                }
+                KeyCode::Tab if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(idx) = self.file_viewer.active_idx {
+                        let next = (idx + 1) % self.file_viewer.tabs.len();
+                        self.file_viewer.switch_to_tab(next);
+                    }
+                    return true;
+                }
+                _ => {
+                    self.file_viewer.switch_to_chat();
+                }
             }
         }
 
@@ -947,9 +1046,14 @@ impl App {
             area,
         );
 
+        let viewing_file = self.file_viewer.is_viewing_file();
+        let has_file_tabs = self.file_viewer.has_tabs();
+
         let chunks = if let Some(ref form) = self.tool_form {
             let fh = tool_form::form_height(form);
             layout::main_layout_with_form(area, fh)
+        } else if viewing_file {
+            layout::file_viewer_layout(area)
         } else {
             layout::main_layout(area, self.input_line_count())
         };
@@ -958,61 +1062,100 @@ impl App {
             .map(|(name, p)| format!("{name}/{}", p.model))
             .unwrap_or_else(|| "no provider".into());
 
-        let chat_area = padded_chat_area(chunks[0]);
-        let panel_rect = agent_panel_rect(
-            self.conductor_mode,
-            self.sidebar_state.agents.len(),
-            chat_area,
-        );
+        // Split main area for tab bar when file tabs exist
+        let (tab_bar_rect, content_rect) = if has_file_tabs {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(file_viewer::TAB_BAR_HEIGHT),
+                    Constraint::Min(1),
+                ])
+                .split(chunks[0]);
+            (Some(split[0]), split[1])
+        } else {
+            (None, chunks[0])
+        };
 
-        frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(self.theme.background)),
-            chunks[0],
-        );
+        // Tab bar
+        if let Some(tb) = tab_bar_rect {
+            file_viewer::render_tab_bar(frame, tb, &self.file_viewer, &self.theme);
+        }
 
-        chat_view::render_chat_with_panel(
-            frame,
-            chat_area,
-            &self.display_lines,
-            self.effective_scroll(),
-            &self.theme,
-            panel_rect,
-        );
+        let panel_rect = if !viewing_file {
+            agent_panel_rect(
+                self.conductor_mode,
+                self.sidebar_state.agents.len(),
+                padded_chat_area(content_rect),
+            )
+        } else {
+            None
+        };
 
-        if let Some(ref sel) = self.selection {
-            crate::tui::selection::render_selection_overlay(
+        if viewing_file {
+            frame.render_widget(
+                Paragraph::new("").style(Style::default().bg(self.theme.background)),
+                content_rect,
+            );
+            if let Some(ft) = self.file_viewer.active_tab() {
+                file_viewer::render_file_content(frame, content_rect, ft, &self.theme);
+            }
+
+            if let Some(ft) = self.file_viewer.active_tab() {
+                file_viewer::render_file_status(frame, chunks[1], ft, &self.theme);
+            }
+        } else {
+            let chat_area = padded_chat_area(content_rect);
+
+            frame.render_widget(
+                Paragraph::new("").style(Style::default().bg(self.theme.background)),
+                content_rect,
+            );
+
+            chat_view::render_chat_with_panel(
                 frame,
                 chat_area,
-                sel,
                 &self.display_lines,
                 self.effective_scroll(),
                 &self.theme,
+                panel_rect,
+                self.hovered_line,
             );
-        }
 
-        if let Some(pa) = panel_rect {
-            let active_sid = self
-                .agent_receivers
-                .iter()
-                .find(|a| a.tab_index == self.active_tab)
-                .and_then(|a| a.session_id.as_deref());
-            sidebar::render_agent_panel(
-                frame,
-                pa,
-                &self.sidebar_state,
-                &self.theme,
-                self.panel_focused,
-                active_sid,
-            );
-        }
+            if let Some(ref sel) = self.selection {
+                crate::tui::selection::render_selection_overlay(
+                    frame,
+                    chat_area,
+                    sel,
+                    &self.display_lines,
+                    self.effective_scroll(),
+                    &self.theme,
+                );
+            }
 
-        if let Some(ref form) = self.tool_form {
-            tool_form::render_tool_form(frame, chunks[1], form, &self.theme);
-        } else if let Some(tab) = self.current_tab() {
-            input_box::render_input(frame, chunks[1], &tab.input, &self.theme);
-        } else {
-            let empty = crate::tui::input::InputState::empty();
-            input_box::render_input(frame, chunks[1], &empty, &self.theme);
+            if let Some(pa) = panel_rect {
+                let active_sid = if self.active_tab > 0 {
+                    self.tabs.get(self.active_tab).map(|t| t.id.as_str())
+                } else {
+                    None
+                };
+                sidebar::render_agent_panel(
+                    frame,
+                    pa,
+                    &self.sidebar_state,
+                    &self.theme,
+                    self.panel_focused,
+                    active_sid,
+                );
+            }
+
+            if let Some(ref form) = self.tool_form {
+                tool_form::render_tool_form(frame, chunks[1], form, &self.theme);
+            } else if let Some(tab) = self.current_tab() {
+                input_box::render_input(frame, chunks[1], &tab.input, &self.theme);
+            } else {
+                let empty = crate::tui::input::InputState::empty();
+                input_box::render_input(frame, chunks[1], &empty, &self.theme);
+            }
         }
 
         let (session_tokens, session_cost, session_context) = if let Some(ref s) = self.session {
@@ -1389,6 +1532,13 @@ impl App {
             self.config = cfg;
         }
 
+        *self.orch_ctx.config.write() = self.config.clone();
+        let parent_provider = crate::config::loader::active_provider(&self.config)
+            .map(|(n, _)| n.to_string())
+            .unwrap_or_default();
+        *self.orch_ctx.parent_provider.write() = parent_provider;
+        *self.orch_ctx.parent_tools.write() = self.tools.read().clone();
+
         if let Some((pname, pprofile)) = crate::config::loader::active_provider(&self.config) {
             match providers::create_provider(pname, pprofile) {
                 Ok(p) => self.provider = Some(Arc::from(p)),
@@ -1495,18 +1645,14 @@ fn padded_chat_area(raw: Rect) -> Rect {
     }
 }
 
-fn agent_panel_rect(conductor_mode: bool, agent_count: usize, chat: Rect) -> Option<Rect> {
+const AGENT_PANEL_HEIGHT: u16 = 10;
+
+fn agent_panel_rect(conductor_mode: bool, _agent_count: usize, chat: Rect) -> Option<Rect> {
     if !conductor_mode {
         return None;
     }
-    let per_agent = 2u16;
-    let header = 3u16;
-    let border = 2u16;
-    let min_h = header + border;
-    let h = (header + agent_count as u16 * per_agent + border)
-        .max(min_h)
-        .min(chat.height / 3);
-    let panel_w = 40u16.min(chat.width.saturating_sub(4));
+    let h = AGENT_PANEL_HEIGHT.min(chat.height / 3).max(5);
+    let panel_w = 56u16.min(chat.width.saturating_sub(4));
     Some(Rect {
         x: chat.x + chat.width - panel_w,
         y: chat.y + chat.height - h,
@@ -1625,21 +1771,45 @@ async fn run_loop(
             .map(|t| t.input.line_count() as u16)
             .unwrap_or(1);
         app.sidebar_area = None;
+        app.tab_bar_area = None;
+        let viewing_file = app.file_viewer.is_viewing_file();
+        let has_file_tabs = app.file_viewer.has_tabs();
         let chunks = if let Some(ref form) = app.tool_form {
             let fh = tool_form::form_height(form);
             layout::main_layout_with_form(area, fh)
+        } else if viewing_file {
+            layout::file_viewer_layout(area)
         } else {
             layout::main_layout(area, input_lines)
         };
-        app.chat_area_height = chunks[0].height;
-        app.chat_area = chunks[0];
-        app.input_area = chunks[1];
 
-        app.sidebar_area = agent_panel_rect(
-            app.conductor_mode,
-            app.sidebar_state.agents.len(),
-            padded_chat_area(chunks[0]),
-        );
+        // Compute tab bar and content rects
+        let content_rect = if has_file_tabs {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(file_viewer::TAB_BAR_HEIGHT),
+                    Constraint::Min(1),
+                ])
+                .split(chunks[0]);
+            app.tab_bar_area = Some(split[0]);
+            split[1]
+        } else {
+            chunks[0]
+        };
+        app.chat_area_height = content_rect.height;
+        app.chat_area = content_rect;
+        if !viewing_file {
+            app.input_area = chunks[1];
+        }
+
+        if !viewing_file {
+            app.sidebar_area = agent_panel_rect(
+                app.conductor_mode,
+                app.sidebar_state.agents.len(),
+                padded_chat_area(content_rect),
+            );
+        }
         app.frame_tick = app.frame_tick.wrapping_add(1);
 
         // Pick up newly spawned agents and create tabs for them
@@ -1692,6 +1862,14 @@ async fn run_loop(
                             });
                             if has_running {
                                 app.session_pool.cancel_all().await;
+                                // Also cancel the conductor conversation
+                                for agent in &app.agent_receivers {
+                                    if agent.tab_index == 0
+                                        && let Some(cancel) = &agent.cancel
+                                    {
+                                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
                                 app.show_toast("All agents cancelled");
                                 continue;
                             }
@@ -1758,7 +1936,35 @@ async fn run_loop(
                 CEvent::Paste(text) => app.handle_paste(&text),
                 CEvent::Mouse(mouse) => {
                     use crossterm::event::MouseEventKind;
+                    let in_panel = app.sidebar_area.is_some_and(|sb| {
+                        mouse.column >= sb.x
+                            && mouse.column < sb.x + sb.width
+                            && mouse.row >= sb.y
+                            && mouse.row < sb.y + sb.height
+                    });
+
+                    let in_tab_bar = app.tab_bar_area.is_some_and(|tb| {
+                        mouse.row == tb.y && mouse.column >= tb.x && mouse.column < tb.x + tb.width
+                    });
+
                     match mouse.kind {
+                        MouseEventKind::ScrollUp if in_panel => {
+                            app.sidebar_state.scroll = app.sidebar_state.scroll.saturating_sub(1);
+                        }
+                        MouseEventKind::ScrollDown if in_panel => {
+                            app.sidebar_state.scroll += 1;
+                        }
+                        MouseEventKind::ScrollUp if app.file_viewer.is_viewing_file() => {
+                            if let Some(ft) = app.file_viewer.active_tab_mut() {
+                                ft.scroll_up(3);
+                            }
+                        }
+                        MouseEventKind::ScrollDown if app.file_viewer.is_viewing_file() => {
+                            let visible = app.chat_area_height as usize;
+                            if let Some(ft) = app.file_viewer.active_tab_mut() {
+                                ft.scroll_down(3, visible);
+                            }
+                        }
                         MouseEventKind::ScrollUp => {
                             if let Some(tab) = app.current_tab_mut() {
                                 tab.scroll_up(1);
@@ -1771,32 +1977,91 @@ async fn run_loop(
                                 tab.scroll_down(1, total, visible);
                             }
                         }
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) if in_tab_bar => {
+                            if let Some(tb_area) = app.tab_bar_area
+                                && let Some(hit) = file_viewer::tab_bar_hit_test(
+                                    tb_area,
+                                    mouse.row,
+                                    mouse.column,
+                                    &app.file_viewer,
+                                )
+                            {
+                                match hit {
+                                    file_viewer::TabBarHit::Chat => {
+                                        app.file_viewer.switch_to_chat();
+                                    }
+                                    file_viewer::TabBarHit::FileTab(idx) => {
+                                        app.file_viewer.switch_to_tab(idx);
+                                    }
+                                    file_viewer::TabBarHit::CloseTab(idx) => {
+                                        app.file_viewer.close_tab(idx);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                             let r = mouse.row;
                             let c = mouse.column;
 
-                            if let Some(sb_area) = app.sidebar_area
-                                && let Some(sel) =
-                                    sidebar::hit_test(sb_area, r, c, &app.sidebar_state)
-                            {
-                                match &sel {
-                                    sidebar::SidebarSelection::Conductor => {
-                                        app.active_tab = 0;
-                                    }
-                                    sidebar::SidebarSelection::Agent(id) => {
-                                        if let Some(idx) = app.tabs.iter().position(|t| t.id == *id)
-                                        {
-                                            app.active_tab = idx;
-                                        } else if let Some(agent) = app
-                                            .agent_receivers
-                                            .iter()
-                                            .find(|a| a.session_id.as_deref() == Some(id.as_str()))
-                                        {
-                                            app.active_tab = agent.tab_index;
-                                        }
+                            // Click on hovered file path opens in viewer
+                            if !app.file_viewer.is_viewing_file() {
+                                let chat_area = padded_chat_area(app.chat_area);
+                                if r >= chat_area.y
+                                    && r < chat_area.y + chat_area.height
+                                    && c >= chat_area.x
+                                    && c < chat_area.x + chat_area.width
+                                {
+                                    let scroll = app.effective_scroll();
+                                    let line_idx = scroll + (r - chat_area.y) as usize;
+                                    if let Some(dl) = app.display_lines.get(line_idx)
+                                        && let Some(path) = &dl.file_path
+                                        && path.exists()
+                                    {
+                                        let path = path.clone();
+                                        let _ = app.file_viewer.open_file(&path, &app.theme);
+                                        continue;
                                     }
                                 }
-                                app.sidebar_state.selected = sel;
+                            }
+
+                            if let Some(sb_area) = app.sidebar_area
+                                && let Some(hit) =
+                                    sidebar::hit_test(sb_area, r, c, &app.sidebar_state)
+                            {
+                                match hit {
+                                    sidebar::HitResult::Dismiss(id) => {
+                                        let was_active = app
+                                            .tabs
+                                            .get(app.active_tab)
+                                            .is_some_and(|t| t.id == id);
+                                        app.sidebar_state.dismiss(&id);
+                                        if was_active {
+                                            app.active_tab = 0;
+                                        }
+                                    }
+                                    sidebar::HitResult::Select(ref sel) => {
+                                        match sel {
+                                            sidebar::SidebarSelection::Conductor => {
+                                                app.active_tab = 0;
+                                            }
+                                            sidebar::SidebarSelection::Agent(id) => {
+                                                if let Some(idx) =
+                                                    app.tabs.iter().position(|t| t.id == *id)
+                                                {
+                                                    app.active_tab = idx;
+                                                } else if let Some(agent) =
+                                                    app.agent_receivers.iter().find(|a| {
+                                                        a.session_id.as_deref() == Some(id.as_str())
+                                                    })
+                                                {
+                                                    app.active_tab = agent.tab_index;
+                                                }
+                                            }
+                                        }
+                                        app.sidebar_state.selected = sel.clone();
+                                    }
+                                }
                                 continue;
                             }
 
@@ -1903,6 +2168,33 @@ async fn run_loop(
                                 mouse.column,
                             );
                             app.apply_picker_action(action);
+                        }
+                        MouseEventKind::Moved => {
+                            if !app.file_viewer.is_viewing_file() {
+                                let chat_area = padded_chat_area(app.chat_area);
+                                if mouse.row >= chat_area.y
+                                    && mouse.row < chat_area.y + chat_area.height
+                                    && mouse.column >= chat_area.x
+                                    && mouse.column < chat_area.x + chat_area.width
+                                {
+                                    let scroll = app.effective_scroll();
+                                    let line_idx = scroll + (mouse.row - chat_area.y) as usize;
+                                    if app
+                                        .display_lines
+                                        .get(line_idx)
+                                        .and_then(|dl| dl.file_path.as_ref())
+                                        .is_some()
+                                    {
+                                        app.hovered_line = Some(line_idx);
+                                    } else {
+                                        app.hovered_line = None;
+                                    }
+                                } else {
+                                    app.hovered_line = None;
+                                }
+                            } else {
+                                app.hovered_line = None;
+                            }
                         }
                         _ => {}
                     }

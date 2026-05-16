@@ -21,6 +21,19 @@ pub fn main_layout(area: Rect, input_lines: u16) -> Rc<[Rect]> {
         .split(area)
 }
 
+pub fn file_viewer_layout(area: Rect) -> Rc<[Rect]> {
+    let status_height = STATUS_HEIGHT;
+    let file_status_height = 1u16;
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(file_status_height),
+            Constraint::Length(status_height),
+        ])
+        .split(area)
+}
+
 pub fn main_layout_with_form(area: Rect, form_height: u16) -> Rc<[Rect]> {
     let min_chat = 3_u16;
     let max_form = area.height.saturating_sub(min_chat + STATUS_HEIGHT);

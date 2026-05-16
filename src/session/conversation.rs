@@ -199,7 +199,9 @@ pub fn spawn_conversation(
                     let tc_msg = Message::tool_call(tc.clone());
                     session.persist_message(&store, &project, &tc_msg).await;
                     session.add_message(tc_msg);
-                    let _ = tx.send(ConvEvent::ToolCall(format!("🔧 {}", tc.name)));
+                    let summary =
+                        crate::shared::tool_display::tool_call_summary(&tc.name, &tc.args_json);
+                    let _ = tx.send(ConvEvent::ToolCall(summary));
                 }
 
                 // Check interactive UI info under lock (fast HashMap lookup)

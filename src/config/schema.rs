@@ -363,6 +363,35 @@ impl Default for ConductorConfig {
 }
 
 // ---------------------------------------------------------------------------
+// FileViewerConfig
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum FileViewerMode {
+    #[default]
+    Internal,
+    External,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileViewerConfig {
+    #[serde(default)]
+    pub mode: FileViewerMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_editor: Option<String>,
+}
+
+impl Default for FileViewerConfig {
+    fn default() -> Self {
+        Self {
+            mode: FileViewerMode::Internal,
+            external_editor: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ToolRoute
 // ---------------------------------------------------------------------------
 
@@ -391,6 +420,8 @@ pub struct Config {
     pub plugins: PluginsConfig,
     #[serde(default)]
     pub conductor: ConductorConfig,
+    #[serde(default)]
+    pub file_viewer: FileViewerConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tool_routing: BTreeMap<String, ToolRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,6 +533,9 @@ impl Config {
         }
         if other.conductor != ConductorConfig::default() {
             self.conductor = other.conductor;
+        }
+        if other.file_viewer != FileViewerConfig::default() {
+            self.file_viewer = other.file_viewer;
         }
         for (tool, route) in other.tool_routing {
             self.tool_routing.insert(tool, route);
