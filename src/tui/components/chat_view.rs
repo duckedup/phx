@@ -14,6 +14,10 @@ fn is_check_agents_call(item: &ChatItem) -> bool {
     matches!(item, ChatItem::Line(ChatLine { role: Role::ToolCall, content }) if content.contains("check_agents"))
 }
 
+fn is_collect_agent_call(item: &ChatItem) -> bool {
+    matches!(item, ChatItem::Line(ChatLine { role: Role::ToolCall, content }) if content.contains("collect_agent"))
+}
+
 fn is_tool_result(item: &ChatItem) -> bool {
     matches!(
         item,
@@ -31,7 +35,15 @@ pub fn render_chat(
     effective_scroll: usize,
     theme: &Theme,
 ) {
-    render_chat_with_panel(frame, area, display_lines, effective_scroll, theme, None);
+    render_chat_with_panel(
+        frame,
+        area,
+        display_lines,
+        effective_scroll,
+        theme,
+        None,
+        None,
+    );
 }
 
 pub fn render_chat_with_panel(
@@ -41,6 +53,7 @@ pub fn render_chat_with_panel(
     effective_scroll: usize,
     theme: &Theme,
     panel: Option<Rect>,
+    hovered_line: Option<usize>,
 ) {
     let visible = area.height as usize;
     let full_width = area.width as usize;
@@ -51,6 +64,9 @@ pub fn render_chat_with_panel(
         .take(visible)
         .enumerate()
     {
+        let abs_idx = effective_scroll + i;
+        let is_hovered = hovered_line == Some(abs_idx) && dl.file_path.is_some();
+
         let y = area.y + i as u16;
         let row_width = if let Some(p) = panel {
             if y >= p.y && y < p.y + p.height {
@@ -65,7 +81,27 @@ pub fn render_chat_with_panel(
         let line = if row_width == 0 {
             Line::from("")
         } else {
-            let mut l = dl.to_line();
+            let mut l = if is_hovered {
+                Line::from(
+                    dl.spans
+                        .iter()
+                        .map(|(t, s)| {
+                            let is_content =
+                                !t.trim().is_empty() && !t.trim().starts_with('\u{2502}');
+                            if is_content {
+                                Span::styled(
+                                    t.clone(),
+                                    s.fg(theme.accent).add_modifier(Modifier::UNDERLINED),
+                                )
+                            } else {
+                                Span::styled(t.clone(), *s)
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                dl.to_line()
+            };
             let text_width: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
             if text_width > row_width {
                 l = truncate_line(&l, row_width);
@@ -230,6 +266,94 @@ fn build_live_agents_tree(
     lines.push(DisplayLine::empty());
 }
 
+fn build_collect_agent_display(
+    lines: &mut Vec<DisplayLine>,
+    result_content: &str,
+    theme: &Theme,
+    pad: u16,
+) {
+    let indent = " ".repeat(pad as usize);
+    let dim = Style::default().fg(theme.dim());
+    let accent = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let border_style = Style::default().fg(theme.tool_border());
+
+    let mut task = "";
+    let mut status = "";
+    let mut model = "";
+    let mut elapsed = "";
+    let mut changes = "";
+    let mut branch = "";
+    let mut output_lines: Vec<&str> = Vec::new();
+    let mut in_output = false;
+
+    for line in result_content.lines() {
+        if in_output {
+            output_lines.push(line);
+        } else if let Some(v) = line.strip_prefix("Task:") {
+            task = v.trim();
+        } else if let Some(v) = line.strip_prefix("Status:") {
+            status = v.trim();
+        } else if let Some(v) = line.strip_prefix("Model:") {
+            model = v.trim();
+        } else if let Some(v) = line.strip_prefix("Elapsed:") {
+            elapsed = v.trim();
+        } else if let Some(v) = line.strip_prefix("Changes:") {
+            changes = v.trim();
+        } else if let Some(v) = line.strip_prefix("Branch:") {
+            branch = v.trim();
+        } else if line.starts_with("Output:") {
+            in_output = true;
+        }
+    }
+
+    let (icon, icon_style) = match status {
+        "done" => ("✓", Style::default().fg(theme.success)),
+        s if s.starts_with("cancel") => ("✗", dim),
+        _ => ("✗", Style::default().fg(theme.error)),
+    };
+
+    lines.push(DisplayLine::multi(vec![
+        (format!("{indent}  "), Style::default()),
+        (format!("{icon} "), icon_style),
+        (task.to_string(), accent),
+        (format!("  {status} · {elapsed}"), dim),
+    ]));
+
+    if !model.is_empty() {
+        lines.push(DisplayLine::multi(vec![
+            (format!("{indent}  │ "), border_style),
+            (format!("model {model}"), dim),
+        ]));
+    }
+
+    if !changes.is_empty() {
+        lines.push(DisplayLine::multi(vec![
+            (format!("{indent}  │ "), border_style),
+            (changes.to_string(), Style::default().fg(theme.foreground)),
+        ]));
+    }
+
+    if !branch.is_empty() {
+        lines.push(DisplayLine::multi(vec![
+            (format!("{indent}  │ "), border_style),
+            (format!("branch {branch}"), dim),
+        ]));
+    }
+
+    if !output_lines.is_empty() {
+        for ol in &output_lines {
+            lines.push(DisplayLine::multi(vec![
+                (format!("{indent}  │ "), border_style),
+                (ol.to_string(), Style::default().fg(theme.foreground)),
+            ]));
+        }
+    }
+
+    lines.push(DisplayLine::empty());
+}
+
 // ---------------------------------------------------------------------------
 // Main display line computation
 // ---------------------------------------------------------------------------
@@ -290,6 +414,16 @@ pub fn compute_display_lines(
                 build_live_agents_tree(&mut lines, live_agents, theme, pad, frame_tick);
             }
             i = j;
+        } else if is_collect_agent_call(&items[i]) {
+            // Render collect_agent call header, then style its result
+            build_item_display_lines(&mut lines, &items[i], theme, content_width, pad);
+            i += 1;
+            if i < items.len() && is_tool_result(&items[i]) {
+                if let ChatItem::Line(cl) = &items[i] {
+                    build_collect_agent_display(&mut lines, &cl.content, theme, pad);
+                }
+                i += 1;
+            }
         } else {
             build_item_display_lines(&mut lines, &items[i], theme, content_width, pad);
             i += 1;

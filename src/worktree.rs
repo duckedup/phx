@@ -41,6 +41,7 @@ pub struct MergeResult {
     pub conflicts: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct WorktreeManager {
     repo_root: PathBuf,
     worktree_base: PathBuf,

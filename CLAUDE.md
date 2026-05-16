@@ -59,8 +59,11 @@ just test              # Run cargo test --all-features
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+phx is rpc based harness that uses a tui.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+Simplicity over cleverness.
+Readable over complex.
+Dont be unsafe.
+Code should be extracted for reusability.

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
@@ -16,6 +18,7 @@ pub struct SidebarState {
     pub agents: Vec<ChildInfo>,
     pub selected: SidebarSelection,
     pub scroll: usize,
+    pub dismissed: HashSet<String>,
 }
 
 impl SidebarState {
@@ -24,6 +27,7 @@ impl SidebarState {
             agents: Vec::new(),
             selected: SidebarSelection::Conductor,
             scroll: 0,
+            dismissed: HashSet::new(),
         }
     }
 
@@ -33,7 +37,37 @@ impl SidebarState {
                 .partial_cmp(&b.elapsed_s)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        agents.retain(|a| !self.dismissed.contains(&a.session_id));
         self.agents = agents;
+    }
+
+    pub fn dismiss(&mut self, session_id: &str) {
+        self.dismissed.insert(session_id.to_string());
+        self.agents.retain(|a| a.session_id != session_id);
+    }
+
+    pub fn visible_agents(&self) -> &[ChildInfo] {
+        &self.agents
+    }
+
+    /// Adjust scroll so the selected item stays visible within `visible_height` lines.
+    pub fn ensure_selected_visible(&mut self, visible_height: usize) {
+        let line = match &self.selected {
+            SidebarSelection::Conductor => 0,
+            SidebarSelection::Agent(id) => {
+                if let Some(pos) = self.agents.iter().position(|a| &a.session_id == id) {
+                    2 + pos * 2
+                } else {
+                    0
+                }
+            }
+        };
+        let line_end = line + 1;
+        if line < self.scroll {
+            self.scroll = line;
+        } else if line_end >= self.scroll + visible_height {
+            self.scroll = line_end.saturating_sub(visible_height) + 1;
+        }
     }
 }
 
@@ -126,7 +160,7 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &SidebarState, theme
             matches!(&state.selected, SidebarSelection::Agent(id) if id == &agent.session_id);
         let (icon, icon_color) = status_icon(&agent.status, theme);
         let name = agent_display_name(agent);
-        let max_name = (inner.width as usize).saturating_sub(8);
+        let max_name = (inner.width as usize).saturating_sub(5);
         let display_name: String = if name.chars().count() > max_name {
             name.chars()
                 .take(max_name.saturating_sub(1))
@@ -187,35 +221,66 @@ pub fn render_sidebar(frame: &mut Frame, area: Rect, state: &SidebarState, theme
     frame.render_widget(paragraph, inner);
 }
 
-/// Returns `Some(SidebarSelection)` if the click landed on a panel item.
-pub fn hit_test(area: Rect, row: u16, col: u16, state: &SidebarState) -> Option<SidebarSelection> {
-    if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height {
+#[derive(Debug, Clone)]
+pub enum HitResult {
+    Select(SidebarSelection),
+    Dismiss(String),
+}
+
+/// Returns a `HitResult` if the click landed on a panel item or dismiss button.
+pub fn hit_test(area: Rect, row: u16, col: u16, state: &SidebarState) -> Option<HitResult> {
+    use ratatui::widgets::{Block, BorderType, Borders, Padding};
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+
+    if col < inner.x
+        || col >= inner.x + inner.width
+        || row < inner.y
+        || row >= inner.y + inner.height
+    {
         return None;
     }
 
-    let inner_y = (row - area.y).saturating_sub(1) as usize;
+    let rel_row = (row - inner.y) as usize;
+    let rel_col = (col - inner.x) as usize;
+    let scrolled = rel_row + state.scroll;
 
-    // Line 0: Conductor row
-    // Line 1: "waiting…" or blank
-    // Line 2: separator
-    // Line 3+: agents (2 lines each: name + detail)
-    if inner_y <= 1 {
-        return Some(SidebarSelection::Conductor);
+    if scrolled <= 1 {
+        return Some(HitResult::Select(SidebarSelection::Conductor));
     }
 
     if state.agents.is_empty() {
         return None;
     }
 
-    let agent_start = 3;
+    let agent_start = 2;
     for (i, agent) in state.agents.iter().enumerate() {
         let line = agent_start + i * 2;
-        if inner_y >= line && inner_y < line + 2 {
-            return Some(SidebarSelection::Agent(agent.session_id.clone()));
+        if scrolled >= line && scrolled < line + 2 {
+            if is_agent_finished(&agent.status)
+                && scrolled == line
+                && rel_col + 3 >= inner.width as usize
+            {
+                return Some(HitResult::Dismiss(agent.session_id.clone()));
+            }
+            return Some(HitResult::Select(SidebarSelection::Agent(
+                agent.session_id.clone(),
+            )));
         }
     }
 
     None
+}
+
+fn is_agent_finished(status: &ChildStatus) -> bool {
+    matches!(
+        status,
+        ChildStatus::Done | ChildStatus::Error(_) | ChildStatus::Cancelled
+    )
 }
 
 pub fn render_agent_panel(
@@ -280,13 +345,6 @@ pub fn render_agent_panel(
         ),
     ]));
 
-    if state.agents.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  waiting…",
-            Style::default().fg(theme.dim()),
-        )));
-    }
-
     lines.push(Line::from(""));
 
     for agent in &state.agents {
@@ -295,7 +353,10 @@ pub fn render_agent_panel(
         let is_active = active_session_id == Some(agent.session_id.as_str());
         let (icon, icon_color) = status_icon(&agent.status, theme);
         let name = agent_display_name(agent);
-        let max_name = (inner.width as usize).saturating_sub(8);
+        let finished = is_agent_finished(&agent.status);
+        let prefix_width = 4; // "▸ " (2) + "◆ " (2)
+        let suffix_width = if finished { 2 } else { 0 }; // "✕ "
+        let max_name = (inner.width as usize).saturating_sub(prefix_width + suffix_width);
         let display_name: String = if name.chars().count() > max_name {
             name.chars()
                 .take(max_name.saturating_sub(1))
@@ -319,23 +380,34 @@ pub fn render_agent_panel(
             theme.foreground
         };
 
-        lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(
                 if highlight { "▸ " } else { "  " },
                 Style::default().fg(theme.accent).bg(bg),
             ),
             Span::styled(format!("{icon} "), Style::default().fg(icon_color).bg(bg)),
-            Span::styled(display_name, Style::default().fg(fg).bg(bg)),
-        ]));
+            Span::styled(display_name.clone(), Style::default().fg(fg).bg(bg)),
+        ];
+
+        if finished {
+            let name_width = 2 + 2 + display_name.chars().count();
+            let pad = (inner.width as usize).saturating_sub(name_width + 2);
+            spans.push(Span::styled(" ".repeat(pad), Style::default().bg(bg)));
+            spans.push(Span::styled("✕ ", Style::default().fg(theme.dim()).bg(bg)));
+        }
+
+        lines.push(Line::from(spans));
 
         let mut detail = status_label(&agent.status).to_string();
         if let Some(tool) = &agent.active_tool {
-            let short: String = if tool.chars().count() > 14 {
-                tool.chars().take(14).collect()
+            let max_tool = (inner.width as usize).saturating_sub(detail.len() + 8);
+            let short: String = if tool.chars().count() > max_tool {
+                let t: String = tool.chars().take(max_tool.saturating_sub(1)).collect();
+                format!("{t}\u{2026}")
             } else {
                 tool.clone()
             };
-            detail.push_str(&format!(" · {short}"));
+            detail.push_str(&format!(" \u{00b7} {short}"));
         }
         lines.push(Line::from(Span::styled(
             format!("    {detail}"),

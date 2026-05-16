@@ -81,7 +81,7 @@ impl ChildHandle {
     fn to_info(&self) -> ChildInfo {
         ChildInfo {
             session_id: self.id.0.clone(),
-            task: task_label(&self.prompt, 14),
+            task: task_label(&self.prompt, 80),
             provider: self.provider_name.clone(),
             model: self.model_name.clone(),
             profile: self.profile_name.clone(),
@@ -97,7 +97,7 @@ impl ChildHandle {
     fn to_sidebar_info(&self) -> ChildInfo {
         ChildInfo {
             session_id: self.id.0.clone(),
-            task: task_label(&self.prompt, 14),
+            task: task_label(&self.prompt, 80),
             provider: self.provider_name.clone(),
             model: self.model_name.clone(),
             profile: self.profile_name.clone(),
@@ -324,6 +324,7 @@ impl SessionPool {
     }
 
     pub fn mark_done(&self, session_id: &str, success: bool) {
+        let mut worktree_child_id = None;
         if let Ok(mut children) = self.children.try_lock()
             && let Some(handle) = children.get_mut(session_id)
         {
@@ -332,6 +333,18 @@ impl SessionPool {
             } else {
                 ChildStatus::Error("cancelled".into())
             };
+            if success && let Some(wt) = &handle.worktree {
+                worktree_child_id = Some(wt.child_id.clone());
+            }
+        }
+        if let (Some(child_id), Some(mgr)) = (worktree_child_id, &self.worktrees) {
+            let mgr = mgr.clone();
+            tokio::spawn(async move {
+                let msg = format!("phx: agent {child_id} — completed");
+                if let Err(e) = mgr.auto_commit(&child_id, &msg).await {
+                    tracing::warn!("auto-commit failed for {child_id}: {e}");
+                }
+            });
         }
         let _ = self.done_tx.send(AgentDone {
             session_id: session_id.to_string(),
@@ -365,7 +378,9 @@ impl SessionPool {
             .get(session_id)
             .ok_or_else(|| format!("session not found: {session_id}"))?;
         match &child.status {
-            ChildStatus::Done | ChildStatus::Error(_) => Ok(child.to_info()),
+            ChildStatus::Done | ChildStatus::Error(_) | ChildStatus::Cancelled => {
+                Ok(child.to_info())
+            }
             other => Err(format!("session not finished: {other:?}")),
         }
     }

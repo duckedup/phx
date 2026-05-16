@@ -23,10 +23,20 @@ pub enum SessionStatus {
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     Token(String),
-    ToolCallStart { id: String, name: String },
-    ToolCallEnd { id: String, output: String },
+    ToolCallStart {
+        id: String,
+        name: String,
+        args_json: String,
+    },
+    ToolCallEnd {
+        id: String,
+        output: String,
+    },
     ContextLoaded(Vec<String>),
-    ContextCompacted { removed: usize, remaining: usize },
+    ContextCompacted {
+        removed: usize,
+        remaining: usize,
+    },
     Done,
     Error(String),
 }
@@ -338,6 +348,7 @@ impl Session {
                         let _ = self.events_tx.send(SessionEvent::ToolCallStart {
                             id: id.clone(),
                             name: name.clone(),
+                            args_json: args_json.clone(),
                         });
                         pending_tool_calls.push(ToolCall {
                             id,

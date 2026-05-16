@@ -8,6 +8,22 @@ use super::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 /// Maximum bytes captured from stdout or stderr.
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 
+fn kill_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+struct ProcessGroupGuard {
+    pid: u32,
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        kill_process_group(self.pid);
+    }
+}
+
 pub struct BashTool;
 
 #[async_trait]
@@ -28,7 +44,7 @@ impl Tool for BashTool {
                     "timeout": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Timeout in seconds (optional, no default timeout)"
+                        "description": "Timeout in seconds (default: 120). Set higher for builds, tests, or long-running commands."
                     }
                 },
                 "required": ["command"]
@@ -46,15 +62,24 @@ impl Tool for BashTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidArgs("missing required field 'command'".into()))?;
 
-        let timeout_secs = args.get("timeout").and_then(|v| v.as_u64());
+        const DEFAULT_TIMEOUT_SECS: u64 = 120;
+        let timeout_secs = Some(
+            args.get("timeout")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_TIMEOUT_SECS),
+        );
 
         let mut child = tokio::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        let child_pid = child.id().unwrap_or(0);
+        let _pg_guard = ProcessGroupGuard { pid: child_pid };
 
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
@@ -120,7 +145,7 @@ impl Tool for BashTool {
                     )));
                 }
                 Err(_elapsed) => {
-                    // Kill the child on timeout.
+                    kill_process_group(child_pid);
                     let _ = child.kill().await;
                     return Err(ToolError::Timeout);
                 }

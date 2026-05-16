@@ -10,10 +10,10 @@ members = [
 
 [package]
 name = "phx"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
-description = "A lightweight, fast, minimalistic agent harness"
+description = "it was already on fire. we just gave it wings."
 repository = "https://github.com/duckedup/phx"
 
 [[bin]]
@@ -45,6 +45,7 @@ libc = "0.2"
 glob = "0.3"
 base64 = "0.22.1"
 ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 
 [dev-dependencies]
 tempfile = "3"

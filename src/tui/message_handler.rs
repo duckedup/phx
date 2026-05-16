@@ -1225,28 +1225,40 @@ fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
         return;
     }
     if let Some(sb_area) = app.sidebar_area
-        && let Some(sel) = crate::tui::components::sidebar::hit_test(
+        && let Some(hit) = crate::tui::components::sidebar::hit_test(
             sb_area,
             mouse.row,
             mouse.column,
             &app.sidebar_state,
         )
     {
-        match &sel {
-            SidebarSelection::Conductor => {
-                app.active_tab = 0;
-            }
-            SidebarSelection::Agent(id) => {
-                if let Some(agent) = app
-                    .agent_receivers
-                    .iter()
-                    .find(|a| a.session_id.as_deref() == Some(id.as_str()))
-                {
-                    app.active_tab = agent.tab_index;
+        use crate::tui::components::sidebar::HitResult;
+        match hit {
+            HitResult::Dismiss(id) => {
+                let was_active = app.tabs.get(app.active_tab).is_some_and(|t| t.id == id);
+                app.sidebar_state.dismiss(&id);
+                if was_active {
+                    app.active_tab = 0;
                 }
             }
+            HitResult::Select(ref sel) => {
+                match sel {
+                    SidebarSelection::Conductor => {
+                        app.active_tab = 0;
+                    }
+                    SidebarSelection::Agent(id) => {
+                        if let Some(agent) = app
+                            .agent_receivers
+                            .iter()
+                            .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                        {
+                            app.active_tab = agent.tab_index;
+                        }
+                    }
+                }
+                app.sidebar_state.selected = sel.clone();
+            }
         }
-        app.sidebar_state.selected = sel;
     }
 }
 

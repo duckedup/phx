@@ -182,7 +182,7 @@ pub async fn run(
                                 Ok(SessionEvent::Token(t)) => {
                                     write_token_line(&mut output, &id_clone, &t).await?;
                                 }
-                                Ok(SessionEvent::ToolCallStart { id: tid, name }) => {
+                                Ok(SessionEvent::ToolCallStart { id: tid, name, .. }) => {
                                     write_tool_call_line(&mut output, &id_clone, &tid, &name).await?;
                                 }
                                 Ok(SessionEvent::ToolCallEnd { id: tid, output: out }) => {
@@ -208,7 +208,7 @@ pub async fn run(
                                     SessionEvent::Token(t) => {
                                         write_token_line(&mut output, &id_clone, &t).await?;
                                     }
-                                    SessionEvent::ToolCallStart { id: tid, name } => {
+                                    SessionEvent::ToolCallStart { id: tid, name, .. } => {
                                         write_tool_call_line(&mut output, &id_clone, &tid, &name).await?;
                                     }
                                     SessionEvent::ToolCallEnd { id: tid, output: out } => {

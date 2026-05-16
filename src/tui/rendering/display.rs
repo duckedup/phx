@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 
@@ -10,21 +12,29 @@ use crate::tui::theme::Theme;
 
 pub struct DisplayLine {
     pub spans: Vec<(String, Style)>,
+    pub file_path: Option<PathBuf>,
 }
 
 impl DisplayLine {
     pub fn styled(text: &str, style: Style) -> Self {
         Self {
             spans: vec![(text.to_string(), style)],
+            file_path: None,
         }
     }
 
     pub fn multi(parts: Vec<(String, Style)>) -> Self {
-        Self { spans: parts }
+        Self {
+            spans: parts,
+            file_path: None,
+        }
     }
 
     pub fn empty() -> Self {
-        Self { spans: vec![] }
+        Self {
+            spans: vec![],
+            file_path: None,
+        }
     }
 
     pub fn to_line(&self) -> Line<'static> {
@@ -51,6 +61,7 @@ pub fn build_item_display_lines(
         }
         ChatItem::Widget(w) => build_widget_display_lines(lines, w, theme, content_width, pad),
         ChatItem::ContextLoaded(names) => build_context_loaded_lines(lines, names, theme, pad),
+        ChatItem::FileSummary(paths) => build_file_summary_lines(lines, paths, theme, pad),
     }
 }
 
@@ -68,6 +79,62 @@ fn build_widget_display_lines(
         content_width,
         pad,
     );
+}
+
+fn build_file_summary_lines(
+    lines: &mut Vec<DisplayLine>,
+    paths: &[PathBuf],
+    theme: &Theme,
+    pad: u16,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    let indent = " ".repeat(pad as usize);
+    let dim = Style::default().fg(theme.dim());
+    let accent = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let file_style = Style::default().fg(theme.info);
+
+    lines.push(DisplayLine::empty());
+    lines.push(DisplayLine::multi(vec![
+        (indent.clone(), Style::default()),
+        ("\u{25c6} ".to_string(), accent),
+        (
+            format!(
+                "{} file{} changed",
+                paths.len(),
+                if paths.len() == 1 { "" } else { "s" }
+            ),
+            dim,
+        ),
+    ]));
+
+    for (i, path) in paths.iter().enumerate() {
+        let is_last = i + 1 == paths.len();
+        let connector = if is_last { "\u{2570}" } else { "\u{251c}" };
+        let display = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        let dir = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|d| format!("{d}/"))
+            .unwrap_or_default();
+        let mut dl = DisplayLine::multi(vec![
+            (format!("{indent}  "), Style::default()),
+            (format!("{connector} "), dim),
+            (dir, dim),
+            (display.to_string(), file_style),
+        ]);
+        dl.file_path = Some(path.clone());
+        lines.push(dl);
+    }
+
+    lines.push(DisplayLine::empty());
 }
 
 fn build_context_loaded_lines(
@@ -108,15 +175,9 @@ fn build_assistant_display_lines(
     content_width: usize,
     pad: u16,
 ) {
-    let indent = " ".repeat(pad as usize);
-    let body_indent = format!("{}  ", indent);
+    let body_indent = " ".repeat(pad as usize);
 
-    let md_lines = render_markdown(
-        &al.content,
-        theme,
-        &body_indent,
-        content_width.saturating_sub(2),
-    );
+    let md_lines = render_markdown(&al.content, theme, &body_indent, content_width);
     lines.extend(md_lines);
     lines.push(DisplayLine::empty());
 }
@@ -129,7 +190,6 @@ fn build_chat_display_lines(
     pad: u16,
 ) {
     let indent = " ".repeat(pad as usize);
-    let body_indent = format!("{}  ", indent);
 
     match cl.role {
         Role::User => {
@@ -170,28 +230,47 @@ fn build_chat_display_lines(
             lines.push(DisplayLine::empty());
         }
         Role::Assistant => {
-            // Assistant messages should use ChatItem::Assistant; this is a fallback.
-            let body_md = render_markdown(
-                &cl.content,
-                theme,
-                &body_indent,
-                content_width.saturating_sub(2),
-            );
+            let body_md = render_markdown(&cl.content, theme, &indent, content_width);
             lines.extend(body_md);
             lines.push(DisplayLine::empty());
         }
         Role::ToolCall => {
-            lines.push(DisplayLine::multi(vec![
-                (format!("{}  ", indent), Style::default()),
+            let (tool_name, detail) = cl.content.split_once(" > ").unwrap_or((&cl.content, ""));
+            let clickable_path = match tool_name {
+                "write" | "read" | "edit" if !detail.is_empty() => {
+                    Some(PathBuf::from(detail.trim()))
+                }
+                _ => None,
+            };
+
+            let mut header = DisplayLine::multi(vec![
+                (indent.to_string(), Style::default()),
                 (
                     "▶ ".to_string(),
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
                 ),
                 (
-                    cl.content.clone(),
+                    tool_name.to_string(),
                     Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
                 ),
-            ]));
+            ]);
+            header.file_path = clickable_path.clone();
+            lines.push(header);
+
+            if !detail.is_empty() {
+                let result_width = content_width.saturating_sub(4);
+                for wl in wrap_text(detail, result_width) {
+                    let mut dl = DisplayLine::multi(vec![
+                        (
+                            format!("{indent}│ "),
+                            Style::default().fg(theme.tool_border()),
+                        ),
+                        (wl, Style::default().fg(theme.dim())),
+                    ]);
+                    dl.file_path = clickable_path.clone();
+                    lines.push(dl);
+                }
+            }
         }
         Role::ToolResult => {
             let is_error = cl.content.starts_with("Error:")
@@ -206,7 +285,7 @@ fn build_chat_display_lines(
                 } else {
                     theme.tool_border()
                 };
-                let result_width = content_width.saturating_sub(6);
+                let result_width = content_width.saturating_sub(4);
 
                 let output_lines: Vec<&str> = cl.content.lines().collect();
                 let max_display = 20;
@@ -230,7 +309,7 @@ fn build_chat_display_lines(
                 for (i, line_text) in show_lines.iter().enumerate() {
                     if truncated && i == 10 {
                         lines.push(DisplayLine::multi(vec![
-                            (format!("{}  │ ", indent), Style::default().fg(border_color)),
+                            (format!("{indent}│ "), Style::default().fg(border_color)),
                             (
                                 format!("... ({hidden_count} more lines)"),
                                 Style::default()
@@ -245,7 +324,7 @@ fn build_chat_display_lines(
                     for wl in wrapped {
                         let text_style = diff_line_style(&wl, theme, is_error);
                         lines.push(DisplayLine::multi(vec![
-                            (format!("{}  │ ", indent), Style::default().fg(border_color)),
+                            (format!("{indent}│ "), Style::default().fg(border_color)),
                             (wl, text_style),
                         ]));
                     }
@@ -257,7 +336,7 @@ fn build_chat_display_lines(
                     ("✓", theme.success)
                 };
                 lines.push(DisplayLine::multi(vec![
-                    (format!("{}  ╰ ", indent), Style::default().fg(border_color)),
+                    (format!("{indent}╰ "), Style::default().fg(border_color)),
                     (format!("{icon} done"), Style::default().fg(icon_color)),
                 ]));
             }
@@ -267,26 +346,23 @@ fn build_chat_display_lines(
             let sys_style = Style::default()
                 .fg(theme.dim())
                 .add_modifier(Modifier::ITALIC);
-            let wrap_width = content_width.saturating_sub(4);
+            let wrap_width = content_width.saturating_sub(2);
             let content_lines: Vec<&str> = cl.content.split('\n').collect();
             if content_lines.len() <= 1 {
-                let text = format!("{indent}  ── {} ──", cl.content);
+                let text = format!("{indent}── {} ──", cl.content);
                 lines.push(DisplayLine::styled(&text, sys_style));
             } else {
-                lines.push(DisplayLine::styled(&format!("{indent}  ──────"), sys_style));
+                lines.push(DisplayLine::styled(&format!("{indent}──────"), sys_style));
                 for content_line in &content_lines {
                     if content_line.is_empty() {
                         lines.push(DisplayLine::empty());
                     } else {
                         for wl in wrap_text(content_line, wrap_width) {
-                            lines.push(DisplayLine::styled(
-                                &format!("{body_indent}{wl}"),
-                                sys_style,
-                            ));
+                            lines.push(DisplayLine::styled(&format!("{indent}{wl}"), sys_style));
                         }
                     }
                 }
-                lines.push(DisplayLine::styled(&format!("{indent}  ──────"), sys_style));
+                lines.push(DisplayLine::styled(&format!("{indent}──────"), sys_style));
             }
             lines.push(DisplayLine::empty());
         }
