@@ -241,7 +241,7 @@ impl ConductorSetup {
         frame.render_widget(block, popup);
 
         let rows = Layout::vertical([
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(1),
         ])
@@ -264,17 +264,11 @@ impl ConductorSetup {
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let title = Line::from(vec![
-            Span::styled(
-                "phx",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  conductor setup", Style::default().fg(theme.dim())),
-        ]);
         let steps = d::step_indicator(STEPS, self.step.index(), theme);
-        frame.render_widget(Paragraph::new(vec![title, steps]), area);
+        frame.render_widget(
+            Paragraph::new(steps).alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -294,7 +288,6 @@ impl ConductorSetup {
         let header_h: usize = 3;
         let max_visible = (area.height as usize).saturating_sub(header_h);
 
-        // Build display rows with their visual index
         let mut display: Vec<(&Row, Option<usize>)> = Vec::new();
         let mut model_idx = 0;
         for row in &self.rows {
@@ -307,7 +300,6 @@ impl ConductorSetup {
             }
         }
 
-        // Scroll to keep selected visible
         let selected_display_idx = display
             .iter()
             .position(|(_, mi)| *mi == Some(self.selected))
@@ -318,6 +310,7 @@ impl ConductorSetup {
             0
         };
 
+        let sel_bg = Theme::blend(theme.accent, theme.background, 0.85);
         let mut lines: Vec<Line> = vec![
             Line::from(""),
             d::heading(heading_text, theme),
@@ -330,31 +323,24 @@ impl ConductorSetup {
                 Row::Header(name) => {
                     lines.push(Line::from(""));
                     lines.push(Line::from(Span::styled(
-                        name.as_str(),
-                        Style::default()
-                            .fg(theme.foreground)
-                            .add_modifier(Modifier::BOLD),
+                        name.to_uppercase(),
+                        Style::default().fg(theme.dim()),
                     )));
                 }
                 Row::Model(idx) => {
                     let entry = &self.models[*idx];
                     let sel = *mi == Some(self.selected);
-                    let bg = if sel {
-                        Theme::blend(theme.accent, theme.background, 0.75)
-                    } else {
-                        theme.background
-                    };
-                    let name_style = if sel {
-                        Style::default()
-                            .fg(theme.accent)
-                            .bg(bg)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(theme.foreground).bg(bg)
-                    };
+                    let bg = if sel { sel_bg } else { theme.background };
+                    let fg = if sel { theme.accent } else { theme.foreground };
+                    let style = Style::default().fg(fg).bg(bg);
+                    let bold_style = style.add_modifier(Modifier::BOLD);
+
+                    let fill = " "
+                        .repeat((area.width as usize).saturating_sub(4 + entry.model_name.len()));
                     lines.push(Line::from(vec![
-                        Span::styled(if sel { "  ▸ " } else { "    " }, name_style),
-                        Span::styled(entry.model_name.as_str(), name_style),
+                        Span::styled(if sel { " ▸ " } else { "   " }, bold_style),
+                        Span::styled(entry.model_name.as_str(), bold_style),
+                        Span::styled(fill, Style::default().bg(bg)),
                     ]));
                 }
             }
@@ -366,7 +352,7 @@ impl ConductorSetup {
                 .filter(|(r, _)| matches!(r, Row::Model(_)))
                 .count();
             if remaining > 0 {
-                lines.push(d::hint_owned(format!("    ↓ {} more", remaining), theme));
+                lines.push(d::hint_owned(format!("   ↓ {} more", remaining), theme));
             }
         }
 
@@ -374,6 +360,7 @@ impl ConductorSetup {
     }
 
     fn render_tracker_list(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let sel_bg = Theme::blend(theme.accent, theme.background, 0.85);
         let mut lines: Vec<Line> = vec![
             Line::from(""),
             d::heading("Issue tracker", theme),
@@ -382,8 +369,27 @@ impl ConductorSetup {
         ];
 
         for (i, tracker) in TRACKERS.iter().enumerate() {
-            let item = d::list_item(tracker.label, Some(tracker.desc), i == self.selected, theme);
-            lines.extend(item);
+            let sel = i == self.selected;
+            let bg = if sel { sel_bg } else { theme.background };
+            let fg = if sel { theme.accent } else { theme.foreground };
+            let desc_fg = if sel { theme.accent } else { theme.dim() };
+
+            let fill = " ".repeat((area.width as usize).saturating_sub(4 + tracker.label.len()));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if sel { " ▸ " } else { "   " },
+                    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    tracker.label,
+                    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(fill, Style::default().bg(bg)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default().bg(bg)),
+                Span::styled(tracker.desc, Style::default().fg(desc_fg).bg(bg)),
+            ]));
             if i + 1 < TRACKERS.len() {
                 lines.push(Line::from(""));
             }

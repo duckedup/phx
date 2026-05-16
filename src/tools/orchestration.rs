@@ -22,7 +22,6 @@ pub struct OrchestrationContext {
     pub project: PathBuf,
     pub parent_provider: RwLock<String>,
     pub parent_tools: RwLock<ToolRegistry>,
-    pub agents: RwLock<Vec<crate::session::agents::AgentDefinition>>,
 }
 
 pub fn register_orchestration_tools(registry: &mut ToolRegistry, ctx: Arc<OrchestrationContext>) {
@@ -38,7 +37,9 @@ pub fn register_orchestration_tools(registry: &mut ToolRegistry, ctx: Arc<Orches
     registry.register(Arc::new(CancelAgentTool {
         ctx: Arc::clone(&ctx),
     }));
-    registry.register(Arc::new(MergeAgentTool { ctx }));
+    registry.register(Arc::new(MergeAgentTool {
+        ctx: Arc::clone(&ctx),
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -84,10 +85,6 @@ impl Tool for SpawnAgentTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "File paths to pre-load into the child's conversation."
-                    },
-                    "agent": {
-                        "type": "string",
-                        "description": "Name of a custom agent definition to use. Overrides system prompt, tools, and optionally provider/model with the agent's configuration."
                     }
                 },
                 "required": ["prompt"]
@@ -117,28 +114,14 @@ impl Tool for SpawnAgentTool {
                     .collect()
             })
             .unwrap_or_default();
-        let agent_name = args["agent"].as_str();
-
-        let agent_def = if let Some(name) = agent_name {
-            let agents = self.ctx.agents.read();
-            let def = crate::session::agents::find_agent(&agents, name)
-                .ok_or_else(|| ToolError::InvalidArgs(format!("unknown custom agent: {name}")))?
-                .clone();
-            Some(def)
-        } else {
-            None
-        };
 
         let config = self.ctx.config.read().clone();
         let parent_provider = self.ctx.parent_provider.read().clone();
 
         let effective_provider = provider_name
-            .or(agent_def.as_ref().and_then(|d| d.provider.as_deref()))
             .or(config.conductor.agent_provider.as_deref())
             .unwrap_or(&parent_provider);
-        let effective_model = model_override
-            .or(agent_def.as_ref().and_then(|d| d.model.as_deref()))
-            .or(config.conductor.agent_model.as_deref());
+        let effective_model = model_override.or(config.conductor.agent_model.as_deref());
 
         let (provider, prov_name, model_name) = SessionPool::resolve_provider(
             &config,
@@ -156,39 +139,18 @@ impl Tool for SpawnAgentTool {
 
         let tools = {
             let parent_tools = self.ctx.parent_tools.read();
-            let reg = if let Some(ref def) = agent_def {
-                if def.tools.is_empty() {
-                    parent_tools.clone()
-                } else {
-                    let mut reg = ToolRegistry::new();
-                    for tool_name in &def.tools {
-                        if let Some(tool) = parent_tools.get(tool_name) {
-                            reg.register(tool);
-                        } else if let Some(tool) = super::lookup(tool_name) {
-                            reg.register(tool);
-                        } else {
-                            tracing::warn!(
-                                "custom agent '{}': unknown tool '{}'",
-                                def.name,
-                                tool_name
-                            );
-                        }
-                    }
-                    reg
-                }
-            } else {
-                parent_tools.clone()
-            };
-            std::sync::Arc::new(parking_lot::RwLock::new(reg))
+            std::sync::Arc::new(parking_lot::RwLock::new(parent_tools.clone()))
         };
 
-        let system_prompt_override = agent_def.as_ref().map(|d| d.system_prompt.clone());
+        let system_prompt_override = None;
 
         let worktree = if use_worktree {
-            self.ctx.pool.worktrees.as_ref().and_then(|mgr| {
+            if let Some(mgr) = &self.ctx.pool.worktrees {
                 let child_id = format!("{}", uuid::Uuid::now_v7().simple());
-                mgr.create(&child_id).ok()
-            })
+                mgr.create(&child_id).await.ok()
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -213,17 +175,23 @@ impl Tool for SpawnAgentTool {
             })
             .await;
 
-        let result = json!({
-            "session_id": id.0,
-            "provider": prov_name,
-            "model": model_name,
-            "agent": agent_name,
-            "status": "queued",
-            "worktree": worktree.as_ref().map(|w| w.path.to_string_lossy().to_string()),
-            "branch": worktree.as_ref().map(|w| &w.branch),
-        });
+        let agent_label = "default";
+        let wt_info = worktree
+            .as_ref()
+            .map(|w| format!(" on branch {}", w.branch))
+            .unwrap_or_default();
 
-        Ok(ToolResult::success(result.to_string()))
+        let output = format!(
+            "◆ Agent spawned\n\
+             \n\
+               id       {}\n\
+               agent    {}\n\
+               model    {}/{}\n\
+               status   queued{}\n",
+            id.0, agent_label, prov_name, model_name, wt_info
+        );
+
+        Ok(ToolResult::success(output))
     }
 }
 
@@ -265,43 +233,38 @@ impl Tool for CheckAgentsTool {
                 .collect()
         });
 
-        let children = self.ctx.pool.check(ids.as_deref()).await;
+        let children = match self.ctx.pool.try_check_filtered(ids.as_deref()) {
+            Some(c) => c,
+            None => self.ctx.pool.check(ids.as_deref()).await,
+        };
 
-        let total = children.len();
-        let running = children
-            .iter()
-            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Running)
-            .count();
-        let done = children
-            .iter()
-            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Done)
-            .count();
-        let queued = children
-            .iter()
-            .filter(|c| c.status == crate::session::orchestration::ChildStatus::Queued)
-            .count();
-        let error = children
-            .iter()
-            .filter(|c| {
-                matches!(
-                    c.status,
-                    crate::session::orchestration::ChildStatus::Error(_)
-                )
-            })
-            .count();
+        if children.is_empty() {
+            return Ok(ToolResult::success("No agents."));
+        }
 
-        let result = json!({
-            "children": children,
-            "summary": {
-                "total": total,
-                "running": running,
-                "done": done,
-                "queued": queued,
-                "error": error,
-            }
-        });
+        let mut lines = Vec::new();
+        for child in &children {
+            let status_str = match &child.status {
+                crate::session::orchestration::ChildStatus::Queued => "queued",
+                crate::session::orchestration::ChildStatus::Running => "working",
+                crate::session::orchestration::ChildStatus::Done => "done",
+                crate::session::orchestration::ChildStatus::Error(_) => "error",
+                crate::session::orchestration::ChildStatus::Cancelled => "cancelled",
+            };
+            let elapsed = format!("{:.0}s", child.elapsed_s);
+            let tool_info = child
+                .active_tool
+                .as_deref()
+                .map(|t| format!(" ({t})"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{}\t{}\t{}\t{}",
+                child.task, status_str, elapsed, tool_info
+            ));
+        }
 
-        Ok(ToolResult::success(result.to_string()))
+        let output = format!("check_agents\n{}", lines.join("\n"));
+        Ok(ToolResult::success(output))
     }
 }
 
@@ -354,7 +317,7 @@ impl Tool for CollectAgentTool {
 
         if let (Some(branch), Some(mgr)) = (&info.worktree_branch, &self.ctx.pool.worktrees) {
             let child_id = branch.strip_prefix("phx/agent/").unwrap_or(session_id);
-            if let Ok(diff) = mgr.diff_summary(child_id, "HEAD") {
+            if let Ok(diff) = mgr.diff_summary(child_id, "HEAD").await {
                 result["worktree_diff"] = json!({
                     "branch": branch,
                     "files_changed": diff.files_changed,
@@ -507,10 +470,13 @@ impl Tool for MergeAgentTool {
             })?;
 
         // Auto-commit any remaining changes
-        let _ = mgr.auto_commit(child_id, &format!("phx: agent {child_id} — final"));
+        let _ = mgr
+            .auto_commit(child_id, &format!("phx: agent {child_id} — final"))
+            .await;
 
         let merge_result = mgr
             .merge(child_id, strategy, message, cleanup)
+            .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
         Ok(ToolResult::success(

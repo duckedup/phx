@@ -69,6 +69,34 @@ impl HookDispatcher {
         subscribe: Vec<String>,
         can_block: Vec<String>,
     ) {
+        let (subscribe_set, block_set) = Self::parse_hook_sets(&subscribe, &can_block);
+        let mut regs = self.registrations.write().await;
+        regs.push(HookRegistration {
+            subscriber,
+            subscribe: subscribe_set,
+            can_block: block_set,
+        });
+    }
+
+    pub fn register_subscriber_sync(
+        &self,
+        subscriber: Arc<dyn HookSubscriber>,
+        subscribe: Vec<String>,
+        can_block: Vec<String>,
+    ) {
+        let (subscribe_set, block_set) = Self::parse_hook_sets(&subscribe, &can_block);
+        let mut regs = self.registrations.blocking_write();
+        regs.push(HookRegistration {
+            subscriber,
+            subscribe: subscribe_set,
+            can_block: block_set,
+        });
+    }
+
+    fn parse_hook_sets(
+        subscribe: &[String],
+        can_block: &[String],
+    ) -> (HashSet<HookEvent>, HashSet<HookEvent>) {
         let subscribe_set: HashSet<HookEvent> = subscribe
             .iter()
             .filter_map(|s| HookEvent::parse(s))
@@ -77,13 +105,7 @@ impl HookDispatcher {
             .iter()
             .filter_map(|s| HookEvent::parse(s))
             .collect();
-
-        let mut regs = self.registrations.write().await;
-        regs.push(HookRegistration {
-            subscriber,
-            subscribe: subscribe_set,
-            can_block: block_set,
-        });
+        (subscribe_set, block_set)
     }
 
     pub async fn notify(&self, event: HookEvent, data: serde_json::Value) {
@@ -163,7 +185,7 @@ impl Default for HookDispatcher {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

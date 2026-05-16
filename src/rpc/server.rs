@@ -80,7 +80,8 @@ pub async fn run(
                     &crate::config::paths::user_home(),
                     &config.skills.dirs,
                 );
-                let result = dispatcher::dispatch(input_text, &config, &skills, &store, &project);
+                let result =
+                    dispatcher::dispatch(input_text, &config, &skills, &store, &project).await;
                 let result_json = match result {
                     dispatcher::CommandResult::Message(msg) => {
                         serde_json::json!({"type": "message", "text": msg})
@@ -161,36 +162,65 @@ pub async fn run(
                 };
 
                 let mut rx = sess.subscribe();
-                let id_clone = id.clone();
 
                 let skills = crate::session::skills::discover_layered(
                     Some(&project),
                     &crate::config::paths::user_home(),
                     &config.skills.dirs,
                 );
-                sess.run(&*provider, &tool_registry, &store, &project, &skills)
-                    .await;
 
-                // Drain events that were broadcast during run
-                while let Ok(event) = rx.try_recv() {
-                    match event {
-                        SessionEvent::Token(t) => {
-                            write_token_line(&mut output, &id_clone, &t).await?;
+                let id_clone = id.clone();
+                let run_fut = sess.run(&*provider, &tool_registry, &store, &project, &skills);
+
+                // Stream events as they arrive during session execution
+                tokio::pin!(run_fut);
+                loop {
+                    tokio::select! {
+                        biased;
+                        event = rx.recv() => {
+                            match event {
+                                Ok(SessionEvent::Token(t)) => {
+                                    write_token_line(&mut output, &id_clone, &t).await?;
+                                }
+                                Ok(SessionEvent::ToolCallStart { id: tid, name }) => {
+                                    write_tool_call_line(&mut output, &id_clone, &tid, &name).await?;
+                                }
+                                Ok(SessionEvent::ToolCallEnd { id: tid, output: out }) => {
+                                    write_tool_result_line(&mut output, &id_clone, &tid, &out).await?;
+                                }
+                                Ok(SessionEvent::Error(e)) => {
+                                    write_error_line(&mut output, &id_clone, &e).await?;
+                                }
+                                Ok(SessionEvent::Done) => {
+                                    break;
+                                }
+                                Ok(_) => {}
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::warn!("RPC event stream lagged by {n} messages");
+                                }
+                            }
                         }
-                        SessionEvent::ToolCallStart { id: tid, name } => {
-                            write_tool_call_line(&mut output, &id_clone, &tid, &name).await?;
-                        }
-                        SessionEvent::ToolCallEnd {
-                            id: tid,
-                            output: out,
-                        } => {
-                            write_tool_result_line(&mut output, &id_clone, &tid, &out).await?;
-                        }
-                        SessionEvent::ContextLoaded(_) => {}
-                        SessionEvent::ContextCompacted { .. } => {}
-                        SessionEvent::Done => {}
-                        SessionEvent::Error(e) => {
-                            write_error_line(&mut output, &id_clone, &e).await?;
+                        _ = &mut run_fut => {
+                            // Session finished — drain remaining events
+                            while let Ok(event) = rx.try_recv() {
+                                match event {
+                                    SessionEvent::Token(t) => {
+                                        write_token_line(&mut output, &id_clone, &t).await?;
+                                    }
+                                    SessionEvent::ToolCallStart { id: tid, name } => {
+                                        write_tool_call_line(&mut output, &id_clone, &tid, &name).await?;
+                                    }
+                                    SessionEvent::ToolCallEnd { id: tid, output: out } => {
+                                        write_tool_result_line(&mut output, &id_clone, &tid, &out).await?;
+                                    }
+                                    SessionEvent::Error(e) => {
+                                        write_error_line(&mut output, &id_clone, &e).await?;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            break;
                         }
                     }
                 }
@@ -233,7 +263,7 @@ pub async fn run(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use std::io::Cursor;

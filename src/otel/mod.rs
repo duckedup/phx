@@ -131,6 +131,7 @@ mod tests {
 
     /// Integration test: build the full subscriber stack (without installing
     /// it globally) and verify events flow through the ring layer.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_full_stack_events_captured() {
         use tracing::subscriber::with_default;

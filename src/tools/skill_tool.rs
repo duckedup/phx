@@ -87,7 +87,7 @@ pub fn register_skill_tools(skills: &[Skill], registry: &mut super::traits::Tool
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::session::skills::{Skill, SkillSource};

@@ -217,6 +217,7 @@ where
 mod tests {
     use super::*;
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_ring_capacity_eviction() {
         let ring = RingBuffer::new(3);
@@ -246,6 +247,7 @@ mod tests {
         assert!(ring.snapshot().is_empty());
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_ring_under_capacity() {
         let ring = RingBuffer::new(10);
@@ -261,6 +263,7 @@ mod tests {
         assert_eq!(snap[0].target, "test");
     }
 
+    #[cfg_attr(miri, ignore)]
     #[tokio::test]
     async fn test_subscribe_receives_events() {
         let ring = RingBuffer::new(16);
@@ -278,6 +281,7 @@ mod tests {
         assert_eq!(received.level, EventLevel::Warn);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[tokio::test]
     async fn test_subscribe_multiple_events() {
         let ring = RingBuffer::new(16);
@@ -307,6 +311,7 @@ mod tests {
         assert_eq!(EventLevel::from(&Level::ERROR), EventLevel::Error);
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_capacity_one() {
         let ring = RingBuffer::new(1);

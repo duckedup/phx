@@ -143,7 +143,6 @@ pub fn render_modal_picker(frame: &mut Frame, picker: &PickerState, theme: &Them
         PickerMode::Theme => " Theme ",
         PickerMode::Model => " Model ",
         PickerMode::Session => " Session ",
-        PickerMode::ConductorTracker => " Issue Tracker ",
         PickerMode::CommandComplete => "",
     };
 

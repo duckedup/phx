@@ -22,36 +22,39 @@ fn is_selected(line: usize, col: usize, sel: &((usize, usize), (usize, usize))) 
 }
 
 pub fn render_input(frame: &mut Frame, area: Rect, input: &InputState, theme: &Theme) {
+    use ratatui::widgets::{Block, BorderType, Borders, Padding};
+
     let bg = theme.background;
-    let border_fg = theme.separator();
-    let sep = "─".repeat(area.width as usize);
+    let border_fg = Theme::blend(theme.accent, theme.background, 0.5);
 
-    let top = Rect {
-        x: area.x,
+    frame.render_widget(Paragraph::new("").style(Style::default().bg(bg)), area);
+
+    let pad_x = 2u16;
+    let box_area = Rect {
+        x: area.x + pad_x,
         y: area.y,
-        width: area.width,
-        height: 1,
-    };
-    frame.render_widget(
-        Paragraph::new(sep).style(Style::default().fg(border_fg).bg(bg)),
-        top,
-    );
-
-    let input_area = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height.saturating_sub(1),
+        width: area.width.saturating_sub(pad_x * 2),
+        height: area.height,
     };
 
-    let prompt_str = "  > ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_fg))
+        .style(Style::default().bg(bg))
+        .padding(Padding::horizontal(1));
+
+    let input_area = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    let prompt_str = "> ";
     let prompt_len = prompt_str.len();
     let prompt_style = Style::default()
         .fg(theme.primary)
         .add_modifier(Modifier::BOLD);
     let text_style = Style::default().fg(theme.foreground);
     let select_style = Style::default().fg(theme.background).bg(theme.foreground);
-    let cont_str = "  … ";
+    let cont_str = "… ";
 
     if input.is_empty() {
         let content = Line::from(vec![
@@ -149,7 +152,7 @@ pub fn render_input(frame: &mut Frame, area: Rect, input: &InputState, theme: &T
         } else if scroll + i == 0 {
             prompt_str
         } else {
-            "    "
+            "  "
         };
 
         let text_spans = if let Some(ref sel) = selection {

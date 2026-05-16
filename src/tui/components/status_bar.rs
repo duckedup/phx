@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use crate::tui::rendering::helpers::{format_tokens, spinner_frame};
+use crate::tui::rendering::helpers::{format_tokens, spinner_color, spinner_frame};
 use crate::tui::theme::Theme;
 
 pub struct SessionTokens {
@@ -20,6 +20,8 @@ pub struct StatusState<'a> {
     pub cost: Option<f64>,
     pub context: Option<ContextUsage>,
     pub is_running: bool,
+    pub conductor_mode: bool,
+    pub agent_count: usize,
     pub provider_info: &'a str,
     pub frame_tick: u64,
 }
@@ -49,19 +51,33 @@ fn format_context(ctx: &ContextUsage) -> String {
 }
 
 pub fn render_status(frame: &mut Frame, area: Rect, state: &StatusState<'_>, theme: &Theme) {
-    let bg = theme.status_bar_bg();
-    let fg = theme.status_bar_fg();
-    let dim = theme.status_bar_dim();
+    let bg = theme.background;
+    let dim = theme.dim();
 
-    let spinner = if state.is_running {
-        spinner_frame((state.frame_tick / 4) as usize)
+    let frame_idx = (state.frame_tick / 4) as usize;
+    let (spinner, spin_color) = if state.is_running {
+        (spinner_frame(frame_idx), spinner_color(frame_idx, theme))
     } else {
-        "✦"
+        ("◆", theme.accent)
     };
 
-    let left = format!(" {spinner} phx");
+    let mut left_spans: Vec<Span> = vec![
+        Span::styled("    ", Style::default()),
+        Span::styled(
+            spinner,
+            Style::default().fg(spin_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" phx", Style::default().fg(dim)),
+    ];
+
+    if state.conductor_mode {
+        left_spans.push(Span::styled(" · conductor", Style::default().fg(dim)));
+    }
 
     let mut right_parts: Vec<String> = Vec::new();
+    if state.conductor_mode && state.agent_count > 0 {
+        right_parts.push(format!("{} agents", state.agent_count));
+    }
     if let Some(ref t) = state.tokens {
         let mut tok = format!("{}↑ {}↓", format_tokens(t.input), format_tokens(t.output));
         if t.cache_read > 0 {
@@ -78,18 +94,14 @@ pub fn render_status(frame: &mut Frame, area: Rect, state: &StatusState<'_>, the
     if !state.provider_info.is_empty() {
         right_parts.push(state.provider_info.to_string());
     }
-    let right = format!("{} ", right_parts.join(" · "));
+    let right = format!("{}    ", right_parts.join(" · "));
 
-    let pad_w = (area.width as usize).saturating_sub(left.chars().count() + right.chars().count());
-    let padding = " ".repeat(pad_w);
+    let left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+    let pad_w = (area.width as usize).saturating_sub(left_len + right.chars().count());
 
-    let line = Line::from(vec![
-        Span::styled(
-            left,
-            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(padding, Style::default().bg(bg)),
-        Span::styled(right, Style::default().fg(dim).bg(bg)),
-    ]);
-    frame.render_widget(Paragraph::new(line), area);
+    left_spans.push(Span::styled(" ".repeat(pad_w), Style::default()));
+    left_spans.push(Span::styled(right, Style::default().fg(dim)));
+
+    let line = Line::from(left_spans);
+    frame.render_widget(Paragraph::new(line).style(Style::default().bg(bg)), area);
 }

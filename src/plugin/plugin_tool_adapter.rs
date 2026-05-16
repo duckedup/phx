@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use crate::tools::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 
-use super::plugin_runtime::PluginRuntime;
+use super::plugin_runtime::{PluginRuntime, invoke_tool_async};
 
 pub struct PluginToolAdapter {
     runtime: Arc<Mutex<PluginRuntime>>,
@@ -49,8 +49,14 @@ impl Tool for PluginToolAdapter {
         _input: &dyn InputRequester,
     ) -> Result<ToolResult, ToolError> {
         let args_json = serde_json::to_string(&args).unwrap_or_default();
-        let mut rt = self.runtime.lock();
-        match rt.invoke_tool(&self.tool_name, &args_json) {
+
+        let (exec_kind, project_dir) = {
+            let rt = self.runtime.lock();
+            rt.tool_exec_info(&self.tool_name)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
+        };
+
+        match invoke_tool_async(exec_kind, &self.tool_name, &args_json, &project_dir).await {
             Ok(result) => Ok(ToolResult {
                 output: result.output,
                 truncated: false,

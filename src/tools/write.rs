@@ -82,7 +82,7 @@ impl Tool for WriteTool {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::tools::traits::NoopInputRequester;

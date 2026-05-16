@@ -211,11 +211,10 @@ impl Session {
             self.turn_count += 1;
 
             let tool_schemas = self.tool_schemas(tools);
-            let base_prompt = self
-                .profile
-                .system_prompt_path
-                .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok());
+            let base_prompt = match &self.profile.system_prompt_path {
+                Some(p) => tokio::fs::read_to_string(p).await.ok(),
+                None => None,
+            };
 
             let home = crate::config::paths::config_dir()
                 .parent()
@@ -524,7 +523,7 @@ impl Session {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::providers::traits::{Event, MockProvider, Usage};

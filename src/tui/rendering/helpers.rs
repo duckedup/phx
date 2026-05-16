@@ -50,10 +50,30 @@ pub fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     result
 }
 
-const SPINNER_FRAMES: &[&str] = &["⟡", "✦", "◈", "✦", "⟡", "◇", "✧", "◇"];
+use crate::tui::theme::Theme;
+use ratatui::style::Color;
 
-pub fn spinner_frame(idx: usize) -> &'static str {
-    SPINNER_FRAMES[idx % SPINNER_FRAMES.len()]
+const SPINNER_GLYPH: &str = "◆";
+const SPINNER_CYCLE: &[(f64, f64)] = &[
+    (0.0, 1.0),
+    (0.15, 0.85),
+    (0.35, 0.65),
+    (0.55, 0.45),
+    (0.75, 0.25),
+    (1.0, 0.0),
+    (0.75, 0.25),
+    (0.55, 0.45),
+    (0.35, 0.65),
+    (0.15, 0.85),
+];
+
+pub fn spinner_frame(_idx: usize) -> &'static str {
+    SPINNER_GLYPH
+}
+
+pub fn spinner_color(idx: usize, theme: &Theme) -> Color {
+    let (t_bg, _) = SPINNER_CYCLE[idx % SPINNER_CYCLE.len()];
+    Theme::blend(theme.accent, theme.background, t_bg)
 }
 
 pub fn format_tokens(n: u64) -> String {

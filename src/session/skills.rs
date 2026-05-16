@@ -371,7 +371,7 @@ pub fn load_skill_prompt(skill: &Skill) -> anyhow::Result<String> {
     Ok(std::fs::read_to_string(&skill.skill_md)?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use tempfile::tempdir;

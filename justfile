@@ -42,6 +42,10 @@ publish:
 clean:
     cargo clean
 
+# Run Miri to check for undefined behavior (requires nightly)
+miri:
+    MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-permissive-provenance -Zmiri-ignore-leaks" cargo +nightly miri test
+
 # Build native plugins and install to .phx/plugins/
 # Scans both plugins/ and examples/plugins/ for Cargo and manifest-only plugins.
 build-plugins:

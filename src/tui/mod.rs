@@ -1,7 +1,6 @@
 pub mod add_model_wizard;
 pub mod app;
 pub mod components;
-pub mod conductor_setup;
 pub mod input;
 pub mod input_requester;
 pub mod layout;

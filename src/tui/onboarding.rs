@@ -64,8 +64,8 @@ pub const PRESETS: &[ProviderPreset] = &[
     },
 ];
 
-const STEPS_CLOUD: &[&str] = &["Provider", "Auth", "Model"];
-const STEPS_LOCAL: &[&str] = &["Provider", "Server", "Model"];
+const STEPS_CLOUD: &[&str] = &["Provider", "Auth", "Model", "Agents"];
+const STEPS_LOCAL: &[&str] = &["Provider", "Server", "Model", "Agents"];
 
 // ── State ───────────────────────────────────────────────────────
 
@@ -76,6 +76,7 @@ enum Step {
     Fetching,
     Model,
     CustomModel,
+    SubAgent,
 }
 
 impl Step {
@@ -84,6 +85,7 @@ impl Step {
             Step::Provider => 0,
             Step::BaseUrl | Step::ApiKey => 1,
             Step::Fetching | Step::Model | Step::CustomModel => 2,
+            Step::SubAgent => 3,
         }
     }
 }
@@ -103,6 +105,8 @@ pub struct OnboardingState {
     model_selected: usize,
     fetch_error: Option<String>,
     model_rx: Option<mpsc::Receiver<Result<Vec<String>, String>>>,
+    subagent_selected: usize,
+    subagent_choices: Vec<(String, String)>,
 }
 
 pub enum Action {
@@ -115,6 +119,7 @@ pub enum Action {
         api_key: Option<String>,
         env_hint: String,
         base_url: Option<String>,
+        subagent_model: Option<String>,
     },
 }
 
@@ -135,6 +140,8 @@ impl OnboardingState {
             model_selected: 0,
             fetch_error: None,
             model_rx: None,
+            subagent_selected: 0,
+            subagent_choices: Vec::new(),
         }
     }
 
@@ -155,6 +162,8 @@ impl OnboardingState {
             model_selected: 0,
             fetch_error: None,
             model_rx: None,
+            subagent_selected: 0,
+            subagent_choices: Vec::new(),
         }
     }
 
@@ -219,6 +228,7 @@ impl OnboardingState {
             Step::Fetching => self.handle_fetching_key(key),
             Step::Model => self.handle_model_key(key),
             Step::CustomModel => self.handle_custom_model_key(key),
+            Step::SubAgent => self.handle_subagent_key(key),
         }
     }
 
@@ -278,34 +288,55 @@ impl OnboardingState {
 
         let (tx, rx) = mpsc::channel();
         let kind = preset.kind;
-        std::thread::spawn(move || {
-            let result = fetch_models_blocking(kind, api_key.as_deref(), base_url.as_deref());
+        tokio::spawn(async move {
+            let result = fetch_models_async(kind, api_key.as_deref(), base_url.as_deref()).await;
             let _ = tx.send(result);
         });
         self.model_rx = Some(rx);
         self.step = Step::Fetching;
     }
 
+    fn resolved_model(&self) -> String {
+        let preset = &PRESETS[self.selected];
+        if !self.model_buf.trim().is_empty() {
+            self.model_buf.trim().to_string()
+        } else if self.model_selected < self.models.len() {
+            self.models[self.model_selected].clone()
+        } else {
+            preset.default_model.to_string()
+        }
+    }
+
+    fn advance_to_subagent(&mut self) {
+        let main_model = self.resolved_model();
+        let preset = &PRESETS[self.selected];
+
+        let mut choices = vec![("same".to_string(), format!("Same as main ({main_model})"))];
+
+        let catalog = model_info::known_models();
+        for m in catalog
+            .iter()
+            .filter(|m| m.provider_kind == preset.kind && m.id != main_model)
+        {
+            choices.push((m.id.to_string(), m.display_name.to_string()));
+        }
+
+        self.subagent_choices = choices;
+        self.subagent_selected = 0;
+        self.step = Step::SubAgent;
+    }
+
     fn finish(&self) -> Action {
         let preset = &PRESETS[self.selected];
-        let model = match self.step {
-            Step::CustomModel => {
-                let t = self.model_buf.trim();
-                if t.is_empty() {
-                    preset.default_model
-                } else {
-                    t
-                }
-                .to_string()
-            }
-            _ => {
-                if self.model_selected < self.models.len() {
-                    self.models[self.model_selected].clone()
-                } else {
-                    preset.default_model.to_string()
-                }
-            }
-        };
+        let model = self.resolved_model();
+
+        let subagent_model =
+            if self.subagent_selected > 0 && self.subagent_selected < self.subagent_choices.len() {
+                Some(self.subagent_choices[self.subagent_selected].0.clone())
+            } else {
+                None
+            };
+
         Action::Complete {
             name: preset.name.to_string(),
             kind: preset.kind,
@@ -321,6 +352,7 @@ impl OnboardingState {
                 preset.env_hint.to_string()
             },
             base_url: self.resolve_base_url(),
+            subagent_model,
         }
     }
 
@@ -434,7 +466,8 @@ impl OnboardingState {
                     self.model_cursor = 0;
                     self.step = Step::CustomModel;
                 } else {
-                    return self.finish();
+                    self.advance_to_subagent();
+                    return Action::None;
                 }
             }
             KeyCode::Esc => {
@@ -452,7 +485,10 @@ impl OnboardingState {
 
     fn handle_custom_model_key(&mut self, key: KeyEvent) -> Action {
         match key.code {
-            KeyCode::Enter if !self.model_buf.trim().is_empty() => return self.finish(),
+            KeyCode::Enter if !self.model_buf.trim().is_empty() => {
+                self.advance_to_subagent();
+                return Action::None;
+            }
             KeyCode::Char(c) => {
                 self.model_buf.insert(self.model_cursor, c);
                 self.model_cursor += c.len_utf8();
@@ -483,6 +519,28 @@ impl OnboardingState {
         Action::None
     }
 
+    fn handle_subagent_key(&mut self, key: KeyEvent) -> Action {
+        let total = self.subagent_choices.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') if self.subagent_selected > 0 => {
+                self.subagent_selected -= 1
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.subagent_selected + 1 < total => {
+                self.subagent_selected += 1
+            }
+            KeyCode::Enter => return self.finish(),
+            KeyCode::Esc => {
+                if self.models.is_empty() {
+                    self.step = Step::CustomModel;
+                } else {
+                    self.step = Step::Model;
+                }
+            }
+            _ => {}
+        }
+        Action::None
+    }
+
     // ── Rendering ───────────────────────────────────────────────
 
     pub fn render(&self, frame: &mut Frame, theme: &Theme) {
@@ -496,7 +554,7 @@ impl OnboardingState {
         frame.render_widget(block, popup);
 
         let rows = Layout::vertical([
-            Constraint::Length(3), // header
+            Constraint::Length(2), // header
             Constraint::Min(1),    // body
             Constraint::Length(1), // footer
         ])
@@ -510,6 +568,7 @@ impl OnboardingState {
             Step::Fetching => self.render_fetching(frame, rows[1], theme),
             Step::Model => self.render_model(frame, rows[1], theme),
             Step::CustomModel => self.render_custom_model(frame, rows[1], theme),
+            Step::SubAgent => self.render_subagent(frame, rows[1], theme),
         }
         self.render_footer(frame, rows[2], theme);
     }
@@ -522,18 +581,11 @@ impl OnboardingState {
             STEPS_CLOUD
         };
 
-        let title = Line::from(vec![
-            Span::styled(
-                "phx",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  setup", Style::default().fg(theme.dim())),
-        ]);
         let steps = d::step_indicator(labels, self.step.index(), theme);
-
-        frame.render_widget(Paragraph::new(vec![title, steps]), area);
+        frame.render_widget(
+            Paragraph::new(steps).alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -541,7 +593,7 @@ impl OnboardingState {
             Step::Provider => "↑↓ navigate  ⏎ select  esc quit",
             Step::BaseUrl | Step::ApiKey | Step::CustomModel => "⏎ confirm  esc back",
             Step::Fetching => "esc cancel",
-            Step::Model => "↑↓ navigate  ⏎ select  esc back",
+            Step::Model | Step::SubAgent => "↑↓ navigate  ⏎ select  esc back",
         };
         let dim = Style::default().fg(theme.dim());
 
@@ -725,6 +777,42 @@ impl OnboardingState {
 
         frame.render_widget(Paragraph::new(lines), area);
     }
+
+    fn render_subagent(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let main_model = self.resolved_model();
+        let mut lines: Vec<Line> = vec![Line::from("")];
+
+        lines.push(d::heading("Sub-agent model", theme));
+        let hint_text = format!("Main model: {main_model}. Pick a model for spawned agents:");
+        lines.push(d::hint(&hint_text, theme));
+        lines.push(Line::from(""));
+
+        for (i, (_, label)) in self.subagent_choices.iter().enumerate() {
+            let sel = i == self.subagent_selected;
+            let bg = if sel {
+                Theme::blend(theme.accent, theme.background, 0.75)
+            } else {
+                theme.background
+            };
+            let style = if sel {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.foreground).bg(bg)
+            };
+
+            let fill = " ".repeat((area.width as usize).saturating_sub(4 + label.len()));
+            lines.push(Line::from(vec![
+                Span::styled(if sel { "  > " } else { "    " }, style),
+                Span::styled(label.as_str(), style),
+                Span::styled(fill, Style::default().bg(bg)),
+            ]));
+        }
+
+        frame.render_widget(Paragraph::new(lines), area);
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────
@@ -760,12 +848,12 @@ fn static_models_for(kind: ProviderKind) -> Vec<String> {
 
 // ── Dynamic model fetching ──────────────────────────────────────
 
-fn fetch_models_blocking(
+async fn fetch_models_async(
     kind: ProviderKind,
     api_key: Option<&str>,
     base_url: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| e.to_string())?;
@@ -776,8 +864,9 @@ fn fetch_models_blocking(
             let resp = client
                 .get(format!("{url}/api/tags"))
                 .send()
+                .await
                 .map_err(|e| format!("Cannot reach Ollama at {url}: {e}"))?;
-            let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
             Ok(json
                 .get("models")
                 .and_then(|v| v.as_array())
@@ -795,8 +884,9 @@ fn fetch_models_blocking(
                 .header("x-api-key", key)
                 .header("anthropic-version", "2023-06-01")
                 .send()
+                .await
                 .map_err(|e| format!("Anthropic API error: {e}"))?;
-            parse_openai_style_models(resp)
+            parse_openai_style_models_async(resp).await
         }
         ProviderKind::OpenAI => {
             let key = api_key.ok_or("API key required")?;
@@ -804,8 +894,9 @@ fn fetch_models_blocking(
                 .get("https://api.openai.com/v1/models")
                 .header("Authorization", format!("Bearer {key}"))
                 .send()
+                .await
                 .map_err(|e| format!("OpenAI API error: {e}"))?;
-            let mut models = parse_openai_style_models(resp)?;
+            let mut models = parse_openai_style_models_async(resp).await?;
             models.retain(|m| {
                 m.starts_with("gpt-")
                     || m.starts_with("o1")
@@ -823,8 +914,9 @@ fn fetch_models_blocking(
                 .get(format!("{url}/v1/models"))
                 .header("Authorization", format!("Bearer {key}"))
                 .send()
+                .await
                 .map_err(|e| format!("NIM API error: {e}"))?;
-            parse_openai_style_models(resp)
+            parse_openai_style_models_async(resp).await
         }
         ProviderKind::Gemini => {
             let key = api_key.ok_or("API key required")?;
@@ -832,8 +924,9 @@ fn fetch_models_blocking(
                 .get("https://generativelanguage.googleapis.com/v1beta/models")
                 .header("x-goog-api-key", key)
                 .send()
+                .await
                 .map_err(|e| format!("Gemini API error: {e}"))?;
-            let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+            let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
             Ok(json
                 .get("models")
                 .and_then(|v| v.as_array())
@@ -853,8 +946,8 @@ fn fetch_models_blocking(
     }
 }
 
-fn parse_openai_style_models(resp: reqwest::blocking::Response) -> Result<Vec<String>, String> {
-    let json: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+async fn parse_openai_style_models_async(resp: reqwest::Response) -> Result<Vec<String>, String> {
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(json
         .get("data")
         .and_then(|v| v.as_array())

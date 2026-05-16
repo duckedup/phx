@@ -415,7 +415,7 @@ fn save_history(path: &std::path::Path, history: &[String]) {
     let _ = std::fs::write(path, content);
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

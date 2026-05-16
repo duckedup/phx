@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorktreeError {
@@ -49,7 +48,7 @@ pub struct WorktreeManager {
 
 impl WorktreeManager {
     pub fn new(repo_root: PathBuf) -> Result<Self, WorktreeError> {
-        let out = Command::new("git")
+        let out = std::process::Command::new("git")
             .args(["rev-parse", "--git-dir"])
             .current_dir(&repo_root)
             .output()
@@ -75,11 +74,12 @@ impl WorktreeManager {
         })
     }
 
-    fn git(&self, args: &[&str]) -> Result<String, WorktreeError> {
-        let out = Command::new("git")
+    async fn git(&self, args: &[&str]) -> Result<String, WorktreeError> {
+        let out = tokio::process::Command::new("git")
             .args(args)
             .current_dir(&self.repo_root)
             .output()
+            .await
             .map_err(|e| WorktreeError::Git(format!("failed to run git: {e}")))?;
 
         if out.status.success() {
@@ -91,11 +91,12 @@ impl WorktreeManager {
         }
     }
 
-    fn git_at(path: &Path, args: &[&str]) -> Result<String, WorktreeError> {
-        let out = Command::new("git")
+    async fn git_at(path: &Path, args: &[&str]) -> Result<String, WorktreeError> {
+        let out = tokio::process::Command::new("git")
             .args(args)
             .current_dir(path)
             .output()
+            .await
             .map_err(|e| WorktreeError::Git(format!("failed to run git: {e}")))?;
 
         if out.status.success() {
@@ -115,17 +116,19 @@ impl WorktreeManager {
         self.worktree_base.join(child_id)
     }
 
-    pub fn create(&self, child_id: &str) -> Result<WorktreeInfo, WorktreeError> {
+    pub async fn create(&self, child_id: &str) -> Result<WorktreeInfo, WorktreeError> {
         let branch = Self::branch_name(child_id);
         let path = self.worktree_path(child_id);
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .map_err(|e| WorktreeError::Git(format!("failed to create directory: {e}")))?;
         }
 
         let path_str = path.to_string_lossy();
-        self.git(&["worktree", "add", "-b", &branch, &path_str, "HEAD"])?;
+        self.git(&["worktree", "add", "-b", &branch, &path_str, "HEAD"])
+            .await?;
 
         Ok(WorktreeInfo {
             path,
@@ -134,40 +137,42 @@ impl WorktreeManager {
         })
     }
 
-    pub fn remove(&self, child_id: &str, delete_branch: bool) -> Result<(), WorktreeError> {
+    pub async fn remove(&self, child_id: &str, delete_branch: bool) -> Result<(), WorktreeError> {
         let path = self.worktree_path(child_id);
         let branch = Self::branch_name(child_id);
 
         if path.exists() {
             let path_str = path.to_string_lossy();
-            let _ = self.git(&["worktree", "remove", "--force", &path_str]);
+            let _ = self
+                .git(&["worktree", "remove", "--force", &path_str])
+                .await;
         }
 
         if delete_branch {
-            let _ = self.git(&["branch", "-D", &branch]);
+            let _ = self.git(&["branch", "-D", &branch]).await;
         }
 
         Ok(())
     }
 
-    pub fn auto_commit(&self, child_id: &str, message: &str) -> Result<bool, WorktreeError> {
+    pub async fn auto_commit(&self, child_id: &str, message: &str) -> Result<bool, WorktreeError> {
         let path = self.worktree_path(child_id);
         if !path.exists() {
             return Err(WorktreeError::NotFound(child_id.to_string()));
         }
 
-        let status = Self::git_at(&path, &["status", "--porcelain"])?;
+        let status = Self::git_at(&path, &["status", "--porcelain"]).await?;
         if status.trim().is_empty() {
             return Ok(false);
         }
 
-        Self::git_at(&path, &["add", "-A"])?;
-        Self::git_at(&path, &["commit", "-m", message])?;
+        Self::git_at(&path, &["add", "-A"]).await?;
+        Self::git_at(&path, &["commit", "-m", message]).await?;
 
         Ok(true)
     }
 
-    pub fn diff_summary(
+    pub async fn diff_summary(
         &self,
         child_id: &str,
         base_branch: &str,
@@ -175,8 +180,6 @@ impl WorktreeManager {
         let branch = Self::branch_name(child_id);
         let range = format!("{base_branch}..{branch}");
 
-        // Run from worktree path if it exists (branch ref is always visible there),
-        // otherwise fall back to repo root.
         let path = self.worktree_path(child_id);
         let run_dir = if path.exists() {
             &path
@@ -184,7 +187,9 @@ impl WorktreeManager {
             &self.repo_root
         };
 
-        let numstat = Self::git_at(run_dir, &["diff", "--numstat", &range]).unwrap_or_default();
+        let numstat = Self::git_at(run_dir, &["diff", "--numstat", &range])
+            .await
+            .unwrap_or_default();
 
         let mut files_changed = 0;
         let mut insertions = 0;
@@ -198,7 +203,9 @@ impl WorktreeManager {
             }
         }
 
-        let summary = Self::git_at(run_dir, &["diff", "--stat", &range]).unwrap_or_default();
+        let summary = Self::git_at(run_dir, &["diff", "--stat", &range])
+            .await
+            .unwrap_or_default();
 
         Ok(DiffSummary {
             files_changed,
@@ -208,7 +215,7 @@ impl WorktreeManager {
         })
     }
 
-    pub fn merge(
+    pub async fn merge(
         &self,
         child_id: &str,
         strategy: MergeStrategy,
@@ -220,28 +227,31 @@ impl WorktreeManager {
         let msg = message.unwrap_or(&auto_msg);
 
         let result = match strategy {
-            MergeStrategy::Squash => self
-                .git(&["merge", "--squash", &branch])
-                .and_then(|_| self.git(&["commit", "-m", msg])),
-            MergeStrategy::Rebase => self.git(&["rebase", &branch]),
-            MergeStrategy::Merge => self.git(&["merge", "--no-ff", "-m", msg, &branch]),
+            MergeStrategy::Squash => match self.git(&["merge", "--squash", &branch]).await {
+                Ok(_) => self.git(&["commit", "-m", msg]).await,
+                Err(e) => Err(e),
+            },
+            MergeStrategy::Rebase => self.git(&["rebase", &branch]).await,
+            MergeStrategy::Merge => self.git(&["merge", "--no-ff", "-m", msg, &branch]).await,
         };
 
         match result {
             Ok(_) => {
                 let commit = self
                     .git(&["rev-parse", "--short", "HEAD"])
+                    .await
                     .unwrap_or_default()
                     .trim()
                     .to_string();
 
                 let diff = self
                     .git(&["diff", "--stat", "HEAD~1..HEAD"])
+                    .await
                     .unwrap_or_default();
                 let files_changed = diff.lines().count().saturating_sub(1);
 
                 if cleanup {
-                    let _ = self.remove(child_id, true);
+                    let _ = self.remove(child_id, true).await;
                 }
 
                 Ok(MergeResult {
@@ -253,6 +263,7 @@ impl WorktreeManager {
             Err(_) => {
                 let conflict_output = self
                     .git(&["diff", "--name-only", "--diff-filter=U"])
+                    .await
                     .unwrap_or_default();
                 let conflicts: Vec<String> = conflict_output
                     .lines()
@@ -261,18 +272,18 @@ impl WorktreeManager {
                     .collect();
 
                 if !conflicts.is_empty() {
-                    let _ = self.git(&["merge", "--abort"]);
+                    let _ = self.git(&["merge", "--abort"]).await;
                     return Err(WorktreeError::MergeConflict { files: conflicts });
                 }
 
-                let _ = self.git(&["merge", "--abort"]);
+                let _ = self.git(&["merge", "--abort"]).await;
                 Err(WorktreeError::Git("merge failed".into()))
             }
         }
     }
 
-    pub fn list(&self) -> Result<Vec<WorktreeInfo>, WorktreeError> {
-        let output = self.git(&["worktree", "list", "--porcelain"])?;
+    pub async fn list(&self) -> Result<Vec<WorktreeInfo>, WorktreeError> {
+        let output = self.git(&["worktree", "list", "--porcelain"]).await?;
         let mut result = Vec::new();
 
         let mut current_path: Option<PathBuf> = None;
@@ -311,11 +322,11 @@ impl WorktreeManager {
         Ok(result)
     }
 
-    pub fn cleanup_all(&self) -> Result<usize, WorktreeError> {
-        let active = self.list()?;
+    pub async fn cleanup_all(&self) -> Result<usize, WorktreeError> {
+        let active = self.list().await?;
         let count = active.len();
         for wt in &active {
-            let _ = self.remove(&wt.child_id, true);
+            let _ = self.remove(&wt.child_id, true).await;
         }
         Ok(count)
     }

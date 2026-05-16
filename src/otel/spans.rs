@@ -102,6 +102,7 @@ mod tests {
         });
     }
 
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn test_span_inside_subscriber_captures_events() {
         let (sub, ring) = test_subscriber();
