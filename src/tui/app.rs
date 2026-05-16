@@ -412,11 +412,12 @@ impl App {
                         if let Some(tab) = self.tabs.get_mut(tab_idx) {
                             tab.streaming_text.clear();
                             tab.stream_buffer.clear();
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: "Cancelled.".into(),
-                            }));
                         }
+                        append_file_summary(&mut self.tabs, tab_idx);
+                        self.toast = Some(toast::Toast::new(
+                            "Cancelled".into(),
+                            std::time::Duration::from_secs(3),
+                        ));
                         if tab_idx == 0 {
                             self.session = Some(session);
                             self.is_running = false;
@@ -427,6 +428,7 @@ impl App {
                         break;
                     }
                     ConvEvent::Done(session) => {
+                        append_file_summary(&mut self.tabs, tab_idx);
                         if tab_idx == 0 {
                             self.session = Some(session);
                             self.is_running = false;
@@ -1661,6 +1663,39 @@ fn agent_panel_rect(conductor_mode: bool, _agent_count: usize, chat: Rect) -> Op
     })
 }
 
+fn append_file_summary(tabs: &mut [Tab], tab_idx: usize) {
+    let paths: Vec<std::path::PathBuf> = if let Some(tab) = tabs.get(tab_idx) {
+        let mut seen = std::collections::HashSet::new();
+        tab.chat_lines
+            .iter()
+            .filter_map(|item| {
+                if let ChatItem::Line(ChatLine {
+                    role: crate::session::message::Role::ToolCall,
+                    content,
+                }) = item
+                {
+                    let (tool, detail) = content.split_once(" > ")?;
+                    if matches!(tool, "write" | "edit") {
+                        let p = std::path::PathBuf::from(detail.trim());
+                        if seen.insert(p.clone()) {
+                            return Some(p);
+                        }
+                    }
+                }
+                None
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    if !paths.is_empty()
+        && let Some(tab) = tabs.get_mut(tab_idx)
+    {
+        tab.chat_lines.push(ChatItem::FileSummary(paths));
+    }
+}
+
 pub async fn run(
     config: Config,
     _needs_onboarding: bool,
@@ -1797,8 +1832,9 @@ async fn run_loop(
         } else {
             chunks[0]
         };
-        app.chat_area_height = content_rect.height;
-        app.chat_area = content_rect;
+        let padded = padded_chat_area(content_rect);
+        app.chat_area_height = padded.height;
+        app.chat_area = padded;
         if !viewing_file {
             app.input_area = chunks[1];
         }

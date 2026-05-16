@@ -2,9 +2,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Style as SyntectStyle, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
 use crate::tui::theme::Theme;
 
@@ -37,7 +35,6 @@ pub struct FileViewerState {
     pub active_idx: Option<usize>,
     pub hovered_close: Option<usize>,
     syntax_set: SyntaxSet,
-    theme_set: ThemeSet,
 }
 
 impl FileViewerState {
@@ -47,7 +44,6 @@ impl FileViewerState {
             active_idx: None,
             hovered_close: None,
             syntax_set: SyntaxSet::load_defaults_newlines(),
-            theme_set: ThemeSet::load_defaults(),
         }
     }
 
@@ -93,25 +89,42 @@ impl FileViewerState {
             .find_syntax_by_extension(ext)
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
 
-        let theme_name = pick_syntect_theme(tui_theme, &self.theme_set);
-        let syntect_theme = &self.theme_set.themes[theme_name];
-        let mut h = HighlightLines::new(syntax, syntect_theme);
+        let mut parse_state = ParseState::new(syntax);
+        let mut scope_stack = ScopeStack::new();
 
         let mut result = Vec::new();
         for line in content.lines() {
             let expanded = line.replace('\t', "    ");
             let line_nl = format!("{expanded}\n");
-            let ranges = h
-                .highlight_line(&line_nl, &self.syntax_set)
+            let ops = parse_state
+                .parse_line(&line_nl, &self.syntax_set)
                 .unwrap_or_default();
-            let parts: Vec<(String, Style)> = ranges
-                .iter()
-                .map(|(s, text)| {
+
+            let mut parts: Vec<(String, Style)> = Vec::new();
+            let mut prev = 0usize;
+
+            for (byte_pos, op) in &ops {
+                let pos = *byte_pos;
+                if pos > prev {
+                    let text = &line_nl[prev..pos];
                     let cleaned = text.trim_end_matches('\n');
-                    (cleaned.to_string(), syntect_to_ratatui(s))
-                })
-                .filter(|(text, _)| !text.is_empty())
-                .collect();
+                    if !cleaned.is_empty() {
+                        let style = scope_to_style(&scope_stack, tui_theme);
+                        parts.push((cleaned.to_string(), style));
+                    }
+                }
+                scope_stack.apply(op).ok();
+                prev = pos;
+            }
+            if prev < line_nl.len() {
+                let text = &line_nl[prev..];
+                let cleaned = text.trim_end_matches('\n');
+                if !cleaned.is_empty() {
+                    let style = scope_to_style(&scope_stack, tui_theme);
+                    parts.push((cleaned.to_string(), style));
+                }
+            }
+
             result.push(parts);
         }
 
@@ -172,46 +185,59 @@ impl FileViewerState {
 pub const TAB_BAR_HEIGHT: u16 = 3;
 
 pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &FileViewerState, theme: &Theme) {
-    let border_fg = Theme::blend(theme.foreground, theme.background, 0.85);
     let bg = Style::default().bg(theme.background);
     let dim = theme.dim();
+    let dim_border = Theme::blend(theme.foreground, theme.background, 0.8);
     let w = area.width as usize;
 
-    // Top border
-    let top = Line::from(Span::styled(
-        format!(
-            "  \u{256d}{}\u{256e}",
-            "\u{2500}".repeat(w.saturating_sub(4))
-        ),
-        Style::default().fg(border_fg),
-    ));
+    let mut top_spans: Vec<Span> = Vec::new();
+    let mut mid_spans: Vec<Span> = Vec::new();
+    let mut bot_spans: Vec<Span> = Vec::new();
 
-    // Tab content
-    let mut spans: Vec<Span> = Vec::new();
-    spans.push(Span::styled("  \u{2502} ", Style::default().fg(border_fg)));
+    top_spans.push(Span::styled("  ", bg));
+    mid_spans.push(Span::styled("  ", bg));
+    bot_spans.push(Span::styled("  ", bg));
 
+    // Chat tab
     let chat_active = !state.is_viewing_file();
+    let chat_border = if chat_active {
+        theme.accent
+    } else {
+        dim_border
+    };
+    let bs = Style::default().fg(chat_border);
+    let chat_label = " Chat ";
+    let chat_w = chat_label.len();
+    top_spans.push(Span::styled(
+        format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(chat_w)),
+        bs,
+    ));
+    mid_spans.push(Span::styled("\u{2502}", bs));
     if chat_active {
-        spans.push(Span::styled(
-            "\u{25c6} ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            "Chat",
+        mid_spans.push(Span::styled(
+            chat_label,
             Style::default()
                 .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD),
         ));
     } else {
-        spans.push(Span::styled("\u{25c7} ", Style::default().fg(dim)));
-        spans.push(Span::styled("Chat", Style::default().fg(dim)));
+        mid_spans.push(Span::styled(chat_label, Style::default().fg(dim)));
     }
+    mid_spans.push(Span::styled("\u{2502}", bs));
+    bot_spans.push(Span::styled(
+        format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(chat_w)),
+        bs,
+    ));
 
+    // File tabs
     for (i, tab) in state.tabs.iter().enumerate() {
         let is_active = state.active_idx == Some(i);
-        spans.push(Span::styled("    ", bg));
+        let tab_border = if is_active { theme.accent } else { dim_border };
+        let tbs = Style::default().fg(tab_border);
+
+        top_spans.push(Span::styled(" ", bg));
+        mid_spans.push(Span::styled(" ", bg));
+        bot_spans.push(Span::styled(" ", bg));
 
         let close_hovered = state.hovered_close == Some(i);
         let close_style = if close_hovered {
@@ -219,52 +245,55 @@ pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &FileViewerState, th
                 .fg(theme.error)
                 .add_modifier(Modifier::BOLD)
         } else if is_active {
-            Style::default().fg(theme.error)
+            Style::default().fg(theme.dim())
         } else {
-            Style::default().fg(Theme::blend(dim, theme.background, 0.5))
+            Style::default().fg(Theme::blend(dim_border, theme.background, 0.5))
         };
 
+        let name = &tab.display_name;
+        let inner_w = 1 + name.len() + 2 + 1; // " name  ×"
+        top_spans.push(Span::styled(
+            format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner_w)),
+            tbs,
+        ));
+
+        mid_spans.push(Span::styled("\u{2502}", tbs));
+        mid_spans.push(Span::styled(" ", bg));
         if is_active {
-            spans.push(Span::styled(
-                "\u{25c6} ",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                tab.display_name.clone(),
+            mid_spans.push(Span::styled(
+                name.clone(),
                 Style::default()
                     .fg(theme.foreground)
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::styled("\u{25c7} ", Style::default().fg(dim)));
-            spans.push(Span::styled(
-                tab.display_name.clone(),
-                Style::default().fg(dim),
-            ));
+            mid_spans.push(Span::styled(name.clone(), Style::default().fg(dim)));
         }
-        spans.push(Span::styled("  \u{00d7}", close_style));
+        mid_spans.push(Span::styled(" ", bg));
+        mid_spans.push(Span::styled("\u{00d7}", close_style));
+        mid_spans.push(Span::styled(" ", bg));
+        mid_spans.push(Span::styled("\u{2502}", tbs));
+
+        bot_spans.push(Span::styled(
+            format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner_w)),
+            tbs,
+        ));
     }
 
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let remaining = w.saturating_sub(used + 2);
-    spans.push(Span::styled(
-        format!("{} \u{2502}", " ".repeat(remaining)),
-        Style::default().fg(border_fg),
-    ));
-    let mid = Line::from(spans);
+    // Fill remaining width
+    for spans in [&mut top_spans, &mut mid_spans, &mut bot_spans] {
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let remaining = w.saturating_sub(used);
+        if remaining > 0 {
+            spans.push(Span::styled(" ".repeat(remaining), bg));
+        }
+    }
 
-    // Bottom border
-    let bot = Line::from(Span::styled(
-        format!(
-            "  \u{2570}{}\u{256f}",
-            "\u{2500}".repeat(w.saturating_sub(4))
-        ),
-        Style::default().fg(border_fg),
-    ));
-
-    let lines = vec![top, mid, bot];
+    let lines = vec![
+        Line::from(top_spans),
+        Line::from(mid_spans),
+        Line::from(bot_spans),
+    ];
     frame.render_widget(Paragraph::new(lines).style(bg), area);
 }
 
@@ -291,28 +320,27 @@ pub fn tab_bar_hit_test(
 
     let rel = (col - area.x) as usize;
 
-    // "  │ " (4) + "◆ " (2) + "Chat" (4) = 10
-    let chat_start = 4;
-    let chat_end = chat_start + 6; // "◆ Chat"
+    // "  " (2) + "│" (1) + " Chat " (6) + "│" (1) = 10
+    let chat_start = 2;
+    let chat_end = chat_start + 8; // includes borders
     if rel >= chat_start && rel < chat_end {
         return Some(TabBarHit::Chat);
     }
 
+    // " " (1) gap between tabs
     let mut pos = chat_end;
     for (i, tab) in state.tabs.iter().enumerate() {
-        pos += 4; // "    " gap
-        let icon_len = 2; // "◆ "
+        pos += 1; // " " gap
+        // "│" (1) + " " (1) + name + " " (1) + "×" (1) + " " (1) + "│" (1)
         let name_len = tab.display_name.chars().count();
-        let close_len = 3; // "  ×"
+        let tab_start = pos; // "│"
+        let close_col = pos + 1 + 1 + name_len + 1; // after "│ name "
+        let tab_end = close_col + 1 + 1 + 1; // "× " + "│"
 
-        let tab_start = pos;
-        let close_start = pos + icon_len + name_len;
-        let tab_end = close_start + close_len;
-
-        if rel >= close_start && rel < tab_end {
+        if rel == close_col {
             return Some(TabBarHit::CloseTab(i));
         }
-        if rel >= tab_start && rel < close_start {
+        if rel >= tab_start && rel < tab_end {
             return Some(TabBarHit::FileTab(i));
         }
 
@@ -434,45 +462,61 @@ pub fn render_file_status(frame: &mut Frame, area: Rect, tab: &FileTab, theme: &
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn syntect_to_ratatui(style: &SyntectStyle) -> Style {
-    let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-    let mut s = Style::default().fg(fg);
-    if style.font_style.contains(FontStyle::BOLD) {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    if style.font_style.contains(FontStyle::ITALIC) {
-        s = s.add_modifier(Modifier::ITALIC);
-    }
-    if style.font_style.contains(FontStyle::UNDERLINE) {
-        s = s.add_modifier(Modifier::UNDERLINED);
-    }
-    s
-}
-
-fn pick_syntect_theme<'a>(theme: &Theme, theme_set: &'a ThemeSet) -> &'a str {
-    let is_dark = match theme.background {
-        Color::Rgb(r, g, b) => (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64) < 128.0,
-        _ => true,
-    };
-    if is_dark {
-        if theme_set.themes.contains_key("base16-eighties.dark") {
-            "base16-eighties.dark"
-        } else {
-            theme_set
-                .themes
-                .keys()
-                .next()
-                .map(|s| s.as_str())
-                .unwrap_or("base16-eighties.dark")
+fn scope_to_style(stack: &ScopeStack, theme: &Theme) -> Style {
+    let scopes = stack.as_slice();
+    for scope in scopes.iter().rev() {
+        let s = scope.build_string();
+        if s.starts_with("comment") {
+            return Style::default()
+                .fg(theme.dim())
+                .add_modifier(Modifier::ITALIC);
         }
-    } else if theme_set.themes.contains_key("InspiredGitHub") {
-        "InspiredGitHub"
-    } else {
-        theme_set
-            .themes
-            .keys()
-            .next()
-            .map(|s| s.as_str())
-            .unwrap_or("InspiredGitHub")
+        if s.starts_with("string") {
+            return Style::default().fg(theme.success);
+        }
+        if s.starts_with("constant.numeric") {
+            return Style::default().fg(theme.warning);
+        }
+        if s.starts_with("constant.language") {
+            return Style::default().fg(theme.warning);
+        }
+        if s.starts_with("constant") {
+            return Style::default().fg(theme.warning);
+        }
+        if s.starts_with("keyword") || s.starts_with("storage") {
+            return Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD);
+        }
+        if s.starts_with("entity.name.function") || s.starts_with("entity.name.method") {
+            return Style::default().fg(theme.info);
+        }
+        if s.starts_with("entity.name.type")
+            || s.starts_with("entity.name.class")
+            || s.starts_with("entity.name.struct")
+        {
+            return Style::default().fg(theme.primary);
+        }
+        if s.starts_with("entity.name") {
+            return Style::default().fg(theme.info);
+        }
+        if s.starts_with("support.function") || s.starts_with("support.method") {
+            return Style::default().fg(theme.info);
+        }
+        if s.starts_with("support.type") || s.starts_with("support.class") {
+            return Style::default().fg(theme.primary);
+        }
+        if s.starts_with("variable.parameter") {
+            return Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::ITALIC);
+        }
+        if s.starts_with("variable") {
+            return Style::default().fg(theme.foreground);
+        }
+        if s.starts_with("punctuation") {
+            return Style::default().fg(theme.foreground);
+        }
     }
+    Style::default().fg(theme.foreground)
 }

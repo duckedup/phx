@@ -61,6 +61,7 @@ pub fn build_item_display_lines(
         }
         ChatItem::Widget(w) => build_widget_display_lines(lines, w, theme, content_width, pad),
         ChatItem::ContextLoaded(names) => build_context_loaded_lines(lines, names, theme, pad),
+        ChatItem::FileSummary(paths) => build_file_summary_lines(lines, paths, theme, pad),
     }
 }
 
@@ -78,6 +79,62 @@ fn build_widget_display_lines(
         content_width,
         pad,
     );
+}
+
+fn build_file_summary_lines(
+    lines: &mut Vec<DisplayLine>,
+    paths: &[PathBuf],
+    theme: &Theme,
+    pad: u16,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    let indent = " ".repeat(pad as usize);
+    let dim = Style::default().fg(theme.dim());
+    let accent = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let file_style = Style::default().fg(theme.info);
+
+    lines.push(DisplayLine::empty());
+    lines.push(DisplayLine::multi(vec![
+        (indent.clone(), Style::default()),
+        ("\u{25c6} ".to_string(), accent),
+        (
+            format!(
+                "{} file{} changed",
+                paths.len(),
+                if paths.len() == 1 { "" } else { "s" }
+            ),
+            dim,
+        ),
+    ]));
+
+    for (i, path) in paths.iter().enumerate() {
+        let is_last = i + 1 == paths.len();
+        let connector = if is_last { "\u{2570}" } else { "\u{251c}" };
+        let display = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        let dir = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|d| format!("{d}/"))
+            .unwrap_or_default();
+        let mut dl = DisplayLine::multi(vec![
+            (format!("{indent}  "), Style::default()),
+            (format!("{connector} "), dim),
+            (dir, dim),
+            (display.to_string(), file_style),
+        ]);
+        dl.file_path = Some(path.clone());
+        lines.push(dl);
+    }
+
+    lines.push(DisplayLine::empty());
 }
 
 fn build_context_loaded_lines(

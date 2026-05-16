@@ -276,6 +276,21 @@ pub fn spawn_conversation(
                     }
                 }
                 if was_cancelled {
+                    for tc in &pending_tool_calls {
+                        let has_result = session
+                            .messages
+                            .iter()
+                            .any(|m| m.tool_result.as_ref().is_some_and(|tr| tr.id == tc.id));
+                        if !has_result {
+                            let stub = crate::session::message::ToolResult {
+                                id: tc.id.clone(),
+                                output: "Cancelled.".into(),
+                                is_error: true,
+                            };
+                            let msg = Message::tool_result(stub);
+                            session.add_message(msg);
+                        }
+                    }
                     let _ = tx.send(ConvEvent::Cancelled(session));
                     return;
                 }

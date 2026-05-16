@@ -26,6 +26,7 @@ pub enum ChatItem {
     Assistant(AssistantLine),
     Widget(WidgetKind),
     ContextLoaded(Vec<String>),
+    FileSummary(Vec<std::path::PathBuf>),
 }
 
 impl From<ChatLine> for ChatItem {
