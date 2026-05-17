@@ -115,23 +115,48 @@ Both must pass with zero warnings before any TUI change merges.
 
 ## Tests
 
-Rendering tests are sparse. The pattern (when adding them):
+Tests live at the bottom of each source file in a `#[cfg(test)] mod tests` block.
+
+### update() tests (27 tests in `update.rs`)
+
+The TEA architecture makes state transitions independently testable. Use the `test_app()` factory to create a minimal App, send a Msg, assert the result:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_handles_tabs() {
-        let result = truncate_line(&line, 5);
-        let width: usize = result.spans.iter().map(|s| display_width(&s.content)).sum();
-        assert!(width <= 5);
-    }
+#[test]
+fn scroll_up_decreases_offset() {
+    let mut app = test_app();
+    app.tabs[0].scroll_offset = 10;
+    app.tabs[0].auto_scroll = false;
+    update(&mut app, Msg::ScrollUp(3));
+    assert_eq!(app.tabs[0].scroll_offset, 7);
 }
 ```
 
-Tests live at the bottom of the source file in a `#[cfg(test)] mod tests` block. See `src/tui/theme.rs` and `src/tui/picker.rs` for established patterns.
+For Cmd-returning Msgs, assert on the Cmd variant:
+
+```rust
+#[test]
+fn input_submit_command_returns_run_command() {
+    let mut app = test_app();
+    app.current_tab_mut().unwrap().input.set_single_line("/help");
+    let cmd = update(&mut app, Msg::InputSubmit);
+    assert!(matches!(cmd, Cmd::RunCommand(ref s) if s == "/help"));
+}
+```
+
+**When adding a new Msg variant**: add at least one test that sends the Msg and asserts the state change. If it returns a Cmd, assert the Cmd variant too.
+
+### measure tests (12 tests in `rendering/measure.rs`)
+
+Cover `display_width`, `expand_tabs`, `truncate_to_width`, `pad_to_width` including tab characters, CJK, and edge cases.
+
+### Running tests
+
+```bash
+just test                            # all tests
+cargo test update::tests             # just update() tests
+cargo test rendering::measure        # just measure tests
+```
 
 ## TEA architecture (The Elm Architecture)
 
