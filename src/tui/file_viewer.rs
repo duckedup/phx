@@ -798,13 +798,51 @@ mod tests {
     }
 
     #[test]
-    fn tab_width_uses_display_width_not_byte_len() {
-        let name = "⚙ bash";
-        let byte_len = name.len();
-        let dw = display_width(name);
+    fn tab_hit_test_with_multibyte_name() {
+        let theme = test_theme();
+        let mut fv = FileViewerState::new();
+        fv.open_content("⚙ bash", "output", &theme);
+
+        let area = Rect::new(0, 0, 80, 3);
+        let tab_row = area.y + 1;
+
+        // Chat tab occupies cols 2..10
+        assert!(matches!(
+            tab_bar_hit_test(area, tab_row, 5, &fv),
+            Some(TabBarHit::Chat)
+        ));
+
+        // Tool tab starts after chat (10) + gap (1) = col 11
+        // inner_w = 1 + display_width("⚙ bash") + 2 + 1
+        let name_dw = display_width("⚙ bash");
+        let inner_w = 1 + name_dw + 2 + 1;
+        // Tab occupies cols 11 .. 11 + 1 + inner_w + 1
+        let tab_end = 11 + 1 + inner_w + 1;
+
+        // Clicking inside the tab region should hit the tab
+        let mid = 11 + 2;
         assert!(
-            byte_len > dw,
-            "⚙ is 3 bytes but fewer display columns — .len() overestimates"
+            matches!(
+                tab_bar_hit_test(area, tab_row, mid as u16, &fv),
+                Some(TabBarHit::FileTab(0))
+            ),
+            "click inside tab region should hit the tab"
+        );
+
+        // Close button is at: 11 (border) + 1 (space) + name_dw (name) + 1 (space) = close col
+        let close_col = 11 + 1 + 1 + name_dw + 1;
+        assert!(
+            matches!(
+                tab_bar_hit_test(area, tab_row, close_col as u16, &fv),
+                Some(TabBarHit::CloseTab(0))
+            ),
+            "click on close button should hit CloseTab"
+        );
+
+        // Past the tab end should be empty
+        assert!(
+            tab_bar_hit_test(area, tab_row, (tab_end + 2) as u16, &fv).is_none(),
+            "click past tab should be empty"
         );
     }
 }

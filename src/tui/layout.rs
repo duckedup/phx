@@ -76,18 +76,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn double_padding_shifts_y_proving_bug() {
+    fn single_padded_area_gives_correct_hover_index() {
         let raw = Rect::new(0, 0, 120, 40);
-        let padded = padded_chat_area(raw);
-        assert_eq!(padded.y, 1, "first padding adds top_pad=1");
+        let chat_area = padded_chat_area(raw);
 
-        let double = padded_chat_area(padded);
-        assert_eq!(double.y, 2, "double padding adds another top_pad");
+        for target in [0, 1, 5, 10, 20] {
+            let mouse_row = chat_area.y + target as u16;
+            let idx = (mouse_row - chat_area.y) as usize;
+            assert_eq!(idx, target, "single-padded area maps mouse to correct line");
+        }
+    }
 
-        let mouse_row = padded.y + 5;
-        let correct_idx = (mouse_row - padded.y) as usize;
-        let wrong_idx = mouse_row.saturating_sub(double.y) as usize;
-        assert_eq!(correct_idx, 5);
-        assert_eq!(wrong_idx, 4, "double padding gives wrong index — off by 1");
+    #[test]
+    fn double_padded_area_gives_wrong_hover_index() {
+        let raw = Rect::new(0, 0, 120, 40);
+        let chat_area = padded_chat_area(raw);
+        let double = padded_chat_area(chat_area);
+
+        let target = 5usize;
+        let mouse_row = chat_area.y + target as u16;
+
+        let correct = (mouse_row - chat_area.y) as usize;
+        let wrong = mouse_row.saturating_sub(double.y) as usize;
+
+        assert_eq!(correct, 5);
+        assert_ne!(
+            wrong, 5,
+            "double padding produces wrong index — this was the bug"
+        );
     }
 }
