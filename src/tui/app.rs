@@ -92,6 +92,7 @@ pub struct AgentReceiver {
     pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
+#[derive(Debug)]
 pub struct ReloadOutput {
     pub plugin_result: Option<crate::plugin::plugin_runtime::ReloadResult>,
 }

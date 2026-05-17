@@ -7,6 +7,7 @@ use ratatui::prelude::*;
 use crate::config::schema::Config;
 use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::tui::app::{App, command_source_tag};
+use crate::tui::cmd::Cmd;
 use crate::tui::components::{modal_picker, sidebar};
 use crate::tui::file_viewer;
 use crate::tui::layout::{self, padded_chat_area};
@@ -268,32 +269,8 @@ async fn run_loop(
                         && (input_is_command || !app.is_running || is_agent_tab);
 
                     if can_submit {
-                        let input_text = app
-                            .current_tab()
-                            .map(|t| t.input.buffer_text())
-                            .unwrap_or_default();
-
-                        if !input_text.trim().is_empty() {
-                            if let Some(tab) = app.current_tab_mut() {
-                                tab.input.submit();
-                            }
-
-                            if is_agent_tab {
-                                if let Some(agent) = app
-                                    .agent_receivers
-                                    .iter()
-                                    .find(|a| a.tab_index == app.active_tab)
-                                    && let Some(id) = &agent.session_id
-                                {
-                                    app.session_pool.try_send_message(id, &input_text);
-                                }
-                            } else if crate::commands::dispatcher::is_command(input_text.trim()) {
-                                crate::tui::update::update(app, Msg::PickerClear);
-                                crate::tui::commands::handle_command(app, input_text.trim()).await;
-                            } else {
-                                crate::tui::conversation::start_conversation(app, input_text);
-                            }
-                        }
+                        let cmd = crate::tui::update::update(app, Msg::InputSubmit);
+                        cmd.execute(app).await;
                     }
                 }
                 CEvent::Paste(text) => app.handle_paste(&text),
@@ -577,17 +554,16 @@ async fn run_loop(
         {
             let task = app.reload_task.take().unwrap();
             if let Ok(output) = task.await {
-                crate::tui::reload::apply_reload(app, output);
+                Cmd::ApplyReload(output).execute(app).await;
             }
-            app.is_reloading = false;
         }
 
         if let Some(session_id) = app.pending_session_resume.take() {
-            crate::tui::conversation::resume_session(app, &session_id).await;
+            Cmd::ResumeSession(session_id).execute(app).await;
         }
 
         if let Some(text) = app.pending_skill_message.take() {
-            crate::tui::conversation::start_conversation(app, text);
+            Cmd::StartConversation(text).execute(app).await;
         }
 
         if app.should_quit {

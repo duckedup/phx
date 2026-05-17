@@ -193,6 +193,46 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
             app.hovered_line = line;
         }
 
+        // ── Input ────────────────────────────────────────────────────────
+        Msg::InputSubmit => {
+            let input_text = app
+                .current_tab()
+                .map(|t| t.input.buffer_text())
+                .unwrap_or_default();
+
+            if input_text.trim().is_empty() {
+                return Cmd::None;
+            }
+
+            if let Some(tab) = app.current_tab_mut() {
+                tab.input.submit();
+            }
+
+            let is_agent_tab = app.active_tab > 0;
+
+            if is_agent_tab {
+                if let Some(agent) = app
+                    .agent_receivers
+                    .iter()
+                    .find(|a| a.tab_index == app.active_tab)
+                    && let Some(id) = &agent.session_id
+                {
+                    return Cmd::SendAgentMessage {
+                        session_id: id.clone(),
+                        text: input_text,
+                    };
+                }
+                return Cmd::None;
+            }
+
+            if crate::commands::dispatcher::is_command(input_text.trim()) {
+                app.picker = None;
+                return Cmd::RunCommand(input_text.trim().to_string());
+            }
+
+            return Cmd::StartConversation(input_text);
+        }
+
         // ── Toast ───────────────────────────────────────────────────────
         Msg::ToastExpire => {
             app.toast = None;

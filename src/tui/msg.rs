@@ -41,6 +41,9 @@ pub enum Msg {
     HoverLine(Option<usize>),
     FileViewerHoverClose(Option<usize>),
 
+    // Input
+    InputSubmit,
+
     // Toast
     ToastExpire,
 
