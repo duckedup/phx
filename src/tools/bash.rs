@@ -8,10 +8,16 @@ use super::traits::{InputRequester, Tool, ToolError, ToolResult, ToolSchema};
 /// Maximum bytes captured from stdout or stderr.
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 
+#[cfg(unix)]
 fn kill_process_group(pid: u32) {
     unsafe {
         libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
     }
+}
+
+#[cfg(windows)]
+fn kill_process_group(_pid: u32) {
+    // kill_on_drop(true) handles cleanup on Windows.
 }
 
 struct ProcessGroupGuard {
@@ -69,8 +75,13 @@ impl Tool for BashTool {
                 .unwrap_or(DEFAULT_TIMEOUT_SECS),
         );
 
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
+        #[cfg(unix)]
+        let (shell, shell_flag) = ("/bin/sh", "-c");
+        #[cfg(windows)]
+        let (shell, shell_flag) = ("cmd", "/C");
+
+        let mut child = tokio::process::Command::new(shell)
+            .arg(shell_flag)
             .arg(command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -200,7 +211,7 @@ impl Tool for BashTool {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(all(test, not(miri)))]
+#[cfg(all(test, unix, not(miri)))]
 mod tests {
     use super::*;
     use crate::tools::traits::NoopInputRequester;
