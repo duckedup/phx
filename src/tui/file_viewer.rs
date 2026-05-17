@@ -17,6 +17,7 @@ pub struct FileTab {
     pub scroll_offset: usize,
     pub total_lines: usize,
     pub language: String,
+    pub is_virtual: bool,
 }
 
 impl FileTab {
@@ -72,9 +73,70 @@ impl FileViewerState {
             scroll_offset: 0,
             total_lines,
             language,
+            is_virtual: false,
         });
         self.active_idx = Some(self.tabs.len() - 1);
         Ok(())
+    }
+
+    pub fn open_content(&mut self, name: &str, content: &str, tui_theme: &Theme) {
+        if let Some(idx) = self
+            .tabs
+            .iter()
+            .position(|t| t.is_virtual && t.display_name == name)
+        {
+            self.active_idx = Some(idx);
+            return;
+        }
+
+        let lines = Self::highlight_plain(content, tui_theme);
+        let total_lines = lines.len();
+
+        self.tabs.push(FileTab {
+            path: PathBuf::new(),
+            display_name: name.to_string(),
+            lines,
+            scroll_offset: 0,
+            total_lines,
+            language: "Tool Result".to_string(),
+            is_virtual: true,
+        });
+        self.active_idx = Some(self.tabs.len() - 1);
+    }
+
+    fn highlight_plain(content: &str, theme: &Theme) -> Vec<Vec<(String, Style)>> {
+        let fg = Style::default().fg(theme.foreground);
+        let error_style = Style::default().fg(theme.error);
+        let add_style = Style::default().fg(theme.diff_add);
+        let del_style = Style::default().fg(theme.diff_delete);
+        let info_style = Style::default()
+            .fg(theme.info)
+            .add_modifier(Modifier::ITALIC);
+
+        let mut result = Vec::new();
+        for line in content.lines() {
+            let expanded = line.replace('\t', "    ");
+            let trimmed = expanded.trim_start();
+            let style = if trimmed.starts_with("error") || trimmed.starts_with("Error") {
+                error_style
+            } else if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+                add_style
+            } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+                del_style
+            } else if trimmed.starts_with("@@") {
+                info_style
+            } else {
+                fg
+            };
+            result.push(vec![(expanded, style)]);
+        }
+        if result.is_empty() {
+            result.push(vec![(
+                "(empty)".to_string(),
+                Style::default().fg(theme.dim()),
+            )]);
+        }
+        result
     }
 
     fn highlight_content(
@@ -429,7 +491,11 @@ pub fn render_file_status(frame: &mut Frame, area: Rect, tab: &FileTab, theme: &
     let fg = theme.status_bar_fg();
     let dim = theme.status_bar_dim();
 
-    let path_display = tab.path.to_string_lossy();
+    let path_display = if tab.is_virtual {
+        std::borrow::Cow::Borrowed("(tool output)")
+    } else {
+        tab.path.to_string_lossy()
+    };
     let scroll_pct = if tab.total_lines == 0 {
         100
     } else {
@@ -519,4 +585,104 @@ fn scope_to_style(stack: &ScopeStack, theme: &Theme) -> Style {
         }
     }
     Style::default().fg(theme.foreground)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_theme() -> Theme {
+        crate::tui::theme::default_theme()
+    }
+
+    #[test]
+    fn open_content_creates_virtual_tab() {
+        let theme = test_theme();
+        let mut fv = FileViewerState::new();
+        fv.open_content("⚙ bash", "hello\nworld", &theme);
+
+        assert_eq!(fv.tabs.len(), 1);
+        assert_eq!(fv.active_idx, Some(0));
+        let tab = &fv.tabs[0];
+        assert!(tab.is_virtual);
+        assert_eq!(tab.display_name, "⚙ bash");
+        assert_eq!(tab.total_lines, 2);
+        assert_eq!(tab.language, "Tool Result");
+        assert!(tab.path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn open_content_deduplicates_same_name() {
+        let theme = test_theme();
+        let mut fv = FileViewerState::new();
+        fv.open_content("⚙ bash", "hello", &theme);
+        fv.open_content("⚙ bash", "different content", &theme);
+
+        assert_eq!(fv.tabs.len(), 1, "should reuse existing virtual tab");
+        assert_eq!(fv.active_idx, Some(0));
+    }
+
+    #[test]
+    fn open_content_different_names_creates_separate_tabs() {
+        let theme = test_theme();
+        let mut fv = FileViewerState::new();
+        fv.open_content("⚙ bash", "hello", &theme);
+        fv.open_content("⚙ read", "world", &theme);
+
+        assert_eq!(fv.tabs.len(), 2);
+        assert_eq!(fv.active_idx, Some(1));
+    }
+
+    #[test]
+    fn virtual_and_file_tabs_coexist() {
+        let theme = test_theme();
+        let mut fv = FileViewerState::new();
+        fv.open_content("⚙ bash", "output", &theme);
+
+        let tmp = std::env::temp_dir().join("phx-test-fv-coexist.txt");
+        std::fs::write(&tmp, "file content").unwrap();
+        let _ = fv.open_file(&tmp, &theme);
+
+        assert_eq!(fv.tabs.len(), 2);
+        assert!(fv.tabs[0].is_virtual);
+        assert!(!fv.tabs[1].is_virtual);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn close_virtual_tab() {
+        let theme = test_theme();
+        let mut fv = FileViewerState::new();
+        fv.open_content("⚙ bash", "output", &theme);
+        assert_eq!(fv.tabs.len(), 1);
+
+        fv.close_tab(0);
+        assert!(fv.tabs.is_empty());
+        assert!(fv.active_idx.is_none());
+    }
+
+    #[test]
+    fn highlight_plain_colors_diff_lines() {
+        let theme = test_theme();
+        let content = "+added\n-removed\n context\n@@hunk@@";
+        let lines = FileViewerState::highlight_plain(content, &theme);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0][0].1, Style::default().fg(theme.diff_add));
+        assert_eq!(lines[1][0].1, Style::default().fg(theme.diff_delete));
+        assert_eq!(lines[2][0].1, Style::default().fg(theme.foreground));
+        assert_eq!(
+            lines[3][0].1,
+            Style::default()
+                .fg(theme.info)
+                .add_modifier(Modifier::ITALIC)
+        );
+    }
+
+    #[test]
+    fn highlight_plain_empty_content() {
+        let theme = test_theme();
+        let lines = FileViewerState::highlight_plain("", &theme);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0][0].0.contains("empty"));
+    }
 }

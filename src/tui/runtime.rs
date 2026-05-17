@@ -345,7 +345,7 @@ async fn run_loop(
                             let r = mouse.row;
                             let c = mouse.column;
 
-                            // Click on hovered file path opens in viewer
+                            // Click on hovered file path or tool detail opens in viewer
                             if !app.file_viewer.is_viewing_file() {
                                 let chat_area = padded_chat_area(app.chat_area);
                                 if r >= chat_area.y
@@ -355,15 +355,42 @@ async fn run_loop(
                                 {
                                     let scroll = app.effective_scroll();
                                     let line_idx = scroll + (r - chat_area.y) as usize;
-                                    if let Some(dl) = app.display_lines.get(line_idx)
-                                        && let Some(path) = &dl.file_path
-                                        && path.exists()
-                                    {
-                                        crate::tui::update::update(
-                                            app,
-                                            Msg::FileViewerOpenFile(path.clone()),
-                                        );
-                                        continue;
+                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                        if let Some(path) = &dl.file_path {
+                                            if path.exists() {
+                                                crate::tui::update::update(
+                                                    app,
+                                                    Msg::FileViewerOpenFile(path.clone()),
+                                                );
+                                                continue;
+                                            }
+                                        } else if let Some(result_idx) = dl.tool_detail_idx
+                                            && let Some(tab) = app.current_tab()
+                                            && let Some(crate::tui::tabs::ChatItem::Line(
+                                                result_line,
+                                            )) = tab.chat_lines.get(result_idx)
+                                        {
+                                            let tool_name = if result_idx > 0
+                                                && let Some(crate::tui::tabs::ChatItem::Line(
+                                                    call_line,
+                                                )) = tab.chat_lines.get(result_idx - 1)
+                                            {
+                                                call_line
+                                                    .content
+                                                    .split(" > ")
+                                                    .next()
+                                                    .unwrap_or("tool")
+                                                    .to_string()
+                                            } else {
+                                                "tool".to_string()
+                                            };
+                                            let content = result_line.content.clone();
+                                            crate::tui::update::update(
+                                                app,
+                                                Msg::ToolDetailOpen { tool_name, content },
+                                            );
+                                            continue;
+                                        }
                                     }
                                 }
                             }
@@ -518,13 +545,12 @@ async fn run_loop(
                                 {
                                     let scroll = app.effective_scroll();
                                     let line_idx = scroll + (mouse.row - chat_area.y) as usize;
-                                    if app
-                                        .display_lines
-                                        .get(line_idx)
-                                        .and_then(|dl| dl.file_path.as_ref())
-                                        .is_some()
-                                    {
-                                        Some(line_idx)
+                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                        if dl.file_path.is_some() || dl.tool_detail_idx.is_some() {
+                                            Some(line_idx)
+                                        } else {
+                                            None
+                                        }
                                     } else {
                                         None
                                     }
