@@ -4,6 +4,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 
+use crate::tui::rendering::measure::display_width;
 use crate::tui::theme::Theme;
 
 // ---------------------------------------------------------------------------
@@ -89,7 +90,7 @@ impl FileViewerState {
             return;
         }
 
-        let lines = Self::highlight_plain(content, tui_theme);
+        let lines = highlight_tool_output(content, tui_theme);
         let total_lines = lines.len();
 
         self.tabs.push(FileTab {
@@ -102,41 +103,6 @@ impl FileViewerState {
             is_virtual: true,
         });
         self.active_idx = Some(self.tabs.len() - 1);
-    }
-
-    fn highlight_plain(content: &str, theme: &Theme) -> Vec<Vec<(String, Style)>> {
-        let fg = Style::default().fg(theme.foreground);
-        let error_style = Style::default().fg(theme.error);
-        let add_style = Style::default().fg(theme.diff_add);
-        let del_style = Style::default().fg(theme.diff_delete);
-        let info_style = Style::default()
-            .fg(theme.info)
-            .add_modifier(Modifier::ITALIC);
-
-        let mut result = Vec::new();
-        for line in content.lines() {
-            let expanded = line.replace('\t', "    ");
-            let trimmed = expanded.trim_start();
-            let style = if trimmed.starts_with("error") || trimmed.starts_with("Error") {
-                error_style
-            } else if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
-                add_style
-            } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
-                del_style
-            } else if trimmed.starts_with("@@") {
-                info_style
-            } else {
-                fg
-            };
-            result.push(vec![(expanded, style)]);
-        }
-        if result.is_empty() {
-            result.push(vec![(
-                "(empty)".to_string(),
-                Style::default().fg(theme.dim()),
-            )]);
-        }
-        result
     }
 
     fn highlight_content(
@@ -241,6 +207,126 @@ impl FileViewerState {
 }
 
 // ---------------------------------------------------------------------------
+// Tool output highlighting (standalone, reusable)
+// ---------------------------------------------------------------------------
+
+pub fn highlight_tool_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style)>> {
+    if crate::tui::rendering::diff::is_diff_content(content) {
+        return highlight_diff_output(content, theme);
+    }
+
+    let fg = Style::default().fg(theme.foreground);
+    let error_style = Style::default().fg(theme.error);
+    let add_style = Style::default().fg(theme.diff_add);
+    let del_style = Style::default().fg(theme.diff_delete);
+    let info_style = Style::default()
+        .fg(theme.info)
+        .add_modifier(Modifier::ITALIC);
+
+    let mut result = Vec::new();
+    for line in content.lines() {
+        let expanded = line.replace('\t', "    ");
+        let trimmed = expanded.trim_start();
+        let style = if trimmed.starts_with("error") || trimmed.starts_with("Error") {
+            error_style
+        } else if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+            add_style
+        } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+            del_style
+        } else if trimmed.starts_with("@@") {
+            info_style
+        } else {
+            fg
+        };
+        result.push(vec![(expanded, style)]);
+    }
+    if result.is_empty() {
+        result.push(vec![(
+            "(empty)".to_string(),
+            Style::default().fg(theme.dim()),
+        )]);
+    }
+    result
+}
+
+fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style)>> {
+    let border = Style::default().fg(theme.tool_border());
+    let dim = Style::default().fg(theme.dim());
+    let del = Style::default().fg(theme.diff_delete);
+    let add = Style::default().fg(theme.diff_add);
+    let info_bold = Style::default().fg(theme.info).add_modifier(Modifier::BOLD);
+
+    let mut header = String::new();
+    let mut old_lines: Vec<String> = Vec::new();
+    let mut new_lines: Vec<String> = Vec::new();
+
+    for line in content.lines() {
+        if line.starts_with("edited ") {
+            header = line.to_string();
+        } else if let Some(rest) = line.strip_prefix("- ") {
+            old_lines.push(rest.replace('\t', "    "));
+        } else if let Some(rest) = line.strip_prefix("+ ") {
+            new_lines.push(rest.replace('\t', "    "));
+        }
+    }
+
+    let short_path = header
+        .strip_prefix("edited ")
+        .and_then(|s| s.split(':').next())
+        .unwrap_or("file");
+    let count_text = header.split(": ").nth(1).unwrap_or("replaced");
+
+    let mut result = Vec::new();
+
+    result.push(vec![
+        ("╭─ ".to_string(), border),
+        (short_path.to_string(), info_bold),
+        (" ── ".to_string(), border),
+        (count_text.to_string(), dim),
+    ]);
+    result.push(vec![("│".to_string(), border)]);
+
+    if old_lines.len() == new_lines.len() {
+        for (old, new) in old_lines.iter().zip(new_lines.iter()) {
+            result.push(vec![
+                ("│  ".to_string(), border),
+                ("− ".to_string(), del),
+                (old.clone(), del),
+            ]);
+            result.push(vec![
+                ("│  ".to_string(), border),
+                ("+ ".to_string(), add),
+                (new.clone(), add),
+            ]);
+        }
+    } else {
+        for old in &old_lines {
+            result.push(vec![
+                ("│  ".to_string(), border),
+                ("− ".to_string(), del),
+                (old.clone(), del),
+            ]);
+        }
+        for new in &new_lines {
+            result.push(vec![
+                ("│  ".to_string(), border),
+                ("+ ".to_string(), add),
+                (new.clone(), add),
+            ]);
+        }
+    }
+
+    result.push(vec![("│".to_string(), border)]);
+    result.push(vec![
+        ("╰─ ".to_string(), border),
+        ("✓".to_string(), Style::default().fg(theme.success)),
+        (" applied".to_string(), dim),
+    ]);
+
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Tab bar rendering
 // ---------------------------------------------------------------------------
 
@@ -313,7 +399,7 @@ pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &FileViewerState, th
         };
 
         let name = &tab.display_name;
-        let inner_w = 1 + name.len() + 2 + 1; // " name  ×"
+        let inner_w = 1 + display_width(name) + 2 + 1; // " name  ×"
         top_spans.push(Span::styled(
             format!("\u{256d}{}\u{256e}", "\u{2500}".repeat(inner_w)),
             tbs,
@@ -344,7 +430,7 @@ pub fn render_tab_bar(frame: &mut Frame, area: Rect, state: &FileViewerState, th
 
     // Fill remaining width
     for spans in [&mut top_spans, &mut mid_spans, &mut bot_spans] {
-        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let used: usize = spans.iter().map(|s| display_width(&s.content)).sum();
         let remaining = w.saturating_sub(used);
         if remaining > 0 {
             spans.push(Span::styled(" ".repeat(remaining), bg));
@@ -394,7 +480,7 @@ pub fn tab_bar_hit_test(
     for (i, tab) in state.tabs.iter().enumerate() {
         pos += 1; // " " gap
         // "│" (1) + " " (1) + name + " " (1) + "×" (1) + " " (1) + "│" (1)
-        let name_len = tab.display_name.chars().count();
+        let name_len = display_width(&tab.display_name);
         let tab_start = pos; // "│"
         let close_col = pos + 1 + 1 + name_len + 1; // after "│ name "
         let tab_end = close_col + 1 + 1 + 1; // "× " + "│"
@@ -665,7 +751,7 @@ mod tests {
     fn highlight_plain_colors_diff_lines() {
         let theme = test_theme();
         let content = "+added\n-removed\n context\n@@hunk@@";
-        let lines = FileViewerState::highlight_plain(content, &theme);
+        let lines = highlight_tool_output(content, &theme);
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0][0].1, Style::default().fg(theme.diff_add));
         assert_eq!(lines[1][0].1, Style::default().fg(theme.diff_delete));
@@ -681,8 +767,44 @@ mod tests {
     #[test]
     fn highlight_plain_empty_content() {
         let theme = test_theme();
-        let lines = FileViewerState::highlight_plain("", &theme);
+        let lines = highlight_tool_output("", &theme);
         assert_eq!(lines.len(), 1);
         assert!(lines[0][0].0.contains("empty"));
+    }
+
+    #[test]
+    fn diff_content_renders_with_borders() {
+        let theme = test_theme();
+        let content = "edited /src/main.rs: replaced 1 occurrence(s)\n- old_line\n+ new_line\n";
+        let lines = highlight_tool_output(content, &theme);
+
+        let all_text: Vec<String> = lines
+            .iter()
+            .map(|parts| parts.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect();
+
+        assert!(all_text[0].contains("╭─"), "should have header border");
+        assert!(all_text[0].contains("main.rs"), "should show filename");
+        let has_minus = all_text
+            .iter()
+            .any(|l| l.contains("− ") && l.contains("old_line"));
+        let has_plus = all_text
+            .iter()
+            .any(|l| l.contains("+ ") && l.contains("new_line"));
+        assert!(has_minus, "should render old line");
+        assert!(has_plus, "should render new line");
+        let last = all_text.last().unwrap();
+        assert!(last.contains("✓") && last.contains("applied"));
+    }
+
+    #[test]
+    fn tab_width_uses_display_width_not_byte_len() {
+        let name = "⚙ bash";
+        let byte_len = name.len();
+        let dw = display_width(name);
+        assert!(
+            byte_len > dw,
+            "⚙ is 3 bytes but fewer display columns — .len() overestimates"
+        );
     }
 }

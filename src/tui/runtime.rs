@@ -347,7 +347,7 @@ async fn run_loop(
 
                             // Click on hovered file path or tool detail opens in viewer
                             if !app.file_viewer.is_viewing_file() {
-                                let chat_area = padded_chat_area(app.chat_area);
+                                let chat_area = app.chat_area;
                                 if r >= chat_area.y
                                     && r < chat_area.y + chat_area.height
                                     && c >= chat_area.x
@@ -537,7 +537,7 @@ async fn run_loop(
                             crate::tui::update::update(app, Msg::FileViewerHoverClose(hover_close));
 
                             let hovered = if !app.file_viewer.is_viewing_file() {
-                                let chat_area = padded_chat_area(app.chat_area);
+                                let chat_area = app.chat_area;
                                 if mouse.row >= chat_area.y
                                     && mouse.row < chat_area.y + chat_area.height
                                     && mouse.column >= chat_area.x

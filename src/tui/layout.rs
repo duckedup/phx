@@ -70,3 +70,24 @@ pub fn split_sidebar(area: Rect) -> (Rect, Rect) {
         (Rect::default(), area)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn double_padding_shifts_y_proving_bug() {
+        let raw = Rect::new(0, 0, 120, 40);
+        let padded = padded_chat_area(raw);
+        assert_eq!(padded.y, 1, "first padding adds top_pad=1");
+
+        let double = padded_chat_area(padded);
+        assert_eq!(double.y, 2, "double padding adds another top_pad");
+
+        let mouse_row = padded.y + 5;
+        let correct_idx = (mouse_row - padded.y) as usize;
+        let wrong_idx = mouse_row.saturating_sub(double.y) as usize;
+        assert_eq!(correct_idx, 5);
+        assert_eq!(wrong_idx, 4, "double padding gives wrong index — off by 1");
+    }
+}
