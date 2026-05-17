@@ -533,3 +533,139 @@ pub fn compute_display_lines(
 
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn make_display_line(text: &str) -> DisplayLine {
+        DisplayLine::styled(text, Style::default())
+    }
+
+    #[test]
+    fn render_chat_fills_empty_rows_with_background() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::default_theme();
+        let lines: Vec<DisplayLine> = vec![make_display_line("hello")];
+
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 40, 10);
+                render_chat(f, area, &lines, 0, &theme);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf[(0, 0)].symbol(), "h");
+        assert_eq!(buf[(1, 0)].symbol(), "e");
+        // Row 1 should be blank (only 1 display line)
+        assert_eq!(buf[(0, 1)].symbol(), " ");
+    }
+
+    #[test]
+    fn render_chat_with_panel_truncates_on_panel_rows() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::default_theme();
+
+        let long_text = "a".repeat(40);
+        let lines: Vec<DisplayLine> = (0..10).map(|_| make_display_line(&long_text)).collect();
+
+        let panel = Some(Rect::new(30, 5, 10, 5));
+
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 40, 10);
+                render_chat_with_panel(f, area, &lines, 0, &theme, panel, None);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Row 0 (above panel): text should extend to column 39
+        assert_eq!(buf[(39, 0)].symbol(), "a");
+        // Row 7 (on panel): text should NOT extend to column 30+
+        // The panel starts at x=30, so row_width = 30 - 0 - 1 = 29
+        // Column 29 should be blank (padding), not "a"
+        assert_eq!(buf[(29, 7)].symbol(), " ");
+    }
+
+    #[test]
+    fn render_chat_wraps_long_line_on_panel_rows() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = crate::tui::theme::default_theme();
+
+        // One long line that needs wrapping when panel narrows the row
+        let long_text = "abcdefghij".repeat(4); // 40 chars
+        let lines: Vec<DisplayLine> = vec![make_display_line(&long_text)];
+
+        // Panel covers rows 0-9 at x=20, so row_width = 19
+        let panel = Some(Rect::new(20, 0, 20, 10));
+
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 40, 10);
+                render_chat_with_panel(f, area, &lines, 0, &theme, panel, None);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Row 0: first 19 chars of the line (row_width = 20 - 0 - 1 = 19)
+        assert_eq!(buf[(0, 0)].symbol(), "a");
+        assert_eq!(buf[(18, 0)].symbol(), "i");
+        // Row 1: continuation — starts with char 20 of the 40-char string
+        // "abcdefghij" repeats, so char 19 is "j" (0-indexed)
+        assert_eq!(buf[(0, 1)].symbol(), "j");
+    }
+
+    #[test]
+    fn truncate_line_respects_display_width() {
+        let line = Line::from(vec![Span::raw("hello "), Span::raw("world")]);
+        let result = truncate_line(&line, 8);
+        let width: usize = result.spans.iter().map(|s| display_width(&s.content)).sum();
+        assert!(width <= 8);
+    }
+
+    #[test]
+    fn skip_line_cols_returns_remainder() {
+        let line = Line::from(vec![Span::raw("hello"), Span::raw(" world")]);
+        let remainder = skip_line_cols(&line, 5);
+        let text: String = remainder
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(text, " world");
+    }
+
+    #[test]
+    fn skip_line_cols_handles_mid_span_split() {
+        let line = Line::from(vec![Span::raw("abcdef")]);
+        let remainder = skip_line_cols(&line, 3);
+        let text: String = remainder
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(text, "def");
+    }
+
+    #[test]
+    fn skip_line_cols_empty_remainder() {
+        let line = Line::from(vec![Span::raw("abc")]);
+        let remainder = skip_line_cols(&line, 3);
+        assert!(remainder.spans.is_empty() || remainder.spans.iter().all(|s| s.content.is_empty()));
+    }
+
+    #[test]
+    fn pad_line_fills_to_target() {
+        let line = Line::from(vec![Span::raw("hi")]);
+        let bg = Style::default();
+        let padded = pad_line(line, 10, bg);
+        let width: usize = padded.spans.iter().map(|s| display_width(&s.content)).sum();
+        assert_eq!(width, 10);
+    }
+}
