@@ -88,23 +88,21 @@ impl App {
             let action = tool_form::handle_key(form, key);
             match action {
                 tool_form::FormAction::Submit(_) => {
-                    if let Some(response_tx) = self.interactive_response_tx.take() {
-                        let answers = tool_form::format_answers(form);
-                        let _ = response_tx.send(Some(answers));
-                        self.tool_form = None;
-                    } else {
-                        let name = form.tool_name.clone();
-                        let args = form.collect_json();
-                        let args_str = args.to_string();
-                        self.tool_form = None;
-                        self.invoke_tool_command(&name, &args_str).await;
-                    }
+                    let answers = tool_form::format_answers(form);
+                    let tool_name = form.tool_name.clone();
+                    let args_json = form.collect_json().to_string();
+                    let cmd = crate::tui::update::update(
+                        self,
+                        crate::tui::msg::Msg::ToolFormSubmit {
+                            answers,
+                            tool_name,
+                            args_json,
+                        },
+                    );
+                    cmd.execute(self).await;
                 }
                 tool_form::FormAction::Cancel => {
-                    if let Some(response_tx) = self.interactive_response_tx.take() {
-                        let _ = response_tx.send(None);
-                    }
-                    self.tool_form = None;
+                    crate::tui::update::update(self, crate::tui::msg::Msg::ToolFormDismiss);
                 }
                 tool_form::FormAction::None => {}
             }
@@ -155,7 +153,7 @@ impl App {
                 return true;
             }
             if self.models_page.is_some() {
-                self.models_page = None;
+                crate::tui::update::update(self, crate::tui::msg::Msg::ModelsPageDismiss);
                 return true;
             }
             if self.picker.is_some() {
@@ -224,7 +222,7 @@ impl App {
                     }
                 }
                 onboarding::Action::Cancelled => {
-                    self.onboarding = None;
+                    crate::tui::update::update(self, crate::tui::msg::Msg::OnboardingDismiss);
                     self.pending_model_selection = None;
                 }
                 onboarding::Action::None => {}

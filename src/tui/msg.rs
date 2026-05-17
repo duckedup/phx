@@ -84,6 +84,16 @@ pub enum Msg {
         response_tx: tokio::sync::oneshot::Sender<Option<String>>,
     },
 
+    // Modals
+    ToolFormSubmit {
+        answers: String,
+        tool_name: String,
+        args_json: String,
+    },
+    ToolFormDismiss,
+    ModelsPageDismiss,
+    OnboardingDismiss,
+
     // Input
     InputSubmit,
 

@@ -193,6 +193,36 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
             app.hovered_line = line;
         }
 
+        // ── Modals ───────────────────────────────────────────────────────
+        Msg::ToolFormSubmit {
+            answers,
+            tool_name,
+            args_json,
+        } => {
+            if let Some(response_tx) = app.interactive_response_tx.take() {
+                let _ = response_tx.send(Some(answers));
+                app.tool_form = None;
+            } else {
+                app.tool_form = None;
+                return Cmd::RunToolCommand {
+                    tool_name,
+                    args_json,
+                };
+            }
+        }
+        Msg::ToolFormDismiss => {
+            if let Some(response_tx) = app.interactive_response_tx.take() {
+                let _ = response_tx.send(None);
+            }
+            app.tool_form = None;
+        }
+        Msg::ModelsPageDismiss => {
+            app.models_page = None;
+        }
+        Msg::OnboardingDismiss => {
+            app.onboarding = None;
+        }
+
         // ── Conversation events ──────────────────────────────────────────
         Msg::ConvStreamToken { tab_idx, text } => {
             if let Some(tab) = app.tabs.get_mut(tab_idx) {

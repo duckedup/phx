@@ -7,8 +7,15 @@ pub enum Cmd {
     None,
     StartConversation(String),
     RunCommand(String),
-    SendAgentMessage { session_id: String, text: String },
+    SendAgentMessage {
+        session_id: String,
+        text: String,
+    },
     ResumeSession(String),
+    RunToolCommand {
+        tool_name: String,
+        args_json: String,
+    },
     ApplyReload(crate::tui::app::ReloadOutput),
     Batch(Vec<Cmd>),
 }
@@ -28,6 +35,12 @@ impl Cmd {
             }
             Cmd::ResumeSession(session_id) => {
                 crate::tui::conversation::resume_session(app, &session_id).await;
+            }
+            Cmd::RunToolCommand {
+                tool_name,
+                args_json,
+            } => {
+                app.invoke_tool_command(&tool_name, &args_json).await;
             }
             Cmd::ApplyReload(output) => {
                 crate::tui::reload::apply_reload(app, output);
