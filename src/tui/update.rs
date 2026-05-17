@@ -400,3 +400,329 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
     }
     Cmd::None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::prelude::Rect;
+
+    fn test_app() -> App {
+        let config = crate::config::schema::Config::default();
+        let mut app = App::new(config);
+        app.onboarding = None;
+        app.conductor_mode = false;
+
+        let history = std::env::temp_dir().join("phx-test-history");
+        let rx = app.events_tx.subscribe();
+        app.tabs
+            .push(crate::tui::tabs::Tab::new("test".into(), rx, history));
+        app.chat_area = Rect::new(2, 1, 120, 40);
+        app.chat_area_height = 40;
+        app
+    }
+
+    // ── Scroll ──────────────────────────────────────────────────────
+
+    #[test]
+    fn scroll_up_decreases_offset() {
+        let mut app = test_app();
+        app.tabs[0].scroll_offset = 10;
+        app.tabs[0].auto_scroll = false;
+        update(&mut app, Msg::ScrollUp(3));
+        assert_eq!(app.tabs[0].scroll_offset, 7);
+    }
+
+    #[test]
+    fn scroll_up_saturates_at_zero() {
+        let mut app = test_app();
+        app.tabs[0].scroll_offset = 2;
+        app.tabs[0].auto_scroll = false;
+        update(&mut app, Msg::ScrollUp(10));
+        assert_eq!(app.tabs[0].scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_up_disables_auto_scroll() {
+        let mut app = test_app();
+        app.tabs[0].auto_scroll = true;
+        update(&mut app, Msg::ScrollUp(1));
+        assert!(!app.tabs[0].auto_scroll);
+    }
+
+    #[test]
+    fn scroll_to_bottom_enables_auto_scroll() {
+        let mut app = test_app();
+        app.tabs[0].auto_scroll = false;
+        app.tabs[0].scroll_offset = 50;
+        update(&mut app, Msg::ScrollToBottom);
+        assert!(app.tabs[0].auto_scroll);
+        assert_eq!(app.tabs[0].scroll_offset, 0);
+    }
+
+    // ── Tab management ──────────────────────────────────────────────
+
+    #[test]
+    fn tab_switch_changes_active() {
+        let mut app = test_app();
+        let rx2 = app.events_tx.subscribe();
+        let h = std::env::temp_dir().join("phx-test-h2");
+        app.tabs
+            .push(crate::tui::tabs::Tab::new("t2".into(), rx2, h));
+        update(&mut app, Msg::TabSwitch(1));
+        assert_eq!(app.active_tab, 1);
+    }
+
+    #[test]
+    fn tab_switch_out_of_bounds_is_noop() {
+        let mut app = test_app();
+        update(&mut app, Msg::TabSwitch(99));
+        assert_eq!(app.active_tab, 0);
+    }
+
+    #[test]
+    fn tab_close_removes_tab() {
+        let mut app = test_app();
+        let rx2 = app.events_tx.subscribe();
+        let h = std::env::temp_dir().join("phx-test-h3");
+        app.tabs
+            .push(crate::tui::tabs::Tab::new("t2".into(), rx2, h));
+        assert_eq!(app.tabs.len(), 2);
+        update(&mut app, Msg::TabClose(1));
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn tab_close_index_zero_is_noop() {
+        let mut app = test_app();
+        update(&mut app, Msg::TabClose(0));
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    // ── Focus ───────────────────────────────────────────────────────
+
+    #[test]
+    fn panel_focus_set() {
+        let mut app = test_app();
+        update(&mut app, Msg::PanelFocusSet(true));
+        assert!(app.panel_focused);
+        update(&mut app, Msg::PanelFocusSet(false));
+        assert!(!app.panel_focused);
+    }
+
+    // ── Sidebar ─────────────────────────────────────────────────────
+
+    #[test]
+    fn sidebar_scroll_saturates_at_zero() {
+        let mut app = test_app();
+        app.sidebar_state.scroll = 0;
+        update(&mut app, Msg::SidebarScrollUp);
+        assert_eq!(app.sidebar_state.scroll, 0);
+    }
+
+    #[test]
+    fn sidebar_scroll_down_increments() {
+        let mut app = test_app();
+        update(&mut app, Msg::SidebarScrollDown);
+        assert_eq!(app.sidebar_state.scroll, 1);
+    }
+
+    // ── Picker ──────────────────────────────────────────────────────
+
+    #[test]
+    fn picker_clear_removes_picker() {
+        let mut app = test_app();
+        app.picker = Some(crate::tui::picker::PickerState::new(
+            vec![crate::tui::picker::PickerItem {
+                id: "a".into(),
+                label: "test".into(),
+                description: "".into(),
+                source_tag: None,
+            }],
+            crate::tui::picker::PickerMode::Theme,
+        ));
+        update(&mut app, Msg::PickerClear);
+        assert!(app.picker.is_none());
+    }
+
+    // ── Selection & hover ───────────────────────────────────────────
+
+    #[test]
+    fn selection_clear() {
+        let mut app = test_app();
+        app.selection = Some(crate::tui::selection::Selection {
+            start_row: 0,
+            start_col: 0,
+            end_row: 5,
+            end_col: 10,
+            active: false,
+        });
+        update(&mut app, Msg::SelectionClear);
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn hover_line_set_and_clear() {
+        let mut app = test_app();
+        update(&mut app, Msg::HoverLine(Some(42)));
+        assert_eq!(app.hovered_line, Some(42));
+        update(&mut app, Msg::HoverLine(None));
+        assert_eq!(app.hovered_line, None);
+    }
+
+    // ── Modals ──────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_form_dismiss_clears_form() {
+        let mut app = test_app();
+        app.tool_form = Some(crate::tui::ui::tool_form::ToolFormState::from_ui(
+            "test".into(),
+            "".into(),
+            &crate::shared::ui_field_types::ToolUiConfig::new(vec![]),
+        ));
+        update(&mut app, Msg::ToolFormDismiss);
+        assert!(app.tool_form.is_none());
+    }
+
+    #[test]
+    fn models_page_dismiss() {
+        let mut app = test_app();
+        app.models_page = Some(crate::tui::models_page::ModelsPageState::new(&app.config));
+        update(&mut app, Msg::ModelsPageDismiss);
+        assert!(app.models_page.is_none());
+    }
+
+    #[test]
+    fn onboarding_dismiss() {
+        let mut app = test_app();
+        app.onboarding = Some(crate::tui::onboarding::OnboardingState::new());
+        update(&mut app, Msg::OnboardingDismiss);
+        assert!(app.onboarding.is_none());
+    }
+
+    // ── Toast ───────────────────────────────────────────────────────
+
+    #[test]
+    fn toast_expire_clears() {
+        let mut app = test_app();
+        app.show_toast("hello");
+        assert!(app.toast.is_some());
+        update(&mut app, Msg::ToastExpire);
+        assert!(app.toast.is_none());
+    }
+
+    // ── Quit ────────────────────────────────────────────────────────
+
+    #[test]
+    fn quit_sets_flag() {
+        let mut app = test_app();
+        update(&mut app, Msg::Quit);
+        assert!(app.should_quit);
+    }
+
+    // ── InputSubmit ─────────────────────────────────────────────────
+
+    #[test]
+    fn input_submit_empty_is_noop() {
+        let mut app = test_app();
+        let cmd = update(&mut app, Msg::InputSubmit);
+        assert!(matches!(cmd, Cmd::None));
+    }
+
+    #[test]
+    fn input_submit_command_returns_run_command() {
+        let mut app = test_app();
+        if let Some(tab) = app.current_tab_mut() {
+            tab.input.set_single_line("/help");
+        }
+        let cmd = update(&mut app, Msg::InputSubmit);
+        assert!(matches!(cmd, Cmd::RunCommand(ref s) if s == "/help"));
+    }
+
+    #[test]
+    fn input_submit_text_returns_start_conversation() {
+        let mut app = test_app();
+        if let Some(tab) = app.current_tab_mut() {
+            tab.input.set_single_line("hello world");
+        }
+        let cmd = update(&mut app, Msg::InputSubmit);
+        assert!(matches!(cmd, Cmd::StartConversation(ref s) if s == "hello world"));
+    }
+
+    // ── ConvEvent ───────────────────────────────────────────────────
+
+    #[test]
+    fn conv_stream_token_appends() {
+        let mut app = test_app();
+        update(
+            &mut app,
+            Msg::ConvStreamToken {
+                tab_idx: 0,
+                text: "hello".into(),
+            },
+        );
+        assert_eq!(app.tabs[0].stream_buffer, "hello");
+        update(
+            &mut app,
+            Msg::ConvStreamToken {
+                tab_idx: 0,
+                text: " world".into(),
+            },
+        );
+        assert_eq!(app.tabs[0].stream_buffer, "hello world");
+    }
+
+    #[test]
+    fn conv_assistant_message_clears_streaming() {
+        let mut app = test_app();
+        app.tabs[0].streaming_text = "partial".into();
+        app.tabs[0].stream_buffer = "buf".into();
+        update(
+            &mut app,
+            Msg::ConvAssistantMessage {
+                tab_idx: 0,
+                text: "full".into(),
+            },
+        );
+        assert!(app.tabs[0].streaming_text.is_empty());
+        assert!(app.tabs[0].stream_buffer.is_empty());
+        assert!(!app.tabs[0].chat_lines.is_empty());
+    }
+
+    #[test]
+    fn conv_error_clears_streaming() {
+        let mut app = test_app();
+        app.tabs[0].streaming_text = "partial".into();
+        update(
+            &mut app,
+            Msg::ConvError {
+                tab_idx: 0,
+                message: "broke".into(),
+            },
+        );
+        assert!(app.tabs[0].streaming_text.is_empty());
+    }
+
+    #[test]
+    fn conv_event_invalid_tab_is_noop() {
+        let mut app = test_app();
+        update(
+            &mut app,
+            Msg::ConvStreamToken {
+                tab_idx: 99,
+                text: "ignored".into(),
+            },
+        );
+        assert!(app.tabs[0].stream_buffer.is_empty());
+    }
+
+    // ── File viewer ─────────────────────────────────────────────────
+
+    #[test]
+    fn file_viewer_hover_close() {
+        let mut app = test_app();
+        update(&mut app, Msg::FileViewerHoverClose(Some(2)));
+        assert_eq!(app.file_viewer.hovered_close, Some(2));
+        update(&mut app, Msg::FileViewerHoverClose(None));
+        assert_eq!(app.file_viewer.hovered_close, None);
+    }
+}
