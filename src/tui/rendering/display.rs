@@ -4,9 +4,10 @@ use ratatui::prelude::*;
 use ratatui::text::{Line, Span};
 
 use crate::session::message::Role;
-use crate::tui::rendering::diff::{is_diff_content, render_side_by_side_diff};
+use crate::tui::rendering::diff::{is_diff_content, render_diff};
 use crate::tui::rendering::helpers::wrap_text;
 use crate::tui::rendering::markdown::render_markdown;
+use crate::tui::rendering::measure::{display_width, expand_tabs};
 use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine, WidgetKind};
 use crate::tui::theme::Theme;
 
@@ -52,10 +53,13 @@ pub fn build_item_display_lines(
     item: &ChatItem,
     theme: &Theme,
     content_width: usize,
+    full_content_width: usize,
     pad: u16,
 ) {
     match item {
-        ChatItem::Line(cl) => build_chat_display_lines(lines, cl, theme, content_width, pad),
+        ChatItem::Line(cl) => {
+            build_chat_display_lines(lines, cl, theme, content_width, full_content_width, pad)
+        }
         ChatItem::Assistant(al) => {
             build_assistant_display_lines(lines, al, theme, content_width, pad)
         }
@@ -187,13 +191,14 @@ fn build_chat_display_lines(
     cl: &ChatLine,
     theme: &Theme,
     content_width: usize,
+    full_content_width: usize,
     pad: u16,
 ) {
     let indent = " ".repeat(pad as usize);
 
     match cl.role {
         Role::User => {
-            let full_width = content_width + (pad as usize) * 2;
+            let full_width = full_content_width;
             let bg = theme.user_msg_bg();
             let border_style = Style::default().fg(theme.user_msg_border()).bg(bg);
             let text_style = Style::default().fg(theme.foreground).bg(bg);
@@ -204,7 +209,7 @@ fn build_chat_display_lines(
             let fill_style = Style::default().bg(bg);
 
             let header_text = " you";
-            let header_pad = full_width.saturating_sub(1 + header_text.len());
+            let header_pad = full_width.saturating_sub(1 + display_width(header_text));
             lines.push(DisplayLine::multi(vec![
                 ("▎".to_string(), border_style),
                 (header_text.to_string(), header_style),
@@ -213,7 +218,7 @@ fn build_chat_display_lines(
 
             let wrap_width = full_width.saturating_sub(3);
             for wl in wrap_text(&cl.content, wrap_width) {
-                let line_pad = full_width.saturating_sub(1 + 1 + wl.len());
+                let line_pad = full_width.saturating_sub(1 + 1 + display_width(&wl));
                 lines.push(DisplayLine::multi(vec![
                     ("▎".to_string(), border_style),
                     (" ".to_string(), fill_style),
@@ -278,7 +283,7 @@ fn build_chat_display_lines(
                 || cl.content.starts_with("unknown tool:");
 
             if !is_error && is_diff_content(&cl.content) {
-                render_side_by_side_diff(lines, &cl.content, theme, &indent, content_width);
+                render_diff(lines, &cl.content, theme, &indent, content_width);
             } else {
                 let border_color = if is_error {
                     theme.error
@@ -320,7 +325,8 @@ fn build_chat_display_lines(
                         continue;
                     }
 
-                    let wrapped = wrap_text(line_text, result_width);
+                    let expanded = expand_tabs(line_text);
+                    let wrapped = wrap_text(&expanded, result_width);
                     for wl in wrapped {
                         let text_style = diff_line_style(&wl, theme, is_error);
                         lines.push(DisplayLine::multi(vec![

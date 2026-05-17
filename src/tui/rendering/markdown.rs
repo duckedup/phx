@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 
 use crate::tui::rendering::display::DisplayLine;
 use crate::tui::rendering::helpers::wrap_text;
+use crate::tui::rendering::measure::{display_width, expand_tabs, truncate_to_width};
 use crate::tui::theme::Theme;
 
 pub fn render_markdown(
@@ -42,11 +43,11 @@ pub fn render_markdown(
 
         if in_code_block {
             let code_width = max_width.saturating_sub(4);
-            let display_line = if line.chars().count() > code_width && code_width > 3 {
-                let truncated: String = line.chars().take(code_width - 3).collect();
-                format!("{truncated}...")
+            let expanded = expand_tabs(line);
+            let display_line = if display_width(&expanded) > code_width && code_width > 3 {
+                truncate_to_width(&expanded, code_width)
             } else {
-                line.to_string()
+                expanded
             };
             lines.push(DisplayLine::multi(vec![
                 (format!("{indent}│ "), Style::default().fg(theme.dim())),

@@ -1,0 +1,207 @@
+use crate::tui::app::App;
+use crate::tui::cmd::Cmd;
+use crate::tui::components::sidebar::SidebarSelection;
+use crate::tui::msg::Msg;
+
+pub fn update(app: &mut App, msg: Msg) -> Cmd {
+    match msg {
+        // ── Scroll ──────────────────────────────────────────────────────
+        Msg::ScrollUp(n) => {
+            if let Some(tab) = app.current_tab_mut() {
+                tab.scroll_up(n);
+            }
+        }
+        Msg::ScrollDown(n) => {
+            let total = app.display_lines.len();
+            let visible = app.chat_area_height as usize;
+            if let Some(tab) = app.current_tab_mut() {
+                tab.scroll_down(n, total, visible);
+            }
+        }
+        Msg::ScrollToBottom => {
+            if let Some(tab) = app.current_tab_mut() {
+                tab.auto_scroll = true;
+                tab.scroll_offset = 0;
+            }
+        }
+
+        // ── Tab management ──────────────────────────────────────────────
+        Msg::TabSwitch(idx) => {
+            if idx < app.tabs.len() {
+                app.active_tab = idx;
+            }
+        }
+        Msg::TabClose(idx) => {
+            if idx > 0 && idx < app.tabs.len() {
+                app.tabs.remove(idx);
+                if app.active_tab >= app.tabs.len() {
+                    app.active_tab = app.tabs.len().saturating_sub(1);
+                }
+                if app.active_tab >= idx && app.active_tab > 0 {
+                    app.active_tab -= 1;
+                }
+            }
+        }
+
+        // ── Focus ───────────────────────────────────────────────────────
+        Msg::PanelFocusSet(focused) => {
+            app.panel_focused = focused;
+        }
+
+        // ── Sidebar ─────────────────────────────────────────────────────
+        Msg::SidebarScrollUp => {
+            app.sidebar_state.scroll = app.sidebar_state.scroll.saturating_sub(1);
+        }
+        Msg::SidebarScrollDown => {
+            app.sidebar_state.scroll += 1;
+        }
+        Msg::SidebarNavigateUp => {
+            let agents = &app.sidebar_state.agents;
+            if let SidebarSelection::Agent(ref id) = app.sidebar_state.selected
+                && let Some(pos) = agents.iter().position(|a| a.session_id == *id)
+            {
+                if pos > 0 {
+                    app.sidebar_state.selected =
+                        SidebarSelection::Agent(agents[pos - 1].session_id.clone());
+                } else {
+                    app.sidebar_state.selected = SidebarSelection::Conductor;
+                }
+            }
+            let visible = app.sidebar_area.map(|a| a.height as usize).unwrap_or(10);
+            app.sidebar_state.ensure_selected_visible(visible);
+        }
+        Msg::SidebarNavigateDown => {
+            let agents = &app.sidebar_state.agents;
+            match &app.sidebar_state.selected {
+                SidebarSelection::Conductor => {
+                    if let Some(first) = agents.first() {
+                        app.sidebar_state.selected =
+                            SidebarSelection::Agent(first.session_id.clone());
+                    }
+                }
+                SidebarSelection::Agent(id) => {
+                    if let Some(pos) = agents.iter().position(|a| a.session_id == *id)
+                        && pos + 1 < agents.len()
+                    {
+                        app.sidebar_state.selected =
+                            SidebarSelection::Agent(agents[pos + 1].session_id.clone());
+                    }
+                }
+            }
+            let visible = app.sidebar_area.map(|a| a.height as usize).unwrap_or(10);
+            app.sidebar_state.ensure_selected_visible(visible);
+        }
+        Msg::SidebarDismissAgent(id) => {
+            let was_active = app.tabs.get(app.active_tab).is_some_and(|t| t.id == id);
+            app.sidebar_state.dismiss(&id);
+            if was_active {
+                app.active_tab = 0;
+            }
+        }
+        Msg::SidebarDismissSelected => {
+            if let SidebarSelection::Agent(ref id) = app.sidebar_state.selected {
+                let id = id.clone();
+                let was_active = app.tabs.get(app.active_tab).is_some_and(|t| t.id == id);
+                app.sidebar_state.dismiss(&id);
+                app.sidebar_state.selected = SidebarSelection::Conductor;
+                if was_active {
+                    app.active_tab = 0;
+                }
+            }
+        }
+        Msg::SidebarSelect(sel) => {
+            match &sel {
+                SidebarSelection::Conductor => {
+                    app.active_tab = 0;
+                }
+                SidebarSelection::Agent(id) => {
+                    if let Some(idx) = app.tabs.iter().position(|t| t.id == *id) {
+                        app.active_tab = idx;
+                    } else if let Some(agent) = app
+                        .agent_receivers
+                        .iter()
+                        .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                    {
+                        app.active_tab = agent.tab_index;
+                    }
+                }
+            }
+            app.sidebar_state.selected = sel;
+        }
+        Msg::SidebarActivateSelected => {
+            match &app.sidebar_state.selected {
+                SidebarSelection::Conductor => {
+                    app.active_tab = 0;
+                }
+                SidebarSelection::Agent(id) => {
+                    if let Some(idx) = app.tabs.iter().position(|t| t.id == *id) {
+                        app.active_tab = idx;
+                    } else if let Some(agent) = app
+                        .agent_receivers
+                        .iter()
+                        .find(|a| a.session_id.as_deref() == Some(id.as_str()))
+                    {
+                        app.active_tab = agent.tab_index;
+                    }
+                }
+            }
+            app.panel_focused = false;
+        }
+
+        // ── File viewer ─────────────────────────────────────────────────
+        Msg::FileViewerScrollUp(n) => {
+            if let Some(ft) = app.file_viewer.active_tab_mut() {
+                ft.scroll_up(n);
+            }
+        }
+        Msg::FileViewerScrollDown(n) => {
+            let visible = app.chat_area_height as usize;
+            if let Some(ft) = app.file_viewer.active_tab_mut() {
+                ft.scroll_down(n, visible);
+            }
+        }
+        Msg::FileViewerSwitchToChat => {
+            app.file_viewer.switch_to_chat();
+        }
+        Msg::FileViewerSwitchTab(idx) => {
+            app.file_viewer.switch_to_tab(idx);
+        }
+        Msg::FileViewerCloseTab(idx) => {
+            app.file_viewer.close_tab(idx);
+        }
+        Msg::FileViewerOpenFile(path) => {
+            let _ = app.file_viewer.open_file(&path, &app.theme);
+        }
+        Msg::FileViewerHoverClose(idx) => {
+            app.file_viewer.hovered_close = idx;
+        }
+
+        // ── Picker ──────────────────────────────────────────────────────
+        Msg::PickerClose => {
+            app.restore_theme();
+            app.picker = None;
+        }
+        Msg::PickerClear => {
+            app.picker = None;
+        }
+
+        // ── Selection & hover ───────────────────────────────────────────
+        Msg::SelectionClear => {
+            app.selection = None;
+        }
+        Msg::HoverLine(line) => {
+            app.hovered_line = line;
+        }
+
+        // ── Toast ───────────────────────────────────────────────────────
+        Msg::ToastExpire => {
+            app.toast = None;
+        }
+
+        // ── Quit ────────────────────────────────────────────────────────
+        Msg::Quit => {
+            app.should_quit = true;
+        }
+    }
+    Cmd::None
+}

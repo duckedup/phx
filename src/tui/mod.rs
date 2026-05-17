@@ -1,18 +1,25 @@
 pub mod add_model_wizard;
 pub mod app;
+pub mod cmd;
+pub mod commands;
 pub mod components;
+pub mod conversation;
+pub mod event_handler;
 pub mod file_viewer;
 pub mod input;
 pub mod input_requester;
 pub mod layout;
-pub mod message_handler;
 pub mod models_page;
+pub mod msg;
 pub mod onboarding;
 pub mod picker;
+pub mod reload;
 pub mod rendering;
+pub mod runtime;
 pub mod selection;
 pub mod tabs;
 pub mod theme;
 pub mod ui;
+pub mod update;
 
-pub use app::run;
+pub use runtime::run;

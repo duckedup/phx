@@ -7,6 +7,7 @@ use crate::tui::layout::CHAT_PADDING;
 use crate::tui::rendering::display::{DisplayLine, build_item_display_lines};
 use crate::tui::rendering::helpers::{spinner_color, spinner_frame};
 use crate::tui::rendering::markdown::render_markdown;
+use crate::tui::rendering::measure::{display_width, truncate_to_width_raw};
 use crate::tui::tabs::{ChatItem, ChatLine, Tab};
 use crate::tui::theme::Theme;
 
@@ -57,120 +58,175 @@ pub fn render_chat_with_panel(
 ) {
     let visible = area.height as usize;
     let full_width = area.width as usize;
+    let bg = Style::default().bg(theme.background);
 
-    for (i, dl) in display_lines
-        .iter()
-        .skip(effective_scroll)
-        .take(visible)
-        .enumerate()
-    {
-        let abs_idx = effective_scroll + i;
+    let row_width_at = |y: u16| -> usize {
+        if let Some(p) = panel {
+            if y >= p.y && y < p.y + p.height {
+                (p.x.saturating_sub(area.x + 1)) as usize
+            } else {
+                full_width
+            }
+        } else {
+            full_width
+        }
+    };
+
+    let mut screen_row: usize = 0;
+    let mut line_idx = effective_scroll;
+
+    while screen_row < visible && line_idx < display_lines.len() {
+        let dl = &display_lines[line_idx];
+        let abs_idx = line_idx;
         let is_hovered = hovered_line == Some(abs_idx) && dl.file_path.is_some();
 
-        let y = area.y + i as u16;
-        let row_width = if let Some(p) = panel {
-            if y >= p.y && y < p.y + p.height {
-                (p.x.saturating_sub(area.x)) as usize
-            } else {
-                full_width
-            }
+        let full_line = if is_hovered {
+            Line::from(
+                dl.spans
+                    .iter()
+                    .map(|(t, s)| {
+                        let is_content = !t.trim().is_empty() && !t.trim().starts_with('\u{2502}');
+                        if is_content {
+                            Span::styled(
+                                t.clone(),
+                                s.fg(theme.accent).add_modifier(Modifier::UNDERLINED),
+                            )
+                        } else {
+                            Span::styled(t.clone(), *s)
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
         } else {
-            full_width
+            dl.to_line()
         };
 
-        let line = if row_width == 0 {
-            Line::from("")
-        } else {
-            let mut l = if is_hovered {
-                Line::from(
-                    dl.spans
-                        .iter()
-                        .map(|(t, s)| {
-                            let is_content =
-                                !t.trim().is_empty() && !t.trim().starts_with('\u{2502}');
-                            if is_content {
-                                Span::styled(
-                                    t.clone(),
-                                    s.fg(theme.accent).add_modifier(Modifier::UNDERLINED),
-                                )
-                            } else {
-                                Span::styled(t.clone(), *s)
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                dl.to_line()
-            };
-            let text_width: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
-            if text_width > row_width {
-                l = truncate_line(&l, row_width);
-            }
-            let actual: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
-            if actual < row_width {
-                l.spans.push(Span::styled(
-                    " ".repeat(row_width - actual),
-                    Style::default().bg(theme.background),
-                ));
-            }
-            l
-        };
+        let total_width: usize = full_line
+            .spans
+            .iter()
+            .map(|s| display_width(&s.content))
+            .sum();
+        let y = area.y + screen_row as u16;
+        let rw = row_width_at(y);
 
-        let row_rect = Rect {
-            x: area.x,
-            y,
-            width: full_width as u16,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new(line).style(Style::default().bg(theme.background)),
-            row_rect,
-        );
+        if rw == 0 || total_width == 0 {
+            render_row(frame, area.x, y, full_width, Line::from(""), bg);
+            screen_row += 1;
+            line_idx += 1;
+            continue;
+        }
+
+        if total_width <= rw {
+            let padded = pad_line(full_line, rw, bg);
+            render_row(frame, area.x, y, full_width, padded, bg);
+            screen_row += 1;
+        } else {
+            let mut remaining = full_line;
+            while screen_row < visible {
+                let y = area.y + screen_row as u16;
+                let rw = row_width_at(y);
+                if rw == 0 {
+                    render_row(frame, area.x, y, full_width, Line::from(""), bg);
+                    screen_row += 1;
+                    break;
+                }
+                let rem_width: usize = remaining
+                    .spans
+                    .iter()
+                    .map(|s| display_width(&s.content))
+                    .sum();
+                if rem_width == 0 {
+                    break;
+                }
+                if rem_width <= rw {
+                    let padded = pad_line(remaining, rw, bg);
+                    render_row(frame, area.x, y, full_width, padded, bg);
+                    screen_row += 1;
+                    break;
+                }
+                let chunk = truncate_line(&remaining, rw);
+                let chunk_w: usize = chunk.spans.iter().map(|s| display_width(&s.content)).sum();
+                let padded = pad_line(chunk, rw, bg);
+                render_row(frame, area.x, y, full_width, padded, bg);
+                remaining = skip_line_cols(&remaining, chunk_w);
+                screen_row += 1;
+            }
+        }
+        line_idx += 1;
     }
 
-    let rendered = display_lines
-        .len()
-        .saturating_sub(effective_scroll)
-        .min(visible);
-    for i in rendered..visible {
-        let y = area.y + i as u16;
-        let row_width = if let Some(p) = panel {
-            if y >= p.y && y < p.y + p.height {
-                (p.x.saturating_sub(area.x)) as usize
-            } else {
-                full_width
-            }
-        } else {
-            full_width
-        };
-        let row_rect = Rect {
-            x: area.x,
-            y,
-            width: row_width as u16,
-            height: 1,
-        };
-        frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(theme.background)),
-            row_rect,
-        );
+    while screen_row < visible {
+        let y = area.y + screen_row as u16;
+        render_row(frame, area.x, y, full_width, Line::from(""), bg);
+        screen_row += 1;
     }
 }
 
-fn truncate_line(line: &Line<'static>, max_chars: usize) -> Line<'static> {
+fn render_row(frame: &mut Frame, x: u16, y: u16, width: usize, line: Line<'static>, bg: Style) {
+    let rect = Rect {
+        x,
+        y,
+        width: width as u16,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(line).style(bg), rect);
+}
+
+fn pad_line(mut line: Line<'static>, target: usize, bg: Style) -> Line<'static> {
+    let actual: usize = line.spans.iter().map(|s| display_width(&s.content)).sum();
+    if actual < target {
+        line.spans
+            .push(Span::styled(" ".repeat(target - actual), bg));
+    }
+    line
+}
+
+fn skip_line_cols(line: &Line<'static>, skip_cols: usize) -> Line<'static> {
     let mut spans = Vec::new();
-    let mut remaining = max_chars;
+    let mut skipped = 0;
     for span in &line.spans {
-        let count = span.content.chars().count();
+        let w = display_width(&span.content);
+        if skipped >= skip_cols {
+            spans.push(span.clone());
+        } else if skipped + w > skip_cols {
+            let to_skip = skip_cols - skipped;
+            let mut col = 0;
+            let mut byte_start = 0;
+            for (i, c) in span.content.char_indices() {
+                if col >= to_skip {
+                    byte_start = i;
+                    break;
+                }
+                col += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                byte_start = i + c.len_utf8();
+            }
+            let remainder = &span.content[byte_start..];
+            if !remainder.is_empty() {
+                spans.push(Span::styled(remainder.to_string(), span.style));
+            }
+            skipped = skip_cols;
+            continue;
+        }
+        skipped += w;
+    }
+    Line::from(spans)
+}
+
+fn truncate_line(line: &Line<'static>, max_cols: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut remaining = max_cols;
+    for span in &line.spans {
         if remaining == 0 {
             break;
         }
-        if count <= remaining {
+        let w = display_width(&span.content);
+        if w <= remaining {
             spans.push(span.clone());
-            remaining -= count;
+            remaining -= w;
         } else {
-            let truncated: String = span.content.chars().take(remaining).collect();
+            let truncated = truncate_to_width_raw(&span.content, remaining);
+            remaining = remaining.saturating_sub(display_width(&truncated));
             spans.push(Span::styled(truncated, span.style));
-            remaining = 0;
         }
     }
     Line::from(spans)
@@ -363,12 +419,14 @@ pub fn compute_display_lines(
     theme: &Theme,
     is_running: bool,
     frame_tick: u64,
-    width: u16,
+    widths: (u16, u16),
     _turn_count: u32,
     live_agents: &[ChildInfo],
 ) -> Vec<DisplayLine> {
+    let (area_width, full_area_width) = widths;
     let pad = CHAT_PADDING;
-    let content_width = (width as usize).saturating_sub(pad as usize * 2);
+    let content_width = area_width as usize;
+    let full_content_width = full_area_width as usize;
     if content_width == 0 {
         return Vec::new();
     }
@@ -416,7 +474,14 @@ pub fn compute_display_lines(
             i = j;
         } else if is_collect_agent_call(&items[i]) {
             // Render collect_agent call header, then style its result
-            build_item_display_lines(&mut lines, &items[i], theme, content_width, pad);
+            build_item_display_lines(
+                &mut lines,
+                &items[i],
+                theme,
+                content_width,
+                full_content_width,
+                pad,
+            );
             i += 1;
             if i < items.len() && is_tool_result(&items[i]) {
                 if let ChatItem::Line(cl) = &items[i] {
@@ -425,7 +490,14 @@ pub fn compute_display_lines(
                 i += 1;
             }
         } else {
-            build_item_display_lines(&mut lines, &items[i], theme, content_width, pad);
+            build_item_display_lines(
+                &mut lines,
+                &items[i],
+                theme,
+                content_width,
+                full_content_width,
+                pad,
+            );
             i += 1;
         }
     }
