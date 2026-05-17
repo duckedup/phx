@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 
 use crate::tui::rendering::display::DisplayLine;
+use crate::tui::rendering::measure::{display_width, expand_tabs, truncate_to_width};
 use crate::tui::theme::Theme;
 
 pub fn is_diff_content(content: &str) -> bool {
@@ -13,7 +14,7 @@ pub fn is_diff_content(content: &str) -> bool {
         .any(|l| l.starts_with("- ") || l.starts_with("+ "))
 }
 
-pub fn render_side_by_side_diff(
+pub fn render_diff(
     lines: &mut Vec<DisplayLine>,
     content: &str,
     theme: &Theme,
@@ -34,118 +35,103 @@ pub fn render_side_by_side_diff(
         }
     }
 
-    lines.push(DisplayLine::multi(vec![
-        (format!("{indent}  "), Style::default()),
-        (header, Style::default().fg(theme.dim())),
-    ]));
+    let border = Style::default().fg(theme.tool_border());
+    let dim = Style::default().fg(theme.dim());
+    let del = Style::default().fg(theme.diff_delete);
+    let add = Style::default().fg(theme.diff_add);
 
-    let gutter = 4;
-    let sep_w = 3;
-    let usable = content_width.saturating_sub(gutter * 2 + sep_w);
-    let half = usable / 2;
-    if half < 8 {
-        for ol in &old_lines {
-            lines.push(DisplayLine::styled(
-                &format!("{indent}  - {ol}"),
-                Style::default().fg(theme.diff_delete),
-            ));
-        }
-        for nl in &new_lines {
-            lines.push(DisplayLine::styled(
-                &format!("{indent}  + {nl}"),
-                Style::default().fg(theme.diff_add),
-            ));
-        }
-        lines.push(DisplayLine::multi(vec![
-            (format!("{indent}  "), Style::default()),
-            ("✓ done".to_string(), Style::default().fg(theme.success)),
-        ]));
-        return;
-    }
+    let short_path = extract_short_path(&header);
+    let count_text = extract_count(&header);
 
-    let lh = pad_to_width("removed", half);
-    let rh = pad_to_width("added", half);
+    let used = 4 + display_width(&short_path) + 4 + display_width(&count_text) + 1;
+    let dash_fill = content_width.saturating_sub(used);
+
     lines.push(DisplayLine::multi(vec![
-        (format!("{indent}  "), Style::default()),
-        (" ".repeat(gutter), Style::default()),
+        (indent.to_string(), Style::default()),
+        ("╭─ ".to_string(), border),
         (
-            lh,
-            Style::default()
-                .fg(theme.diff_delete)
-                .add_modifier(Modifier::BOLD),
+            short_path,
+            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         ),
-        (" │ ".to_string(), Style::default().fg(theme.dim())),
-        (" ".repeat(gutter), Style::default()),
-        (
-            rh,
-            Style::default()
-                .fg(theme.diff_add)
-                .add_modifier(Modifier::BOLD),
-        ),
+        (" ── ".to_string(), border),
+        (count_text, dim),
+        (format!(" {}", "─".repeat(dash_fill)), border),
     ]));
 
-    let dash_l = "─".repeat(half + gutter);
-    let dash_r = "─".repeat(half + gutter);
-    lines.push(DisplayLine::multi(vec![
-        (format!("{indent}  "), Style::default()),
-        (dash_l, Style::default().fg(theme.dim())),
-        ("─┼─".to_string(), Style::default().fg(theme.dim())),
-        (dash_r, Style::default().fg(theme.dim())),
-    ]));
+    let text_max = content_width.saturating_sub(8);
 
-    let max_rows = old_lines.len().max(new_lines.len());
-    for i in 0..max_rows {
-        let left = old_lines.get(i).copied().unwrap_or("");
-        let right = new_lines.get(i).copied().unwrap_or("");
-
-        let ln = if i < old_lines.len() {
-            format!("{:>2}│ ", i + 1)
-        } else {
-            "  │ ".to_string()
-        };
-        let rn = if i < new_lines.len() {
-            format!("{:>2}│ ", i + 1)
-        } else {
-            "  │ ".to_string()
-        };
-
-        let lt = pad_to_width(left, half);
-        let rt = pad_to_width(right, half);
-
-        let left_style = if left.is_empty() && i >= old_lines.len() {
-            Style::default().fg(theme.dim())
-        } else {
-            Style::default().fg(theme.diff_delete)
-        };
-        let right_style = if right.is_empty() && i >= new_lines.len() {
-            Style::default().fg(theme.dim())
-        } else {
-            Style::default().fg(theme.diff_add)
-        };
-
-        lines.push(DisplayLine::multi(vec![
-            (format!("{indent}  "), Style::default()),
-            (ln, Style::default().fg(theme.dim())),
-            (lt, left_style),
-            (" │ ".to_string(), Style::default().fg(theme.dim())),
-            (rn, Style::default().fg(theme.dim())),
-            (rt, right_style),
-        ]));
+    if old_lines.len() == new_lines.len() {
+        for (i, (old, new)) in old_lines.iter().zip(new_lines.iter()).enumerate() {
+            let ln = format!("{:>2} ", i + 1);
+            let old_expanded = expand_tabs(old);
+            let new_expanded = expand_tabs(new);
+            lines.push(DisplayLine::multi(vec![
+                (indent.to_string(), Style::default()),
+                ("│ ".to_string(), border),
+                (ln, dim),
+                ("− ".to_string(), del),
+                (truncate_to_width(&old_expanded, text_max), del),
+            ]));
+            lines.push(DisplayLine::multi(vec![
+                (indent.to_string(), Style::default()),
+                ("│ ".to_string(), border),
+                ("   ".to_string(), Style::default()),
+                ("+ ".to_string(), add),
+                (truncate_to_width(&new_expanded, text_max), add),
+            ]));
+        }
+    } else {
+        for (i, old) in old_lines.iter().enumerate() {
+            let ln = format!("{:>2} ", i + 1);
+            let old_expanded = expand_tabs(old);
+            lines.push(DisplayLine::multi(vec![
+                (indent.to_string(), Style::default()),
+                ("│ ".to_string(), border),
+                (ln, dim),
+                ("− ".to_string(), del),
+                (truncate_to_width(&old_expanded, text_max), del),
+            ]));
+        }
+        for (i, new) in new_lines.iter().enumerate() {
+            let ln = format!("{:>2} ", i + 1);
+            let new_expanded = expand_tabs(new);
+            lines.push(DisplayLine::multi(vec![
+                (indent.to_string(), Style::default()),
+                ("│ ".to_string(), border),
+                (ln, dim),
+                ("+ ".to_string(), add),
+                (truncate_to_width(&new_expanded, text_max), add),
+            ]));
+        }
     }
 
     lines.push(DisplayLine::multi(vec![
-        (format!("{indent}  "), Style::default()),
-        ("✓ done".to_string(), Style::default().fg(theme.success)),
+        (indent.to_string(), Style::default()),
+        ("╰─ ".to_string(), border),
+        ("✓".to_string(), Style::default().fg(theme.success)),
+        (" applied".to_string(), dim),
     ]));
 }
 
-pub fn pad_to_width(s: &str, width: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count > width {
-        let truncated: String = s.chars().take(width.saturating_sub(1)).collect();
-        format!("{truncated}…")
-    } else {
-        let padding = " ".repeat(width - char_count);
-        format!("{s}{padding}")
+fn extract_short_path(header: &str) -> String {
+    let path = header
+        .strip_prefix("edited ")
+        .and_then(|s| s.split(':').next())
+        .unwrap_or("file");
+
+    let p = std::path::Path::new(path);
+    let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or(path);
+    let parent = p
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str());
+
+    match parent {
+        Some(dir) => format!("{dir}/{filename}"),
+        None => filename.to_string(),
     }
+}
+
+fn extract_count(header: &str) -> String {
+    header.split(": ").nth(1).unwrap_or("replaced").to_string()
 }

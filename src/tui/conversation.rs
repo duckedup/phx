@@ -8,7 +8,6 @@ use crate::session::agent_loop::Session;
 use crate::session::message::Message;
 use crate::store::session_store::SessionId;
 use crate::tui::app::App;
-use crate::tui::layout;
 use crate::tui::rendering::helpers::tool_call_summary;
 use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine};
 
@@ -166,509 +165,15 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
     }
 }
 
-pub async fn handle_command(app: &mut App, input: &str) {
-    let skills = crate::session::skills::discover_layered(
-        Some(&app.project),
-        &crate::config::paths::user_home(),
-        &app.config.skills.dirs,
-    );
-    let result = {
-        // Resolve the command synchronously under the plugin lock, then drop it
-        // before any .await to avoid blocking the tokio runtime.
-        let sync_result = {
-            let rt_guard = app.plugin_runtime.as_ref().map(|rt| rt.lock());
-            crate::commands::dispatcher::try_dispatch_sync(
-                input,
-                &app.config,
-                &skills,
-                &app.store,
-                &app.project,
-                Some(&app.plugin_manager),
-                rt_guard.as_deref(),
-            )
-        };
-        match sync_result {
-            Some(r) => r,
-            None => {
-                crate::commands::dispatcher::dispatch_async(input, &app.store, &app.project).await
-            }
-        }
-    };
-
-    use crate::tui::picker::{PickerItem, PickerMode, PickerState};
-    use crate::tui::theme;
-
-    match result {
-        crate::commands::CommandResult::Message(msg) => {
-            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: msg,
-                }));
-            }
-        }
-        crate::commands::CommandResult::Error(err) => {
-            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: format!("Error: {err}"),
-                }));
-            }
-        }
-        crate::commands::CommandResult::ClearSession => {
-            app.session = None;
-            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.clear();
-                tab.streaming_text.clear();
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: "Session cleared.".into(),
-                }));
-            }
-        }
-        crate::commands::CommandResult::InjectContext { name, content } => {
-            if app.session.is_none() {
-                app.session = Some(Session::new(
-                    SessionId::new(),
-                    crate::config::schema::SessionProfile::default(),
-                ));
-            }
-            if let Some(session) = &mut app.session {
-                if !session.context_state.activated_skills.insert(name.clone()) {
-                    if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                        tab.chat_lines.push(ChatItem::Line(ChatLine {
-                            role: crate::session::message::Role::System,
-                            content: format!("Skill '{name}' already loaded in this session."),
-                        }));
-                    }
-                } else {
-                    session.add_message(Message::system(&content));
-                    let preview = if content.chars().count() > 80 {
-                        let truncated: String = content.chars().take(77).collect();
-                        format!("{truncated}...")
-                    } else {
-                        content.clone()
-                    };
-                    if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                        tab.chat_lines.push(ChatItem::Line(ChatLine {
-                            role: crate::session::message::Role::System,
-                            content: format!("Skill loaded: {preview}"),
-                        }));
-                    }
-                }
-            }
-        }
-        crate::commands::CommandResult::ThemePicker(themes) => {
-            if themes.len() == 1 {
-                let entry = &themes[0];
-                if let Some(t) = theme::get_by_name(&entry.id) {
-                    app.theme = t;
-                }
-                let config_path = crate::config::paths::user_config_file();
-                let _ = crate::config::writer::save_theme(&config_path, &entry.id);
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatItem::Line(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: format!("Theme: {}", entry.name),
-                    }));
-                }
-            } else {
-                app.saved_theme = Some(app.theme.clone());
-                let items: Vec<PickerItem> = themes
-                    .iter()
-                    .map(|t| PickerItem {
-                        id: t.id.clone(),
-                        label: t.name.clone(),
-                        description: String::new(),
-                        source_tag: None,
-                    })
-                    .collect();
-                app.picker = Some(PickerState::new(items, PickerMode::Theme));
-            }
-        }
-        crate::commands::CommandResult::ModelPicker(choices) => {
-            if choices.len() == 1 {
-                app.model_choices = choices;
-                app.apply_model_selection("0");
-            } else {
-                let items: Vec<PickerItem> = choices
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| PickerItem {
-                        id: i.to_string(),
-                        label: c.display.clone(),
-                        description: c.provider_name.clone(),
-                        source_tag: None,
-                    })
-                    .collect();
-                app.model_choices = choices;
-                app.picker = Some(PickerState::new(items, PickerMode::Model));
-            }
-        }
-        crate::commands::CommandResult::ModelsPage => {
-            app.models_page = Some(crate::tui::models_page::ModelsPageState::new(&app.config));
-        }
-        crate::commands::CommandResult::SessionPicker(choices) => {
-            if choices.is_empty() {
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatItem::Line(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: "No sessions to resume.".into(),
-                    }));
-                }
-            } else {
-                let items: Vec<PickerItem> = choices
-                    .iter()
-                    .map(|c| PickerItem {
-                        id: c.id.clone(),
-                        label: c.display_name.clone(),
-                        source_tag: None,
-                        description: if c.model.is_empty() {
-                            c.provider.clone()
-                        } else {
-                            format!("{}/{}", c.provider, c.model)
-                        },
-                    })
-                    .collect();
-                app.picker = Some(PickerState::new(items, PickerMode::Session));
-            }
-        }
-        crate::commands::CommandResult::CompactSession => {
-            if let Some(session) = &mut app.session {
-                let before = session.messages.len();
-                let force_limits = crate::session::context::ContextLimits {
-                    context_window: 200_000,
-                    max_output: 16_384,
-                    threshold: 0.0,
-                };
-                let result =
-                    crate::session::context::compact_messages(&mut session.messages, &force_limits);
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    if result.was_compacted {
-                        tab.chat_lines.push(ChatItem::Line(ChatLine {
-                            role: crate::session::message::Role::System,
-                            content: format!(
-                                "Compacted session: removed {} messages ({before} → {})",
-                                result.removed_count, result.remaining_count
-                            ),
-                        }));
-                    } else {
-                        tab.chat_lines.push(ChatItem::Line(ChatLine {
-                            role: crate::session::message::Role::System,
-                            content: format!("Session has {before} messages — too few to compact."),
-                        }));
-                    }
-                }
-            } else if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: "No active session to compact.".into(),
-                }));
-            }
-        }
-        crate::commands::CommandResult::ConnectWizard => {
-            app.onboarding = Some(crate::tui::onboarding::OnboardingState::new());
-        }
-        crate::commands::CommandResult::Route(result) => {
-            use crate::commands::route::{RouteResult, apply};
-            match &result {
-                RouteResult::Table(entries) => {
-                    if entries.is_empty() {
-                        app.show_toast("No tool routes configured");
-                    } else {
-                        let lines: Vec<String> = entries
-                            .iter()
-                            .map(|e| {
-                                if let Some(ref m) = e.model {
-                                    format!("  {} → {}/{}", e.tool, e.provider, m)
-                                } else {
-                                    format!("  {} → {}", e.tool, e.provider)
-                                }
-                            })
-                            .collect();
-                        if let Some(tab) = app.current_tab_mut() {
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: format!("Tool routes:\n{}", lines.join("\n")),
-                            }));
-                        }
-                    }
-                }
-                RouteResult::Error(msg) => {
-                    app.show_toast(msg.clone());
-                }
-                _ => {
-                    if let Some(toast_msg) = apply(&result, &mut app.config) {
-                        let config_path = crate::config::paths::user_config_file();
-                        let _ = crate::config::writer::save_tool_routing(
-                            &config_path,
-                            &app.config.tool_routing,
-                        );
-                        app.show_toast(toast_msg);
-                    }
-                }
-            }
-        }
-        crate::commands::CommandResult::Conductor => {
-            handle_conductor_command(app).await;
-        }
-        crate::commands::CommandResult::Solo => {
-            if app.conductor_mode {
-                deactivate_conductor_mode(app).await;
-            } else {
-                app.show_toast("Already in solo mode");
-            }
-        }
-        crate::commands::CommandResult::PluginCommand {
-            plugin_command,
-            args,
-        } => {
-            if let Some(handle) = app.plugin_manager.get_command_handler(&plugin_command) {
-                let result = handle.execute_command(&plugin_command, &args).await;
-                match result {
-                    Ok(value) => {
-                        let msg = value
-                            .get("text")
-                            .or_else(|| value.get("message"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| value.to_string());
-                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: msg,
-                            }));
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: format!("Plugin error: {e}"),
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-        crate::commands::CommandResult::PluginToolCommand { command, args } => {
-            if let Some(rt) = app.plugin_runtime.as_ref().map(Arc::clone) {
-                let (ui_config, description) = {
-                    let rt_guard = rt.lock();
-                    let ui = rt_guard.tool_ui(&command).cloned();
-                    let desc = rt_guard
-                        .command_tools()
-                        .iter()
-                        .find(|t| t.command == command)
-                        .map(|t| t.description.clone())
-                        .unwrap_or_default();
-                    (ui, desc)
-                };
-
-                if let Some(config) = ui_config
-                    && args.is_empty()
-                {
-                    app.tool_form = Some(crate::tui::ui::tool_form::ToolFormState::from_ui(
-                        command,
-                        description,
-                        &config,
-                    ));
-                } else {
-                    let args_json = if args.is_empty() {
-                        "{}".to_string()
-                    } else {
-                        serde_json::json!({"arguments": args}).to_string()
-                    };
-                    let toggle_info = rt.lock().prepare_toggle(&command);
-                    match toggle_info {
-                        Ok((is_exit, resolved, exec_kind, project_dir)) => {
-                            let result = if is_exit {
-                                crate::plugin::plugin_runtime::exit_tool_async(
-                                    Some(exec_kind),
-                                    &resolved,
-                                    &project_dir,
-                                )
-                                .await
-                            } else {
-                                crate::plugin::plugin_runtime::invoke_tool_async(
-                                    exec_kind,
-                                    &resolved,
-                                    &args_json,
-                                    &project_dir,
-                                )
-                                .await
-                            };
-                            match result {
-                                Ok(result) => {
-                                    app.apply_tool_result(result);
-                                }
-                                Err(e) => {
-                                    if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                                        tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                            role: crate::session::message::Role::System,
-                                            content: format!("Plugin tool error: {e}"),
-                                        }));
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                    role: crate::session::message::Role::System,
-                                    content: format!("Plugin tool error: {e}"),
-                                }));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        crate::commands::CommandResult::ReloadPlugins => {
-            if app.is_reloading {
-                return;
-            }
-            app.is_reloading = true;
-
-            if let Some(rt_arc) = app.plugin_runtime.clone() {
-                use crate::plugin::plugin_runtime::PluginRuntime;
-
-                let mut plugin_dirs = PluginRuntime::discover_dirs(
-                    Some(&app.project),
-                    &crate::config::paths::user_home(),
-                );
-                let project_plugin_dir = app.project.join(".phx/plugins");
-                if !plugin_dirs.contains(&project_plugin_dir) {
-                    plugin_dirs.push(project_plugin_dir);
-                }
-                let mut source_dirs = PluginRuntime::discover_source_dirs(Some(&app.project));
-                crate::tui::app::resolve_extra_plugin_dirs(
-                    &app.extra_plugin_dirs,
-                    &app.project,
-                    &mut source_dirs,
-                );
-
-                // Reload uses sync subprocess calls (cargo build) — run on blocking pool
-                let handle = tokio::task::spawn_blocking(move || {
-                    let result = rt_arc.lock().reload(&plugin_dirs, &source_dirs);
-                    crate::tui::app::ReloadOutput {
-                        plugin_result: Some(result),
-                    }
-                });
-                app.reload_task = Some(handle);
-            } else {
-                app.is_reloading = false;
-                app.show_toast("Plugin runtime not available.".to_string());
-            }
-        }
-        crate::commands::CommandResult::ContextInfo => {
-            let builtin_tools: std::collections::HashSet<&str> = [
-                "bash",
-                "read",
-                "write",
-                "edit",
-                "spawn_agent",
-                "check_agents",
-                "collect_agent",
-                "cancel_agent",
-                "merge_agent",
-            ]
-            .into();
-
-            let mut lines = Vec::new();
-            let mut schemas = app.tools.read().list_schemas();
-            schemas.sort_by(|a, b| a.name.cmp(&b.name));
-
-            let (core_tools, plugin_tools): (Vec<_>, Vec<_>) = schemas
-                .iter()
-                .partition(|s| builtin_tools.contains(s.name.as_str()));
-
-            lines.push("### Tools".to_string());
-            lines.push(String::new());
-            for schema in &core_tools {
-                format_bullet(&mut lines, &schema.name, &schema.description, "");
-            }
-
-            if !plugin_tools.is_empty() {
-                lines.push(String::new());
-                lines.push("### Plugin tools".to_string());
-                lines.push(String::new());
-                for schema in &plugin_tools {
-                    format_bullet(&mut lines, &schema.name, &schema.description, "");
-                }
-            }
-
-            let skills = crate::session::skills::discover_layered(
-                Some(&app.project),
-                &crate::config::paths::user_home(),
-                &app.config.skills.dirs,
-            );
-            if !skills.is_empty() {
-                lines.push(String::new());
-                lines.push("### Skills".to_string());
-                lines.push(String::new());
-                for skill in &skills {
-                    let tag = if skill.is_tool { " [tool]" } else { "" };
-                    format_bullet(&mut lines, &skill.name, &skill.description, tag);
-                }
-            }
-
-            {
-                let rt_guard2 = app.plugin_runtime.as_ref().map(|rt| rt.lock());
-                let plugin_commands: Vec<(&str, &str)> = rt_guard2
-                    .as_ref()
-                    .map(|rt| rt.commands())
-                    .unwrap_or_default();
-                let process_cmds = app.plugin_manager.plugin_commands();
-
-                if !plugin_commands.is_empty() || !process_cmds.is_empty() {
-                    lines.push(String::new());
-                    lines.push("### Plugin commands".to_string());
-                    lines.push(String::new());
-                    for (name, desc) in &plugin_commands {
-                        format_bullet(&mut lines, name, desc, "");
-                    }
-                    for (name, summary) in &process_cmds {
-                        format_bullet(&mut lines, name, summary, "");
-                    }
-                }
-            }
-
-            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Assistant(AssistantLine {
-                    content: lines.join("\n"),
-                    turn: 0,
-                }));
-            }
-        }
-        other => {
-            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: format!("{other:?}"),
-                }));
-            }
-        }
-    }
-}
-
-async fn handle_conductor_command(app: &mut App) {
-    if app.conductor_mode {
-        deactivate_conductor_mode(app).await;
-    } else {
-        activate_conductor(app).await;
-    }
-}
-
 pub async fn activate_conductor(app: &mut App) {
     toggle_conductor_mode(app, true);
 }
 
-async fn deactivate_conductor_mode(app: &mut App) {
+pub async fn deactivate_conductor_mode(app: &mut App) {
     toggle_conductor_mode(app, false);
 }
 
-fn toggle_conductor_mode(app: &mut App, activate: bool) {
+pub fn toggle_conductor_mode(app: &mut App, activate: bool) {
     app.conductor_mode = activate;
 
     if activate {
@@ -744,7 +249,7 @@ pub async fn send_message(
     session.add_message(user_msg);
     app.is_running = true;
 
-    redraw(app, terminal);
+    crate::tui::runtime::redraw(app, terminal);
 
     use crate::providers::traits::{
         Event, ProviderMessage, ProviderRole, ProviderToolCall, ProviderToolResult, SendOptions,
@@ -808,7 +313,7 @@ pub async fn send_message(
                     content: crate::tui::rendering::helpers::format_context_tree(&ctx.newly_loaded),
                 }));
             }
-            redraw(app, terminal);
+            crate::tui::runtime::redraw(app, terminal);
         }
 
         let active_provider_profile = crate::config::loader::active_provider(&app.config)
@@ -834,7 +339,7 @@ pub async fn send_message(
                     ),
                 }));
             }
-            redraw(app, terminal);
+            crate::tui::runtime::redraw(app, terminal);
         }
 
         let provider_messages: Vec<ProviderMessage> = session
@@ -908,13 +413,13 @@ pub async fn send_message(
                             break futures::stream::empty().boxed();
                         }
                         Some(Ok(CEvent::Mouse(mouse))) => {
-                            handle_sidebar_click(app, mouse);
+                            crate::tui::event_handler::handle_sidebar_click(app, mouse);
                         }
                         _ => {}
                     }
                 }
                 _ = tick.tick() => {
-                    redraw(app, terminal);
+                    crate::tui::runtime::redraw(app, terminal);
                 }
             }
         };
@@ -1000,7 +505,7 @@ pub async fn send_message(
                             break;
                         }
                         Some(Ok(CEvent::Mouse(mouse))) => {
-                            handle_sidebar_click(app, mouse);
+                            crate::tui::event_handler::handle_sidebar_click(app, mouse);
                         }
                         _ => {}
                     }
@@ -1011,7 +516,7 @@ pub async fn send_message(
                     {
                         crate::tui::rendering::helpers::drain_stream_buffer(tab);
                     }
-                    redraw(app, terminal);
+                    crate::tui::runtime::redraw(app, terminal);
                 }
             }
         }
@@ -1064,8 +569,8 @@ pub async fn send_message(
                     }));
                 }
 
-                drain_pending_events(app);
-                redraw(app, terminal);
+                crate::tui::event_handler::drain_pending_events(app);
+                crate::tui::runtime::redraw(app, terminal);
 
                 use crate::plugin::{HookAction, HookEvent};
                 let hook_data = serde_json::json!({
@@ -1177,8 +682,8 @@ pub async fn send_message(
                     }));
                 }
 
-                drain_pending_events(app);
-                redraw(app, terminal);
+                crate::tui::event_handler::drain_pending_events(app);
+                crate::tui::runtime::redraw(app, terminal);
                 let tr_msg = Message::tool_result(tr);
                 session
                     .persist_message(&app.store, &app.project, &tr_msg)
@@ -1199,168 +704,6 @@ pub async fn send_message(
     app.session = Some(session);
 }
 
-fn drain_pending_events(app: &mut App) {
-    use crossterm::event::{self as ct_event, Event as CEvent};
-    while ct_event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-        if let Ok(event) = ct_event::read() {
-            match event {
-                CEvent::Mouse(mouse) => handle_sidebar_click(app, mouse),
-                CEvent::Key(key)
-                    if key.code == KeyCode::Esc
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)) =>
-                {
-                    app.ctrl_c_count += 1;
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
-    use crate::tui::components::sidebar::SidebarSelection;
-    use crossterm::event::MouseEventKind;
-    if mouse.kind != MouseEventKind::Down(crossterm::event::MouseButton::Left) {
-        return;
-    }
-    if let Some(sb_area) = app.sidebar_area
-        && let Some(hit) = crate::tui::components::sidebar::hit_test(
-            sb_area,
-            mouse.row,
-            mouse.column,
-            &app.sidebar_state,
-        )
-    {
-        use crate::tui::components::sidebar::HitResult;
-        match hit {
-            HitResult::Dismiss(id) => {
-                let was_active = app.tabs.get(app.active_tab).is_some_and(|t| t.id == id);
-                app.sidebar_state.dismiss(&id);
-                if was_active {
-                    app.active_tab = 0;
-                }
-            }
-            HitResult::Select(ref sel) => {
-                match sel {
-                    SidebarSelection::Conductor => {
-                        app.active_tab = 0;
-                    }
-                    SidebarSelection::Agent(id) => {
-                        if let Some(agent) = app
-                            .agent_receivers
-                            .iter()
-                            .find(|a| a.session_id.as_deref() == Some(id.as_str()))
-                        {
-                            app.active_tab = agent.tab_index;
-                        }
-                    }
-                }
-                app.sidebar_state.selected = sel.clone();
-            }
-        }
-    }
-}
-
-pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) {
-    if let Some(agents) = app.session_pool.try_check() {
-        app.sidebar_state.update(agents);
-    }
-    let sz = terminal.size().unwrap_or_default();
-    let sz_rect = Rect::new(0, 0, sz.width, sz.height);
-    let input_lines = app
-        .current_tab()
-        .map(|t| t.input.line_count() as u16)
-        .unwrap_or(1);
-    let content_area = if app.show_sidebar() {
-        layout::split_sidebar(sz_rect).1
-    } else {
-        sz_rect
-    };
-    let chunks = layout::main_layout(content_area, input_lines);
-    app.chat_area_height = chunks[0].height;
-    app.frame_tick = app.frame_tick.wrapping_add(1);
-    app.recompute_display_lines(sz.width);
-    let _ = terminal.draw(|f| app.render(f));
-}
-
-pub fn apply_reload(app: &mut App, output: crate::tui::app::ReloadOutput) {
-    use crate::tui::picker::PickerItem;
-
-    app.tools.write().retain_builtins();
-
-    // Register all plugin tools via adapter
-    if let Some(rt) = &app.plugin_runtime {
-        crate::plugin::plugin_tool_adapter::register_plugin_tools(rt, &mut app.tools.write());
-    }
-
-    // Re-discover markdown skills and register isTool skills
-    let skills = crate::session::skills::discover_layered(
-        Some(&app.project),
-        &crate::config::paths::user_home(),
-        &app.config.skills.dirs,
-    );
-    crate::tools::skill_tool::register_skill_tools(&skills, &mut app.tools.write());
-
-    // Rebuild command items
-    {
-        let rt_guard = app.plugin_runtime.as_ref().map(|rt| rt.lock());
-        let command_list = crate::commands::dispatcher::list_commands_with_plugins(
-            &skills,
-            Some(&app.plugin_manager),
-            rt_guard.as_deref(),
-        );
-        app.command_items = command_list
-            .iter()
-            .map(|cmd| PickerItem {
-                id: cmd.name.clone(),
-                label: cmd.name.clone(),
-                description: cmd.summary.clone(),
-                source_tag: crate::tui::app::command_source_tag(&cmd.source),
-            })
-            .collect();
-    }
-
-    // Show result
-    if let Some(ref result) = output.plugin_result {
-        let mut parts = Vec::new();
-        for build in &result.builds {
-            if !build.success {
-                parts.push(format!("build {} FAILED", build.name));
-            }
-        }
-        if !result.errors.is_empty() {
-            parts.push(format!("errors: {}", result.errors.join("; ")));
-        }
-        let msg = if parts.is_empty() {
-            format!(
-                "Reload complete. {} tools registered.",
-                app.tools.read().count()
-            )
-        } else {
-            format!(
-                "Reload complete ({} tools). {}",
-                app.tools.read().count(),
-                parts.join(" | ")
-            )
-        };
-        app.show_toast(msg);
-    } else {
-        app.show_toast(format!(
-            "Reload complete. {} tools registered.",
-            app.tools.read().count()
-        ));
-    }
-}
-
-fn format_bullet(lines: &mut Vec<String>, name: &str, description: &str, tag: &str) {
-    if description.is_empty() {
-        lines.push(format!("- **{name}**{tag}"));
-    } else {
-        lines.push(format!("- **{name}**{tag} — {description}"));
-    }
-}
-
 async fn run_interactive_form(
     app: &mut App,
     terminal: &mut ratatui::Terminal<ratatui::prelude::CrosstermBackend<std::io::Stdout>>,
@@ -1371,7 +714,7 @@ async fn run_interactive_form(
     use futures::StreamExt;
 
     app.tool_form = Some(form_state);
-    redraw(app, terminal);
+    crate::tui::runtime::redraw(app, terminal);
 
     let mut term_events = EventStream::new();
     let result = loop {
@@ -1397,15 +740,15 @@ async fn run_interactive_form(
                 }
             }
             Some(Ok(crossterm::event::Event::Mouse(mouse))) => {
-                handle_sidebar_click(app, mouse);
+                crate::tui::event_handler::handle_sidebar_click(app, mouse);
             }
             _ => {}
         }
-        redraw(app, terminal);
+        crate::tui::runtime::redraw(app, terminal);
     };
 
     let form = app.tool_form.take();
-    redraw(app, terminal);
+    crate::tui::runtime::redraw(app, terminal);
 
     match result {
         Some(()) => form,

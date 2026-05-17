@@ -32,6 +32,7 @@ impl ToolExecResult {
     }
 }
 
+#[derive(Debug)]
 pub struct BuildOutput {
     pub name: String,
     pub package_name: String,
@@ -40,6 +41,7 @@ pub struct BuildOutput {
     pub binary_dir: Option<PathBuf>,
 }
 
+#[derive(Debug)]
 pub struct ReloadResult {
     pub builds: Vec<BuildOutput>,
     pub added: Vec<String>,

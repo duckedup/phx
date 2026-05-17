@@ -48,6 +48,17 @@ pub fn main_layout_with_form(area: Rect, form_height: u16) -> Rc<[Rect]> {
         .split(area)
 }
 
+pub fn padded_chat_area(raw: Rect) -> Rect {
+    let pad = CHAT_PADDING;
+    let top_pad = 1u16;
+    Rect {
+        x: raw.x + pad,
+        y: raw.y + top_pad,
+        width: raw.width.saturating_sub(pad * 2),
+        height: raw.height.saturating_sub(top_pad),
+    }
+}
+
 pub fn split_sidebar(area: Rect) -> (Rect, Rect) {
     if area.width > SIDEBAR_WIDTH + 40 {
         let horiz = Layout::default()

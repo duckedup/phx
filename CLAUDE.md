@@ -59,7 +59,7 @@ just test              # Run cargo test --all-features
 
 ## Architecture Overview
 
-phx is rpc based harness that uses a tui.
+phx is rpc based harness that uses a tui. It should use an event loop to process requests. Themain goals of the harness are observability, flexibilty and usability.
 
 ## Conventions & Patterns
 

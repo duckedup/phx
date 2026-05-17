@@ -1,3 +1,4 @@
+use crate::tui::rendering::measure::display_width;
 use crate::tui::tabs::Tab;
 
 pub fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
@@ -23,7 +24,7 @@ pub fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
         let mut col = 0usize;
 
         for word in &words {
-            let wlen = word.chars().count();
+            let wlen = display_width(word);
             if col == 0 {
                 current.push_str(word);
                 col = wlen;
