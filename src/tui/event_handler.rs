@@ -4,11 +4,10 @@ use std::time::Duration;
 use crossterm::event::{self as ct_event, Event as CEvent, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::app::App;
-use crate::tui::components::sidebar::SidebarSelection;
 use crate::tui::components::{command_completion, modal_picker, sidebar};
+use crate::tui::onboarding;
 use crate::tui::picker::PickerMode;
 use crate::tui::ui::tool_form;
-use crate::tui::{commands, onboarding};
 
 pub fn drain_pending_events(app: &mut App) {
     while ct_event::poll(std::time::Duration::ZERO).unwrap_or(false) {
@@ -29,6 +28,8 @@ pub fn drain_pending_events(app: &mut App) {
 }
 
 pub fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) {
+    use crate::tui::components::sidebar::HitResult;
+    use crate::tui::msg::Msg;
     use crossterm::event::MouseEventKind;
     if mouse.kind != MouseEventKind::Down(crossterm::event::MouseButton::Left) {
         return;
@@ -41,31 +42,12 @@ pub fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) 
             &app.sidebar_state,
         )
     {
-        use crate::tui::components::sidebar::HitResult;
         match hit {
             HitResult::Dismiss(id) => {
-                let was_active = app.tabs.get(app.active_tab).is_some_and(|t| t.id == id);
-                app.sidebar_state.dismiss(&id);
-                if was_active {
-                    app.active_tab = 0;
-                }
+                crate::tui::update::update(app, Msg::SidebarDismissAgent(id));
             }
-            HitResult::Select(ref sel) => {
-                match sel {
-                    SidebarSelection::Conductor => {
-                        app.active_tab = 0;
-                    }
-                    SidebarSelection::Agent(id) => {
-                        if let Some(agent) = app
-                            .agent_receivers
-                            .iter()
-                            .find(|a| a.session_id.as_deref() == Some(id.as_str()))
-                        {
-                            app.active_tab = agent.tab_index;
-                        }
-                    }
-                }
-                app.sidebar_state.selected = sel.clone();
+            HitResult::Select(sel) => {
+                crate::tui::update::update(app, Msg::SidebarSelect(sel));
             }
         }
     }
@@ -465,12 +447,19 @@ impl App {
             }
             KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.conductor_mode {
-                    commands::handle_command(self, "/solo").await;
+                    let cmd = crate::tui::update::update(self, crate::tui::msg::Msg::InputSubmit);
+                    // handled via /solo command below
+                    drop(cmd);
+                    crate::tui::cmd::Cmd::RunCommand("/solo".into())
+                        .execute(self)
+                        .await;
                 }
             }
             KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if !self.conductor_mode {
-                    commands::handle_command(self, "/conductor").await;
+                    crate::tui::cmd::Cmd::RunCommand("/conductor".into())
+                        .execute(self)
+                        .await;
                 }
             }
             KeyCode::Char('w')

@@ -1,6 +1,5 @@
 /// Every state change in the TUI is routed through one of these variants.
 /// See `update.rs` for the handler.
-#[derive(Debug, Clone)]
 pub enum Msg {
     // Scroll
     ScrollUp(usize),
@@ -40,6 +39,50 @@ pub enum Msg {
     SelectionClear,
     HoverLine(Option<usize>),
     FileViewerHoverClose(Option<usize>),
+
+    // Conversation events
+    ConvStreamToken {
+        tab_idx: usize,
+        text: String,
+    },
+    ConvAssistantMessage {
+        tab_idx: usize,
+        text: String,
+    },
+    ConvToolCall {
+        tab_idx: usize,
+        summary: String,
+    },
+    ConvToolResult {
+        tab_idx: usize,
+        output: String,
+    },
+    ConvContextLoaded {
+        tab_idx: usize,
+        names: Vec<String>,
+    },
+    ConvContextCompacted {
+        tab_idx: usize,
+        removed: usize,
+        remaining: usize,
+    },
+    ConvError {
+        tab_idx: usize,
+        message: String,
+    },
+    ConvCancelled {
+        tab_idx: usize,
+        agent_idx: usize,
+    },
+    ConvDone {
+        tab_idx: usize,
+        agent_idx: usize,
+    },
+    ConvInteractiveUi {
+        tool_name: String,
+        fields: Vec<crate::shared::ui_field_types::UiField>,
+        response_tx: tokio::sync::oneshot::Sender<Option<String>>,
+    },
 
     // Input
     InputSubmit,

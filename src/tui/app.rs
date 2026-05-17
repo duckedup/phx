@@ -324,8 +324,9 @@ impl App {
 
     pub fn drain_conversations(&mut self) {
         use crate::session::conversation::ConvEvent;
+        use crate::tui::msg::Msg;
 
-        let mut finished = Vec::new();
+        let mut messages: Vec<Msg> = Vec::new();
 
         for (i, agent) in self.agent_receivers.iter_mut().enumerate() {
             let tab_idx = agent
@@ -336,36 +337,16 @@ impl App {
             while let Ok(event) = agent.rx.try_recv() {
                 match event {
                     ConvEvent::StreamToken(t) => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.stream_buffer.push_str(&t);
-                        }
+                        messages.push(Msg::ConvStreamToken { tab_idx, text: t });
                     }
                     ConvEvent::AssistantMessage(text) => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.streaming_text.clear();
-                            tab.stream_buffer.clear();
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::Assistant,
-                                content: text,
-                            }));
-                        }
+                        messages.push(Msg::ConvAssistantMessage { tab_idx, text });
                     }
                     ConvEvent::ToolCall(summary) => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            crate::tui::rendering::helpers::drain_stream_buffer(tab);
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::ToolCall,
-                                content: summary,
-                            }));
-                        }
+                        messages.push(Msg::ConvToolCall { tab_idx, summary });
                     }
                     ConvEvent::ToolResult { output, .. } => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::ToolResult,
-                                content: output,
-                            }));
-                        }
+                        messages.push(Msg::ConvToolResult { tab_idx, output });
                     }
                     ConvEvent::InteractiveUi {
                         fields,
@@ -373,76 +354,55 @@ impl App {
                         tool_name,
                         ..
                     } => {
-                        let config = crate::shared::ui_field_types::ToolUiConfig::new(fields);
-                        self.tool_form = Some(tool_form::ToolFormState::from_ui(
+                        messages.push(Msg::ConvInteractiveUi {
                             tool_name,
-                            String::new(),
-                            &config,
-                        ));
-                        self.interactive_response_tx = Some(response_tx);
+                            fields,
+                            response_tx,
+                        });
                         break;
                     }
                     ConvEvent::ContextLoaded(names) => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.chat_lines.push(ChatItem::ContextLoaded(names));
-                        }
+                        messages.push(Msg::ConvContextLoaded { tab_idx, names });
                     }
                     ConvEvent::ContextCompacted { removed, remaining } => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: format!(
-                                    "Context compacted: removed {removed} messages ({remaining} remaining)"
-                                ),
-                            }));
-                        }
+                        messages.push(Msg::ConvContextCompacted {
+                            tab_idx,
+                            removed,
+                            remaining,
+                        });
                     }
                     ConvEvent::Error(e) => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.streaming_text.clear();
-                            tab.stream_buffer.clear();
-                            tab.chat_lines.push(ChatItem::Line(ChatLine {
-                                role: crate::session::message::Role::System,
-                                content: e,
-                            }));
-                        }
+                        messages.push(Msg::ConvError {
+                            tab_idx,
+                            message: e,
+                        });
                     }
                     ConvEvent::Cancelled(session) => {
-                        if let Some(tab) = self.tabs.get_mut(tab_idx) {
-                            tab.streaming_text.clear();
-                            tab.stream_buffer.clear();
-                        }
-                        append_file_summary(&mut self.tabs, tab_idx);
-                        self.toast = Some(toast::Toast::new(
-                            "Cancelled".into(),
-                            std::time::Duration::from_secs(3),
-                        ));
                         if tab_idx == 0 {
                             self.session = Some(session);
-                            self.is_running = false;
-                        } else if let Some(sid) = &agent.session_id {
-                            self.session_pool.mark_done(sid, false);
                         }
-                        finished.push(i);
+                        messages.push(Msg::ConvCancelled {
+                            tab_idx,
+                            agent_idx: i,
+                        });
                         break;
                     }
                     ConvEvent::Done(session) => {
-                        append_file_summary(&mut self.tabs, tab_idx);
                         if tab_idx == 0 {
                             self.session = Some(session);
-                            self.is_running = false;
-                        } else if let Some(sid) = &agent.session_id {
-                            self.session_pool.mark_done(sid, true);
                         }
-                        finished.push(i);
+                        messages.push(Msg::ConvDone {
+                            tab_idx,
+                            agent_idx: i,
+                        });
                         break;
                     }
                 }
             }
         }
 
-        for i in finished.into_iter().rev() {
-            self.agent_receivers.remove(i);
+        for msg in messages {
+            crate::tui::update::update(self, msg);
         }
     }
 
@@ -1114,7 +1074,7 @@ pub(crate) fn agent_panel_rect(
     })
 }
 
-fn append_file_summary(tabs: &mut [Tab], tab_idx: usize) {
+pub(crate) fn append_file_summary(tabs: &mut [Tab], tab_idx: usize) {
     let paths: Vec<std::path::PathBuf> = if let Some(tab) = tabs.get(tab_idx) {
         let mut seen = std::collections::HashSet::new();
         tab.chat_lines

@@ -193,6 +193,131 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
             app.hovered_line = line;
         }
 
+        // ── Conversation events ──────────────────────────────────────────
+        Msg::ConvStreamToken { tab_idx, text } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.stream_buffer.push_str(&text);
+            }
+        }
+        Msg::ConvAssistantMessage { tab_idx, text } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.streaming_text.clear();
+                tab.stream_buffer.clear();
+                tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
+                    crate::tui::tabs::ChatLine {
+                        role: crate::session::message::Role::Assistant,
+                        content: text,
+                    },
+                ));
+            }
+        }
+        Msg::ConvToolCall { tab_idx, summary } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                crate::tui::rendering::helpers::drain_stream_buffer(tab);
+                tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
+                    crate::tui::tabs::ChatLine {
+                        role: crate::session::message::Role::ToolCall,
+                        content: summary,
+                    },
+                ));
+            }
+        }
+        Msg::ConvToolResult { tab_idx, output } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
+                    crate::tui::tabs::ChatLine {
+                        role: crate::session::message::Role::ToolResult,
+                        content: output,
+                    },
+                ));
+            }
+        }
+        Msg::ConvContextLoaded { tab_idx, names } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.chat_lines
+                    .push(crate::tui::tabs::ChatItem::ContextLoaded(names));
+            }
+        }
+        Msg::ConvContextCompacted {
+            tab_idx,
+            removed,
+            remaining,
+        } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
+                    crate::tui::tabs::ChatLine {
+                        role: crate::session::message::Role::System,
+                        content: format!(
+                            "Context compacted: removed {removed} messages ({remaining} remaining)"
+                        ),
+                    },
+                ));
+            }
+        }
+        Msg::ConvError { tab_idx, message } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.streaming_text.clear();
+                tab.stream_buffer.clear();
+                tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
+                    crate::tui::tabs::ChatLine {
+                        role: crate::session::message::Role::System,
+                        content: message,
+                    },
+                ));
+            }
+        }
+        Msg::ConvCancelled { tab_idx, agent_idx } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.streaming_text.clear();
+                tab.stream_buffer.clear();
+            }
+            crate::tui::app::append_file_summary(&mut app.tabs, tab_idx);
+            app.toast = Some(crate::tui::components::toast::Toast::new(
+                "Cancelled".into(),
+                std::time::Duration::from_secs(3),
+            ));
+            if tab_idx == 0 {
+                app.is_running = false;
+            } else if let Some(sid) = app
+                .agent_receivers
+                .get(agent_idx)
+                .and_then(|a| a.session_id.as_deref())
+            {
+                app.session_pool.mark_done(sid, false);
+            }
+            if agent_idx < app.agent_receivers.len() {
+                app.agent_receivers.remove(agent_idx);
+            }
+        }
+        Msg::ConvDone { tab_idx, agent_idx } => {
+            crate::tui::app::append_file_summary(&mut app.tabs, tab_idx);
+            if tab_idx == 0 {
+                app.is_running = false;
+            } else if let Some(sid) = app
+                .agent_receivers
+                .get(agent_idx)
+                .and_then(|a| a.session_id.as_deref())
+            {
+                app.session_pool.mark_done(sid, true);
+            }
+            if agent_idx < app.agent_receivers.len() {
+                app.agent_receivers.remove(agent_idx);
+            }
+        }
+        Msg::ConvInteractiveUi {
+            tool_name,
+            fields,
+            response_tx,
+        } => {
+            let config = crate::shared::ui_field_types::ToolUiConfig::new(fields);
+            app.tool_form = Some(crate::tui::ui::tool_form::ToolFormState::from_ui(
+                tool_name,
+                String::new(),
+                &config,
+            ));
+            app.interactive_response_tx = Some(response_tx);
+        }
+
         // ── Input ────────────────────────────────────────────────────────
         Msg::InputSubmit => {
             let input_text = app
