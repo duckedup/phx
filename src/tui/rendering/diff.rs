@@ -135,3 +135,97 @@ fn extract_short_path(header: &str) -> String {
 fn extract_count(header: &str) -> String {
     header.split(": ").nth(1).unwrap_or("replaced").to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::theme::default_theme;
+
+    fn span_text(lines: &[DisplayLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|dl| dl.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn is_diff_content_detects_edit_output() {
+        let content = "edited /tmp/test.rs: replaced 1 occurrence(s)\n- old\n+ new\n";
+        assert!(is_diff_content(content));
+    }
+
+    #[test]
+    fn is_diff_content_rejects_non_diff() {
+        assert!(!is_diff_content("just some text"));
+        assert!(!is_diff_content("edited but no replaced"));
+    }
+
+    #[test]
+    fn render_diff_produces_header_and_footer() {
+        let theme = default_theme();
+        let content = "edited /src/main.rs: replaced 1 occurrence(s)\n- old\n+ new\n";
+        let mut lines = Vec::new();
+        render_diff(&mut lines, content, &theme, "  ", 80);
+        let text = span_text(&lines);
+        assert!(text[0].contains("╭─"));
+        assert!(text[0].contains("src/main.rs"));
+        assert!(text.last().unwrap().contains("✓"));
+        assert!(text.last().unwrap().contains("applied"));
+    }
+
+    #[test]
+    fn render_diff_interleaves_equal_line_counts() {
+        let theme = default_theme();
+        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n- old2\n+ new1\n+ new2\n";
+        let mut lines = Vec::new();
+        render_diff(&mut lines, content, &theme, "", 80);
+        let text = span_text(&lines);
+        assert!(text[1].contains("− "));
+        assert!(text[1].contains("old1"));
+        assert!(text[2].contains("+ "));
+        assert!(text[2].contains("new1"));
+        assert!(text[3].contains("− "));
+        assert!(text[3].contains("old2"));
+        assert!(text[4].contains("+ "));
+        assert!(text[4].contains("new2"));
+    }
+
+    #[test]
+    fn render_diff_stacks_unequal_line_counts() {
+        let theme = default_theme();
+        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n+ new1\n+ new2\n";
+        let mut lines = Vec::new();
+        render_diff(&mut lines, content, &theme, "", 80);
+        let text = span_text(&lines);
+        assert!(text[1].contains("old1"));
+        assert!(text[2].contains("new1"));
+        assert!(text[3].contains("new2"));
+    }
+
+    #[test]
+    fn render_diff_expands_tabs() {
+        let theme = default_theme();
+        let content = "edited /f.rs: replaced 1 occurrence(s)\n- \told\n+ \tnew\n";
+        let mut lines = Vec::new();
+        render_diff(&mut lines, content, &theme, "", 80);
+        let text = span_text(&lines);
+        assert!(text[1].contains("    old"));
+        assert!(!text[1].contains('\t'));
+    }
+
+    #[test]
+    fn extract_short_path_gets_parent_and_file() {
+        assert_eq!(
+            extract_short_path("edited /a/b/c/main.rs: replaced 1 occurrence(s)"),
+            "c/main.rs"
+        );
+    }
+
+    #[test]
+    fn extract_short_path_handles_no_parent() {
+        assert_eq!(
+            extract_short_path("edited main.rs: replaced 1 occurrence(s)"),
+            "main.rs"
+        );
+    }
+}
