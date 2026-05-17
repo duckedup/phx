@@ -1064,11 +1064,17 @@ pub(crate) fn agent_panel_rect(
     if !conductor_mode {
         return None;
     }
+    if chat.width < 20 || chat.height < 8 {
+        return None;
+    }
     let h = AGENT_PANEL_HEIGHT.min(chat.height / 3).max(5);
     let panel_w = 56u16.min(chat.width.saturating_sub(4));
+    if panel_w == 0 || h == 0 {
+        return None;
+    }
     Some(Rect {
         x: chat.x + chat.width - panel_w,
-        y: chat.y + chat.height - h,
+        y: chat.y + chat.height.saturating_sub(h),
         width: panel_w,
         height: h,
     })

@@ -59,16 +59,17 @@ Use `crate::tui::rendering::measure::*` for all display-width work:
 
 Components under `src/tui/components/` are **stateless render functions**. They take state (passed by reference) and a `Rect` (or `Frame`), and they write to the frame. They do not hold state. They do not own data.
 
-State lives on `App` (`src/tui/app.rs`). Event handling and state transitions live in `src/tui/message_handler.rs` and parts of `app.rs`.
+State lives on `App` (`src/tui/app.rs`). State changes go through `update()` in `update.rs`. Side effects go through `Cmd::execute()` in `cmd.rs`.
 
-When adding a new piece of chrome (header element, panel, modal, etc.):
+When adding a new feature:
 
-1. Add a render function under `src/tui/components/<name>.rs` taking `&mut Frame`, the `Rect` it should render into, and any state it needs by reference.
-2. Add fields to `App` for any state it owns.
-3. Call the render function from `App::render()` (in `app.rs`).
-4. If it needs to react to input, add a branch in `message_handler.rs`.
+1. Add a `Msg` variant in `msg.rs` for the user action.
+2. Add a match arm in `update.rs` for the state change.
+3. If async work is needed, add a `Cmd` variant in `cmd.rs`.
+4. Add a render function under `src/tui/components/<name>.rs`.
+5. Route the key/mouse event in `event_handler.rs` → construct the `Msg` → call `update()`.
 
-**Do not** add state to component modules. **Do not** make components own their Rect — the caller decides where they go.
+**Do not** add state to component modules. **Do not** make components own their Rect — the caller decides where they go. **Do not** mutate `App` fields directly outside `update.rs` and `Cmd::execute()`.
 
 ## DisplayLine
 
@@ -134,12 +135,16 @@ Tests live at the bottom of the source file in a `#[cfg(test)] mod tests` block.
 
 ## TEA architecture (The Elm Architecture)
 
-The TUI uses TEA: Model → Update → View.
+The TUI uses TEA: Model → Update → View. This is the system.
 
 - **Model**: `App` struct in `app.rs` — all state lives here.
 - **View**: `App::render()` + stateless component functions in `components/` — pure rendering.
 - **Update**: `update(app, msg) -> Cmd` in `update.rs` — every state change goes through here.
 - **Cmd**: Side effects returned by `update()` in `cmd.rs` — anything async is a Cmd, not an inline mutation.
+
+**42 Msg variants** across: scroll, tabs, sidebar, file viewer, picker, hover, conversation events, modals, input, toast, quit.
+
+**7 Cmd variants**: StartConversation, RunCommand, SendAgentMessage, ResumeSession, RunToolCommand, ApplyReload, Batch.
 
 ### Where to put things
 
