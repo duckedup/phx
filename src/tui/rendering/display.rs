@@ -202,26 +202,35 @@ fn build_chat_display_lines(
 
     match cl.role {
         Role::User => {
+            let bg = theme.user_msg_bg();
             let border_style = Style::default().fg(theme.user_msg_border());
-            let text_style = Style::default().fg(theme.foreground);
+            let text_style = Style::default().fg(theme.foreground).bg(bg);
             let header_style = Style::default()
                 .fg(theme.primary)
+                .bg(bg)
                 .add_modifier(Modifier::BOLD);
+            let fill = Style::default().bg(bg);
 
             lines.push(DisplayLine::multi(vec![
-                (format!("{indent}  "), Style::default()),
-                ("▎".to_string(), border_style),
-                (" you".to_string(), header_style),
+                (indent.to_string(), Style::default()),
+                ("╭─ ".to_string(), border_style),
+                ("you".to_string(), header_style),
             ]));
 
             let wrap_width = content_width.saturating_sub(4);
             for wl in wrap_text(&cl.content, wrap_width) {
                 lines.push(DisplayLine::multi(vec![
-                    (format!("{indent}  "), Style::default()),
-                    ("▎".to_string(), border_style),
-                    (format!(" {wl}"), text_style),
+                    (indent.to_string(), Style::default()),
+                    ("│ ".to_string(), border_style),
+                    (wl, text_style),
+                    (" ".to_string(), fill),
                 ]));
             }
+
+            lines.push(DisplayLine::multi(vec![
+                (indent.to_string(), Style::default()),
+                ("╰─".to_string(), border_style),
+            ]));
             lines.push(DisplayLine::empty());
         }
         Role::Assistant => {
