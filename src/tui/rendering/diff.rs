@@ -135,7 +135,7 @@ fn extract_count(header: &str) -> String {
     header.split(": ").nth(1).unwrap_or("replaced").to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::tui::theme::default_theme;

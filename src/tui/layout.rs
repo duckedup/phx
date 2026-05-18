@@ -71,7 +71,7 @@ pub fn split_sidebar(area: Rect) -> (Rect, Rect) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

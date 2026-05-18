@@ -462,7 +462,7 @@ fn diff_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

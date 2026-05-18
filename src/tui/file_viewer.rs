@@ -683,7 +683,7 @@ fn scope_to_style(stack: &ScopeStack, theme: &Theme) -> Style {
     Style::default().fg(theme.foreground)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 

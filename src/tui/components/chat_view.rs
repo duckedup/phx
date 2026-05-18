@@ -580,7 +580,7 @@ pub fn compute_display_lines(
     lines
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use ratatui::Terminal;
