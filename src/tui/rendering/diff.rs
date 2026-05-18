@@ -58,9 +58,9 @@ pub fn render_diff(
         (format!(" {}", "─".repeat(dash_fill)), border),
     ]));
 
-    // "│ NN − " (7) + old_text + " │ NN + " (7) + new_text
-    let ln_width = 3;
-    let overhead = 2 + ln_width + 2 + 3 + ln_width + 2;
+    // indent + "│ " + "NN " + "− " + old + " │ " + "NN " + "+ " + new
+    let indent_w = display_width(indent);
+    let overhead = indent_w + 2 + 3 + 2 + 3 + 3 + 2;
     let half = content_width.saturating_sub(overhead) / 2;
     let row_count = old_lines.len().max(new_lines.len());
 
