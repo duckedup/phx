@@ -21,34 +21,42 @@ fn find_call_for_result(chat_lines: &[crate::tui::tabs::ChatItem], result_idx: u
     use crate::session::message::Role;
     use crate::tui::tabs::{ChatItem, ChatLine};
 
-    let mut result_count = 0;
-    let mut i = result_idx;
-    while i > 0 {
-        i -= 1;
-        if matches!(
-            &chat_lines[i],
+    let is_result = |item: &ChatItem| {
+        matches!(
+            item,
             ChatItem::Line(ChatLine {
                 role: Role::ToolResult,
                 ..
             })
-        ) {
-            result_count += 1;
-        } else if matches!(
-            &chat_lines[i],
+        )
+    };
+    let is_call = |item: &ChatItem| {
+        matches!(
+            item,
             ChatItem::Line(ChatLine {
                 role: Role::ToolCall,
                 ..
             })
-        ) {
-            if result_count == 0
-                && let ChatItem::Line(cl) = &chat_lines[i]
-            {
-                return cl.content.clone();
-            }
-            result_count -= 1;
-        } else {
-            break;
-        }
+        )
+    };
+
+    let mut result_start = result_idx;
+    while result_start > 0 && is_result(&chat_lines[result_start - 1]) {
+        result_start -= 1;
+    }
+    let position = result_idx - result_start;
+
+    let call_end = result_start;
+    let mut call_start = call_end;
+    while call_start > 0 && is_call(&chat_lines[call_start - 1]) {
+        call_start -= 1;
+    }
+
+    let call_idx = call_start + position;
+    if call_idx < call_end
+        && let ChatItem::Line(cl) = &chat_lines[call_idx]
+    {
+        return cl.content.clone();
     }
     String::new()
 }

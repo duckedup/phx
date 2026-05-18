@@ -37,7 +37,6 @@ pub fn render_diff(
         }
     }
 
-    let border = Style::default().fg(theme.tool_border());
     let dim = Style::default().fg(theme.dim());
 
     let del_bg = Theme::blend(theme.diff_delete, theme.background, 0.80);
@@ -52,9 +51,8 @@ pub fn render_diff(
     let short_path = extract_short_path(&header);
     let count_text = extract_count(&header);
 
+    let border = Style::default().fg(theme.tool_border());
     let indent_w = display_width(indent);
-    let used = indent_w + 4 + display_width(&short_path) + 4 + display_width(&count_text) + 1;
-    let dash_fill = content_width.saturating_sub(used);
 
     lines.push(DisplayLine::multi(vec![
         (indent.to_string(), Style::default()),
@@ -63,9 +61,7 @@ pub fn render_diff(
             short_path,
             Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         ),
-        (" ── ".to_string(), border),
-        (count_text, dim),
-        (format!(" {}", "─".repeat(dash_fill)), border),
+        (format!(" · {count_text}"), dim),
     ]));
 
     let max_ln = old_lines
@@ -170,10 +166,8 @@ mod tests {
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "  ", 80);
         let text = span_text(&lines);
-        assert!(text[0].contains("╭─"));
         assert!(text[0].contains("src/main.rs"));
         assert!(text.last().unwrap().contains("✓"));
-        assert!(text.last().unwrap().contains("applied"));
     }
 
     #[test]

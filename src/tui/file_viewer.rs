@@ -793,7 +793,10 @@ mod tests {
             .map(|parts| parts.iter().map(|(t, _)| t.as_str()).collect::<String>())
             .collect();
 
-        assert!(all_text[0].contains("╭─"), "should have header border");
+        assert!(
+            all_text[0].contains("main.rs"),
+            "should have filename in header"
+        );
         assert!(all_text[0].contains("main.rs"), "should show filename");
         let has_minus = all_text
             .iter()

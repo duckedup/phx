@@ -866,7 +866,9 @@ mod tests {
             .map(|dl| dl.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
             .collect();
 
-        let has_diff_header = all_text.iter().any(|l| l.contains("╭─"));
+        let has_diff_header = all_text
+            .iter()
+            .any(|l| l.contains("− ") || l.contains("+ "));
         assert!(
             has_diff_header,
             "edit diff should render inline with border"
@@ -906,7 +908,9 @@ mod tests {
         let has_compact = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
         assert!(has_compact, "bash result should be a compact card");
 
-        let has_diff_header = all_text.iter().any(|l| l.contains("╭─"));
+        let has_diff_header = all_text
+            .iter()
+            .any(|l| l.contains("− ") || l.contains("+ "));
         assert!(has_diff_header, "edit result should render inline diff");
     }
 }
