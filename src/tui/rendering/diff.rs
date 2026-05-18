@@ -75,14 +75,13 @@ pub fn render_diff(
         .max()
         .unwrap_or(0);
     let ln_w = if max_ln >= 1000 { 4 } else { 3 };
-    let text_w = content_width.saturating_sub(indent_w + 2 + ln_w + 3);
+    let text_w = content_width.saturating_sub(indent_w + ln_w + 3);
 
     for &(ln, text) in &old_lines {
         let expanded = expand_tabs(text);
         let truncated = truncate_to_width(&expanded, text_w);
         lines.push(DisplayLine::multi(vec![
             (indent.to_string(), Style::default()),
-            ("│ ".to_string(), border),
             (format!("{:>width$} ", ln, width = ln_w - 1), del_ln),
             ("− ".to_string(), del_style),
             (truncated, del_text),
@@ -94,7 +93,6 @@ pub fn render_diff(
         let truncated = truncate_to_width(&expanded, text_w);
         lines.push(DisplayLine::multi(vec![
             (indent.to_string(), Style::default()),
-            ("│ ".to_string(), border),
             (format!("{:>width$} ", ln, width = ln_w - 1), add_ln),
             ("+ ".to_string(), add_style),
             (truncated, add_text),
