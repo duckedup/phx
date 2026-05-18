@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 
 use crate::tui::rendering::display::DisplayLine;
-use crate::tui::rendering::measure::{display_width, expand_tabs, pad_to_width, truncate_to_width};
+use crate::tui::rendering::measure::{display_width, expand_tabs, truncate_to_width};
 use crate::tui::theme::Theme;
 
 pub fn is_diff_content(content: &str) -> bool {
@@ -39,13 +39,21 @@ pub fn render_diff(
 
     let border = Style::default().fg(theme.tool_border());
     let dim = Style::default().fg(theme.dim());
-    let del = Style::default().fg(theme.diff_delete);
-    let add = Style::default().fg(theme.diff_add);
+
+    let del_bg = Theme::blend(theme.diff_delete, theme.background, 0.80);
+    let add_bg = Theme::blend(theme.diff_add, theme.background, 0.80);
+    let del_style = Style::default().fg(theme.diff_delete).bg(del_bg);
+    let del_text = Style::default().fg(theme.foreground).bg(del_bg);
+    let del_ln = Style::default().fg(theme.dim()).bg(del_bg);
+    let add_style = Style::default().fg(theme.diff_add).bg(add_bg);
+    let add_text = Style::default().fg(theme.foreground).bg(add_bg);
+    let add_ln = Style::default().fg(theme.dim()).bg(add_bg);
 
     let short_path = extract_short_path(&header);
     let count_text = extract_count(&header);
 
-    let used = 4 + display_width(&short_path) + 4 + display_width(&count_text) + 1;
+    let indent_w = display_width(indent);
+    let used = indent_w + 4 + display_width(&short_path) + 4 + display_width(&count_text) + 1;
     let dash_fill = content_width.saturating_sub(used);
 
     lines.push(DisplayLine::multi(vec![
@@ -60,54 +68,37 @@ pub fn render_diff(
         (format!(" {}", "─".repeat(dash_fill)), border),
     ]));
 
-    let indent_w = display_width(indent);
-    let row_count = old_lines.len().max(new_lines.len());
-
-    // Use 4-digit line number field for files with many lines
     let max_ln = old_lines
         .iter()
         .chain(new_lines.iter())
         .map(|(ln, _)| *ln)
         .max()
         .unwrap_or(0);
-    let ln_digits = if max_ln >= 1000 { 4 } else { 3 };
+    let ln_w = if max_ln >= 1000 { 4 } else { 3 };
+    let text_w = content_width.saturating_sub(indent_w + 2 + ln_w + 3);
 
-    let overhead = indent_w + 2 + ln_digits + 2 + 3 + ln_digits + 2;
-    let half = content_width.saturating_sub(overhead) / 2;
-
-    for i in 0..row_count {
-        let (old_ln, old) = old_lines.get(i).copied().unwrap_or((0, ""));
-        let (new_ln, new) = new_lines.get(i).copied().unwrap_or((0, ""));
-        let old_expanded = expand_tabs(old);
-        let new_expanded = expand_tabs(new);
-
-        let mut parts = vec![
+    for &(ln, text) in &old_lines {
+        let expanded = expand_tabs(text);
+        let truncated = truncate_to_width(&expanded, text_w);
+        lines.push(DisplayLine::multi(vec![
             (indent.to_string(), Style::default()),
             ("│ ".to_string(), border),
-        ];
+            (format!("{:>width$} ", ln, width = ln_w - 1), del_ln),
+            ("− ".to_string(), del_style),
+            (truncated, del_text),
+        ]));
+    }
 
-        if !old.is_empty() {
-            parts.push((format!("{:>width$} ", old_ln, width = ln_digits - 1), dim));
-            let old_text = truncate_to_width(&old_expanded, half);
-            let padded = pad_to_width(&old_text, half);
-            parts.push(("− ".to_string(), del));
-            parts.push((padded, del));
-        } else {
-            parts.push((" ".repeat(ln_digits), Style::default()));
-            parts.push(("  ".to_string(), Style::default()));
-            parts.push((" ".repeat(half), Style::default()));
-        }
-
-        parts.push((" │ ".to_string(), border));
-
-        if !new.is_empty() {
-            parts.push((format!("{:>width$} ", new_ln, width = ln_digits - 1), dim));
-            let new_text = truncate_to_width(&new_expanded, half);
-            parts.push(("+ ".to_string(), add));
-            parts.push((new_text, add));
-        }
-
-        lines.push(DisplayLine::multi(parts));
+    for &(ln, text) in &new_lines {
+        let expanded = expand_tabs(text);
+        let truncated = truncate_to_width(&expanded, text_w);
+        lines.push(DisplayLine::multi(vec![
+            (indent.to_string(), Style::default()),
+            ("│ ".to_string(), border),
+            (format!("{:>width$} ", ln, width = ln_w - 1), add_ln),
+            ("+ ".to_string(), add_style),
+            (truncated, add_text),
+        ]));
     }
 
     lines.push(DisplayLine::multi(vec![
@@ -188,30 +179,34 @@ mod tests {
     }
 
     #[test]
-    fn render_diff_side_by_side_equal_counts() {
+    fn render_diff_stacked_removed_then_added() {
         let theme = default_theme();
         let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n- old2\n+ new1\n+ new2\n";
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "", 80);
         let text = span_text(&lines);
-        // Each row has old and new side by side
+        // Removed lines first
         assert!(text[1].contains("− ") && text[1].contains("old1"));
-        assert!(text[1].contains("+ ") && text[1].contains("new1"));
-        assert!(text[2].contains("old2") && text[2].contains("new2"));
+        assert!(text[2].contains("− ") && text[2].contains("old2"));
+        // Added lines after
+        assert!(text[3].contains("+ ") && text[3].contains("new1"));
+        assert!(text[4].contains("+ ") && text[4].contains("new2"));
     }
 
     #[test]
-    fn render_diff_side_by_side_unequal_counts() {
+    fn render_diff_uses_background_colors() {
         let theme = default_theme();
-        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n- old2\n+ new1\n";
+        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old\n+ new\n";
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "", 80);
-        let text = span_text(&lines);
-        // Row 1: old1 + new1
-        assert!(text[1].contains("old1") && text[1].contains("new1"));
-        // Row 2: old2 + empty right side
-        assert!(text[2].contains("old2"));
-        assert!(!text[2].contains("+ "));
+        // Check that removed line has a background set (not default)
+        let del_line = &lines[1];
+        let has_bg = del_line.spans.iter().any(|(_, s)| s.bg.is_some());
+        assert!(has_bg, "removed line should have background color");
+        // Check added line
+        let add_line = &lines[2];
+        let has_bg = add_line.spans.iter().any(|(_, s)| s.bg.is_some());
+        assert!(has_bg, "added line should have background color");
     }
 
     #[test]

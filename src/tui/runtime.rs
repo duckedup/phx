@@ -379,21 +379,29 @@ async fn run_loop(
                                                 result_line,
                                             )) = tab.chat_lines.get(result_idx)
                                         {
-                                            let tool_name = if result_idx > 0
+                                            let (tool_name, call_summary) = if result_idx > 0
                                                 && let Some(crate::tui::tabs::ChatItem::Line(
                                                     call_line,
                                                 )) = tab.chat_lines.get(result_idx - 1)
                                             {
-                                                call_line
+                                                let name = call_line
                                                     .content
                                                     .split(" > ")
                                                     .next()
                                                     .unwrap_or("tool")
-                                                    .to_string()
+                                                    .to_string();
+                                                (name, call_line.content.clone())
                                             } else {
-                                                "tool".to_string()
+                                                ("tool".to_string(), String::new())
                                             };
-                                            let content = result_line.content.clone();
+                                            let content = if call_summary.is_empty() {
+                                                result_line.content.clone()
+                                            } else {
+                                                format!(
+                                                    "$ {}\n\n{}",
+                                                    call_summary, result_line.content
+                                                )
+                                            };
                                             crate::tui::update::update(
                                                 app,
                                                 Msg::ToolDetailOpen { tool_name, content },

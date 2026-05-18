@@ -223,11 +223,17 @@ pub fn highlight_tool_output(content: &str, theme: &Theme) -> Vec<Vec<(String, S
         .fg(theme.info)
         .add_modifier(Modifier::ITALIC);
 
+    let cmd_style = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+
     let mut result = Vec::new();
     for line in content.lines() {
         let expanded = line.replace('\t', "    ");
         let trimmed = expanded.trim_start();
-        let style = if trimmed.starts_with("error") || trimmed.starts_with("Error") {
+        let style = if trimmed.starts_with("$ ") {
+            cmd_style
+        } else if trimmed.starts_with("error") || trimmed.starts_with("Error") {
             error_style
         } else if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
             add_style
@@ -252,9 +258,16 @@ pub fn highlight_tool_output(content: &str, theme: &Theme) -> Vec<Vec<(String, S
 fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style)>> {
     let border = Style::default().fg(theme.tool_border());
     let dim = Style::default().fg(theme.dim());
-    let del = Style::default().fg(theme.diff_delete);
-    let add = Style::default().fg(theme.diff_add);
     let info_bold = Style::default().fg(theme.info).add_modifier(Modifier::BOLD);
+
+    let del_bg = Theme::blend(theme.diff_delete, theme.background, 0.80);
+    let add_bg = Theme::blend(theme.diff_add, theme.background, 0.80);
+    let del_style = Style::default().fg(theme.diff_delete).bg(del_bg);
+    let del_text = Style::default().fg(theme.foreground).bg(del_bg);
+    let del_ln = Style::default().fg(theme.dim()).bg(del_bg);
+    let add_style = Style::default().fg(theme.diff_add).bg(add_bg);
+    let add_text = Style::default().fg(theme.foreground).bg(add_bg);
+    let add_ln = Style::default().fg(theme.dim()).bg(add_bg);
 
     let mut header = String::new();
     let mut old_lines: Vec<(usize, String)> = Vec::new();
@@ -287,43 +300,22 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
         (count_text.to_string(), dim),
     ]);
 
-    let half = 36;
-    let row_count = old_lines.len().max(new_lines.len());
+    for (ln, text) in &old_lines {
+        result.push(vec![
+            ("│ ".to_string(), border),
+            (format!("{:>3} ", ln), del_ln),
+            ("− ".to_string(), del_style),
+            (text.clone(), del_text),
+        ]);
+    }
 
-    for i in 0..row_count {
-        let (old_ln, old) = old_lines
-            .get(i)
-            .map(|(ln, s)| (*ln, s.as_str()))
-            .unwrap_or((0, ""));
-        let (new_ln, new) = new_lines
-            .get(i)
-            .map(|(ln, s)| (*ln, s.as_str()))
-            .unwrap_or((0, ""));
-
-        let mut parts: Vec<(String, Style)> = vec![("│ ".to_string(), border)];
-
-        if !old.is_empty() {
-            parts.push((format!("{:>3} ", old_ln), dim));
-            let old_text = crate::tui::rendering::measure::truncate_to_width(old, half);
-            let padded = crate::tui::rendering::measure::pad_to_width(&old_text, half);
-            parts.push(("− ".to_string(), del));
-            parts.push((padded, del));
-        } else {
-            parts.push(("    ".to_string(), Style::default()));
-            parts.push(("  ".to_string(), Style::default()));
-            parts.push((" ".repeat(half), Style::default()));
-        }
-
-        parts.push((" │ ".to_string(), border));
-
-        if !new.is_empty() {
-            parts.push((format!("{:>3} ", new_ln), dim));
-            let new_text = crate::tui::rendering::measure::truncate_to_width(new, half);
-            parts.push(("+ ".to_string(), add));
-            parts.push((new_text, add));
-        }
-
-        result.push(parts);
+    for (ln, text) in &new_lines {
+        result.push(vec![
+            ("│ ".to_string(), border),
+            (format!("{:>3} ", ln), add_ln),
+            ("+ ".to_string(), add_style),
+            (text.clone(), add_text),
+        ]);
     }
 
     result.push(vec![
