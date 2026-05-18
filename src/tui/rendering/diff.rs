@@ -58,9 +58,10 @@ pub fn render_diff(
         (format!(" {}", "─".repeat(dash_fill)), border),
     ]));
 
-    // "│ − " (4) + old_text + " │ + " (4) + new_text
-    let overhead = 4 + 4;
-    let half = content_width.saturating_sub(overhead + 2) / 2;
+    // "│ NN − " (7) + old_text + " │ NN + " (7) + new_text
+    let ln_width = 3;
+    let overhead = 2 + ln_width + 2 + 3 + ln_width + 2;
+    let half = content_width.saturating_sub(overhead) / 2;
     let row_count = old_lines.len().max(new_lines.len());
 
     for i in 0..row_count {
@@ -75,11 +76,13 @@ pub fn render_diff(
         ];
 
         if !old.is_empty() {
+            parts.push((format!("{:>2} ", i + 1), dim));
             let old_text = truncate_to_width(&old_expanded, half);
             let padded = pad_to_width(&old_text, half);
             parts.push(("− ".to_string(), del));
             parts.push((padded, del));
         } else {
+            parts.push(("   ".to_string(), Style::default()));
             parts.push(("  ".to_string(), Style::default()));
             parts.push((" ".repeat(half), Style::default()));
         }
@@ -87,6 +90,7 @@ pub fn render_diff(
         parts.push((" │ ".to_string(), border));
 
         if !new.is_empty() {
+            parts.push((format!("{:>2} ", i + 1), dim));
             let new_text = truncate_to_width(&new_expanded, half);
             parts.push(("+ ".to_string(), add));
             parts.push((new_text, add));

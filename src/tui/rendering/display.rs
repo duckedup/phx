@@ -7,7 +7,7 @@ use crate::session::message::Role;
 use crate::tui::rendering::diff::{is_diff_content, render_diff};
 use crate::tui::rendering::helpers::wrap_text;
 use crate::tui::rendering::markdown::render_markdown;
-use crate::tui::rendering::measure::{display_width, expand_tabs};
+use crate::tui::rendering::measure::expand_tabs;
 use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine, WidgetKind};
 use crate::tui::theme::Theme;
 
@@ -195,47 +195,33 @@ fn build_chat_display_lines(
     cl: &ChatLine,
     theme: &Theme,
     content_width: usize,
-    full_content_width: usize,
+    _full_content_width: usize,
     pad: u16,
 ) {
     let indent = " ".repeat(pad as usize);
 
     match cl.role {
         Role::User => {
-            let full_width = full_content_width;
-            let bg = theme.user_msg_bg();
-            let border_style = Style::default().fg(theme.user_msg_border()).bg(bg);
-            let text_style = Style::default().fg(theme.foreground).bg(bg);
+            let border_style = Style::default().fg(theme.user_msg_border());
+            let text_style = Style::default().fg(theme.foreground);
             let header_style = Style::default()
                 .fg(theme.primary)
-                .bg(bg)
                 .add_modifier(Modifier::BOLD);
-            let fill_style = Style::default().bg(bg);
 
-            let header_text = " you";
-            let header_pad = full_width.saturating_sub(1 + display_width(header_text));
             lines.push(DisplayLine::multi(vec![
+                (format!("{indent}  "), Style::default()),
                 ("▎".to_string(), border_style),
-                (header_text.to_string(), header_style),
-                (" ".repeat(header_pad), fill_style),
+                (" you".to_string(), header_style),
             ]));
 
-            let wrap_width = full_width.saturating_sub(3);
+            let wrap_width = content_width.saturating_sub(4);
             for wl in wrap_text(&cl.content, wrap_width) {
-                let line_pad = full_width.saturating_sub(1 + 1 + display_width(&wl));
                 lines.push(DisplayLine::multi(vec![
+                    (format!("{indent}  "), Style::default()),
                     ("▎".to_string(), border_style),
-                    (" ".to_string(), fill_style),
-                    (wl, text_style),
-                    (" ".repeat(line_pad), fill_style),
+                    (format!(" {wl}"), text_style),
                 ]));
             }
-
-            let bottom_pad = full_width.saturating_sub(1);
-            lines.push(DisplayLine::multi(vec![
-                ("▎".to_string(), border_style),
-                (" ".repeat(bottom_pad), fill_style),
-            ]));
             lines.push(DisplayLine::empty());
         }
         Role::Assistant => {

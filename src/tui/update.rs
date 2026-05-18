@@ -195,7 +195,8 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
 
         // ── Tool detail ─────────────────────────────────────────────────
         Msg::ToolDetailOpen { tool_name, content } => {
-            let tab_name = format!("⚙ {tool_name}");
+            let short: String = tool_name.chars().take(20).collect();
+            let tab_name = format!("⚙ {short}");
             app.file_viewer
                 .open_content(&tab_name, &content, &app.theme);
         }

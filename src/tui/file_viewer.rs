@@ -285,7 +285,7 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
         (count_text.to_string(), dim),
     ]);
 
-    let half = 40;
+    let half = 38;
     let row_count = old_lines.len().max(new_lines.len());
 
     for i in 0..row_count {
@@ -295,11 +295,13 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
         let mut parts: Vec<(String, Style)> = vec![("│ ".to_string(), border)];
 
         if !old.is_empty() {
+            parts.push((format!("{:>2} ", i + 1), dim));
             let old_text = crate::tui::rendering::measure::truncate_to_width(old, half);
             let padded = crate::tui::rendering::measure::pad_to_width(&old_text, half);
             parts.push(("− ".to_string(), del));
             parts.push((padded, del));
         } else {
+            parts.push(("   ".to_string(), Style::default()));
             parts.push(("  ".to_string(), Style::default()));
             parts.push((" ".repeat(half), Style::default()));
         }
@@ -307,6 +309,7 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
         parts.push((" │ ".to_string(), border));
 
         if !new.is_empty() {
+            parts.push((format!("{:>2} ", i + 1), dim));
             let new_text = crate::tui::rendering::measure::truncate_to_width(new, half);
             parts.push(("+ ".to_string(), add));
             parts.push((new_text, add));
