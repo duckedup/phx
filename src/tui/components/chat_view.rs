@@ -4,7 +4,10 @@ use ratatui::widgets::Paragraph;
 use crate::session::message::Role;
 use crate::session::orchestration::{ChildInfo, ChildStatus};
 use crate::tui::layout::CHAT_PADDING;
-use crate::tui::rendering::display::{DisplayLine, build_item_display_lines};
+use crate::tui::rendering::diff::{is_diff_content, render_diff};
+use crate::tui::rendering::display::{
+    DisplayLine, build_compact_tool_card, build_item_display_lines, is_tool_call_item,
+};
 use crate::tui::rendering::helpers::{spinner_color, spinner_frame};
 use crate::tui::rendering::markdown::render_markdown;
 use crate::tui::rendering::measure::{display_width, truncate_to_width_raw};
@@ -78,7 +81,8 @@ pub fn render_chat_with_panel(
     while screen_row < visible && line_idx < display_lines.len() {
         let dl = &display_lines[line_idx];
         let abs_idx = line_idx;
-        let is_hovered = hovered_line == Some(abs_idx) && dl.file_path.is_some();
+        let is_hovered = hovered_line == Some(abs_idx)
+            && (dl.file_path.is_some() || dl.tool_detail_idx.is_some());
 
         let full_line = if is_hovered {
             Line::from(
@@ -489,6 +493,48 @@ pub fn compute_display_lines(
                 }
                 i += 1;
             }
+        } else if is_tool_call_item(&items[i]) {
+            let mut call_end = i;
+            while call_end < items.len() && is_tool_call_item(&items[call_end]) {
+                call_end += 1;
+            }
+            let num_calls = call_end - i;
+
+            let mut result_end = call_end;
+            while result_end < items.len() && is_tool_result(&items[result_end]) {
+                result_end += 1;
+            }
+            let num_results = result_end - call_end;
+
+            if num_results == num_calls && num_calls > 0 {
+                let indent = " ".repeat(pad as usize);
+                for k in 0..num_calls {
+                    let call_idx = i + k;
+                    let result_idx = call_end + k;
+                    if let (ChatItem::Line(call), ChatItem::Line(result)) =
+                        (&items[call_idx], &items[result_idx])
+                    {
+                        if is_diff_content(&result.content) {
+                            render_diff(&mut lines, &result.content, theme, &indent, content_width);
+                        } else {
+                            build_compact_tool_card(
+                                &mut lines, call, result, theme, pad, result_idx,
+                            );
+                        }
+                    }
+                }
+                i = result_end;
+            } else {
+                build_item_display_lines(
+                    &mut lines,
+                    &items[i],
+                    theme,
+                    content_width,
+                    full_content_width,
+                    pad,
+                );
+                i += 1;
+            }
         } else {
             build_item_display_lines(
                 &mut lines,
@@ -534,7 +580,7 @@ pub fn compute_display_lines(
     lines
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use ratatui::Terminal;
@@ -667,5 +713,200 @@ mod tests {
         let padded = pad_line(line, 10, bg);
         let width: usize = padded.spans.iter().map(|s| display_width(&s.content)).sum();
         assert_eq!(width, 10);
+    }
+
+    fn make_tab_with_items(items: Vec<ChatItem>) -> Tab {
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        let history = std::env::temp_dir().join("phx-test-display");
+        let mut tab = Tab::new("test".into(), rx, history);
+        tab.chat_lines = items;
+        tab
+    }
+
+    #[test]
+    fn compute_pairs_sequential_tool_call_and_result() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "bash > ls".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "file1\nfile2\nfile3".into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let has_tool_detail = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
+        assert!(has_tool_detail, "compact card should have tool_detail_idx");
+        let detail_line = lines
+            .iter()
+            .find(|dl| dl.tool_detail_idx.is_some())
+            .unwrap();
+        assert_eq!(detail_line.tool_detail_idx, Some(1));
+        let text: String = detail_line.spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(text.contains("bash"), "should show tool name");
+        assert!(text.contains("3 lines"), "should show line count summary");
+    }
+
+    #[test]
+    fn compute_pairs_parallel_tool_calls() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "bash > ls".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "read > src/main.rs".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "file1".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "fn main() {}".into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let detail_lines: Vec<_> = lines
+            .iter()
+            .filter(|dl| dl.tool_detail_idx.is_some())
+            .collect();
+        assert_eq!(detail_lines.len(), 2, "should have 2 compact cards");
+        assert_eq!(detail_lines[0].tool_detail_idx, Some(2));
+        assert_eq!(detail_lines[1].tool_detail_idx, Some(3));
+    }
+
+    #[test]
+    fn compute_unmatched_tool_call_renders_normally() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![ChatItem::Line(ChatLine {
+            role: Role::ToolCall,
+            content: "bash > running".into(),
+        })]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let has_tool_detail = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
+        assert!(
+            !has_tool_detail,
+            "unmatched call should not produce compact card"
+        );
+    }
+
+    #[test]
+    fn compute_partial_parallel_first_call_renders_normally() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "bash > ls".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "read > file".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "output".into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let detail_lines: Vec<_> = lines
+            .iter()
+            .filter(|dl| dl.tool_detail_idx.is_some())
+            .collect();
+        assert_eq!(
+            detail_lines.len(),
+            1,
+            "only the second call should pair with the result"
+        );
+    }
+
+    #[test]
+    fn compute_no_results_renders_all_normally() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "bash > ls".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "read > file".into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let has_tool_detail = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
+        assert!(!has_tool_detail, "no results means no compact cards");
+    }
+
+    #[test]
+    fn compute_edit_diff_renders_inline_not_compact() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "edit > /src/main.rs".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "edited /src/main.rs: replaced 1 occurrence(s)\n- old_line\n+ new_line\n"
+                    .into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let all_text: Vec<String> = lines
+            .iter()
+            .map(|dl| dl.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect();
+
+        let has_diff_header = all_text
+            .iter()
+            .any(|l| l.contains("− ") || l.contains("+ "));
+        assert!(
+            has_diff_header,
+            "edit diff should render inline with border"
+        );
+
+        let has_compact = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
+        assert!(!has_compact, "edit diff should not be a compact card");
+    }
+
+    #[test]
+    fn compute_mixed_edit_and_bash_renders_correctly() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "bash > cargo test".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "edit > /src/lib.rs".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "47 passed\n0 failed".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "edited /src/lib.rs: replaced 1 occurrence(s)\n- old\n+ new\n".into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let all_text: Vec<String> = lines
+            .iter()
+            .map(|dl| dl.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect();
+
+        let has_compact = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
+        assert!(has_compact, "bash result should be a compact card");
+
+        let has_diff_header = all_text
+            .iter()
+            .any(|l| l.contains("− ") || l.contains("+ "));
+        assert!(has_diff_header, "edit result should render inline diff");
     }
 }

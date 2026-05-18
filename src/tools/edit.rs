@@ -102,12 +102,18 @@ impl Tool for EditTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("cannot write {file_path}: {e}")))?;
 
-        let mut diff = format!("edited {file_path}: replaced {count} occurrence(s)\n");
-        for line in old_string.lines() {
-            diff.push_str(&format!("- {line}\n"));
+        let start_line = original
+            .find(old_string)
+            .map(|pos| original[..pos].lines().count())
+            .unwrap_or(1);
+
+        let mut diff =
+            format!("edited {file_path}: replaced {count} occurrence(s) at line {start_line}\n");
+        for (i, line) in old_string.lines().enumerate() {
+            diff.push_str(&format!("- {}:{line}\n", start_line + i));
         }
-        for line in new_string.lines() {
-            diff.push_str(&format!("+ {line}\n"));
+        for (i, line) in new_string.lines().enumerate() {
+            diff.push_str(&format!("+ {}:{line}\n", start_line + i));
         }
         Ok(ToolResult::success(diff))
     }

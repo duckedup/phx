@@ -193,6 +193,14 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
             app.hovered_line = line;
         }
 
+        // ── Tool detail ─────────────────────────────────────────────────
+        Msg::ToolDetailOpen { tool_name, content } => {
+            let short: String = tool_name.chars().take(20).collect();
+            let tab_name = format!("⚙ {short}");
+            app.file_viewer
+                .open_content(&tab_name, &content, &app.theme);
+        }
+
         // ── Modals ───────────────────────────────────────────────────────
         Msg::ToolFormSubmit {
             answers,
@@ -713,6 +721,67 @@ mod tests {
             },
         );
         assert!(app.tabs[0].stream_buffer.is_empty());
+    }
+
+    // ── File viewer ─────────────────────────────────────────────────
+
+    // ── Tool detail ──────────────────────────────────────────────────
+
+    #[test]
+    fn tool_detail_open_creates_viewer_tab() {
+        let mut app = test_app();
+        update(
+            &mut app,
+            Msg::ToolDetailOpen {
+                tool_name: "bash".into(),
+                content: "test output\nline 2".into(),
+            },
+        );
+        assert!(app.file_viewer.is_viewing_file());
+        let tab = app.file_viewer.active_tab().unwrap();
+        assert!(tab.is_virtual);
+        assert_eq!(tab.display_name, "⚙ bash");
+        assert_eq!(tab.total_lines, 2);
+    }
+
+    #[test]
+    fn tool_detail_open_reuses_same_tab() {
+        let mut app = test_app();
+        update(
+            &mut app,
+            Msg::ToolDetailOpen {
+                tool_name: "bash".into(),
+                content: "output 1".into(),
+            },
+        );
+        update(
+            &mut app,
+            Msg::ToolDetailOpen {
+                tool_name: "bash".into(),
+                content: "output 2".into(),
+            },
+        );
+        assert_eq!(app.file_viewer.tabs.len(), 1);
+    }
+
+    #[test]
+    fn tool_detail_open_different_tools_create_separate_tabs() {
+        let mut app = test_app();
+        update(
+            &mut app,
+            Msg::ToolDetailOpen {
+                tool_name: "bash".into(),
+                content: "output".into(),
+            },
+        );
+        update(
+            &mut app,
+            Msg::ToolDetailOpen {
+                tool_name: "read".into(),
+                content: "file content".into(),
+            },
+        );
+        assert_eq!(app.file_viewer.tabs.len(), 2);
     }
 
     // ── File viewer ─────────────────────────────────────────────────

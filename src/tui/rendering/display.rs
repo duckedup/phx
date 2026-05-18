@@ -7,13 +7,14 @@ use crate::session::message::Role;
 use crate::tui::rendering::diff::{is_diff_content, render_diff};
 use crate::tui::rendering::helpers::wrap_text;
 use crate::tui::rendering::markdown::render_markdown;
-use crate::tui::rendering::measure::{display_width, expand_tabs};
+use crate::tui::rendering::measure::expand_tabs;
 use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine, WidgetKind};
 use crate::tui::theme::Theme;
 
 pub struct DisplayLine {
     pub spans: Vec<(String, Style)>,
     pub file_path: Option<PathBuf>,
+    pub tool_detail_idx: Option<usize>,
 }
 
 impl DisplayLine {
@@ -21,6 +22,7 @@ impl DisplayLine {
         Self {
             spans: vec![(text.to_string(), style)],
             file_path: None,
+            tool_detail_idx: None,
         }
     }
 
@@ -28,6 +30,7 @@ impl DisplayLine {
         Self {
             spans: parts,
             file_path: None,
+            tool_detail_idx: None,
         }
     }
 
@@ -35,6 +38,7 @@ impl DisplayLine {
         Self {
             spans: vec![],
             file_path: None,
+            tool_detail_idx: None,
         }
     }
 
@@ -191,46 +195,37 @@ fn build_chat_display_lines(
     cl: &ChatLine,
     theme: &Theme,
     content_width: usize,
-    full_content_width: usize,
+    _full_content_width: usize,
     pad: u16,
 ) {
     let indent = " ".repeat(pad as usize);
 
     match cl.role {
         Role::User => {
-            let full_width = full_content_width;
-            let bg = theme.user_msg_bg();
-            let border_style = Style::default().fg(theme.user_msg_border()).bg(bg);
-            let text_style = Style::default().fg(theme.foreground).bg(bg);
+            let border_style = Style::default().fg(theme.user_msg_border());
+            let text_style = Style::default().fg(theme.foreground);
             let header_style = Style::default()
                 .fg(theme.primary)
-                .bg(bg)
                 .add_modifier(Modifier::BOLD);
-            let fill_style = Style::default().bg(bg);
 
-            let header_text = " you";
-            let header_pad = full_width.saturating_sub(1 + display_width(header_text));
             lines.push(DisplayLine::multi(vec![
-                ("▎".to_string(), border_style),
-                (header_text.to_string(), header_style),
-                (" ".repeat(header_pad), fill_style),
+                (indent.to_string(), Style::default()),
+                ("╭─ ".to_string(), border_style),
+                ("you".to_string(), header_style),
             ]));
 
-            let wrap_width = full_width.saturating_sub(3);
+            let wrap_width = content_width.saturating_sub(4);
             for wl in wrap_text(&cl.content, wrap_width) {
-                let line_pad = full_width.saturating_sub(1 + 1 + display_width(&wl));
                 lines.push(DisplayLine::multi(vec![
-                    ("▎".to_string(), border_style),
-                    (" ".to_string(), fill_style),
+                    (indent.to_string(), Style::default()),
+                    ("│ ".to_string(), border_style),
                     (wl, text_style),
-                    (" ".repeat(line_pad), fill_style),
                 ]));
             }
 
-            let bottom_pad = full_width.saturating_sub(1);
             lines.push(DisplayLine::multi(vec![
-                ("▎".to_string(), border_style),
-                (" ".repeat(bottom_pad), fill_style),
+                (indent.to_string(), Style::default()),
+                ("╰─".to_string(), border_style),
             ]));
             lines.push(DisplayLine::empty());
         }
@@ -375,6 +370,80 @@ fn build_chat_display_lines(
     }
 }
 
+pub fn is_tool_call_item(item: &ChatItem) -> bool {
+    matches!(
+        item,
+        ChatItem::Line(ChatLine {
+            role: Role::ToolCall,
+            ..
+        })
+    )
+}
+
+fn result_summary(content: &str, is_error: bool) -> String {
+    if is_error {
+        let first = content
+            .lines()
+            .next()
+            .unwrap_or("error")
+            .chars()
+            .take(60)
+            .collect::<String>();
+        return first;
+    }
+    let count = content.lines().count();
+    if count == 1 {
+        "1 line".to_string()
+    } else {
+        format!("{count} lines")
+    }
+}
+
+pub fn build_compact_tool_card(
+    lines: &mut Vec<DisplayLine>,
+    call: &ChatLine,
+    result: &ChatLine,
+    theme: &Theme,
+    pad: u16,
+    result_idx: usize,
+) {
+    let indent = " ".repeat(pad as usize);
+    let (tool_name, detail) = call
+        .content
+        .split_once(" > ")
+        .unwrap_or((&call.content, ""));
+    let is_error = result.content.starts_with("Error:")
+        || result.content.starts_with("error:")
+        || result.content.starts_with("unknown tool:");
+
+    let (icon, icon_style) = if is_error {
+        ("✗", Style::default().fg(theme.error))
+    } else {
+        ("✓", Style::default().fg(theme.success))
+    };
+
+    let summary = result_summary(&result.content, is_error);
+
+    let mut parts = vec![
+        (format!("{indent}  "), Style::default()),
+        (format!("{icon} "), icon_style),
+        (
+            tool_name.to_string(),
+            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if !detail.is_empty() {
+        parts.push((format!(" {detail}"), Style::default().fg(theme.foreground)));
+    }
+
+    parts.push((format!(" · {summary}"), Style::default().fg(theme.dim())));
+
+    let mut dl = DisplayLine::multi(parts);
+    dl.tool_detail_idx = Some(result_idx);
+    lines.push(dl);
+}
+
 fn diff_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
     if is_error {
         return Style::default().fg(theme.error);
@@ -390,5 +459,129 @@ fn diff_line_style(line: &str, theme: &Theme, is_error: bool) -> Style {
             .add_modifier(Modifier::ITALIC)
     } else {
         Style::default().fg(theme.dim())
+    }
+}
+
+#[cfg(all(test, not(miri)))]
+mod tests {
+    use super::*;
+
+    fn test_theme() -> Theme {
+        crate::tui::theme::default_theme()
+    }
+
+    #[test]
+    fn display_line_defaults_no_tool_detail() {
+        let dl = DisplayLine::empty();
+        assert!(dl.tool_detail_idx.is_none());
+        assert!(dl.file_path.is_none());
+
+        let dl2 = DisplayLine::styled("hello", Style::default());
+        assert!(dl2.tool_detail_idx.is_none());
+
+        let dl3 = DisplayLine::multi(vec![("x".into(), Style::default())]);
+        assert!(dl3.tool_detail_idx.is_none());
+    }
+
+    #[test]
+    fn is_tool_call_item_detects_tool_calls() {
+        let tc = ChatItem::Line(ChatLine {
+            role: Role::ToolCall,
+            content: "bash > ls".into(),
+        });
+        assert!(is_tool_call_item(&tc));
+
+        let tr = ChatItem::Line(ChatLine {
+            role: Role::ToolResult,
+            content: "output".into(),
+        });
+        assert!(!is_tool_call_item(&tr));
+
+        let user = ChatItem::Line(ChatLine {
+            role: Role::User,
+            content: "hello".into(),
+        });
+        assert!(!is_tool_call_item(&user));
+    }
+
+    #[test]
+    fn result_summary_success() {
+        assert_eq!(result_summary("line1\nline2\nline3", false), "3 lines");
+        assert_eq!(result_summary("single", false), "1 line");
+        assert_eq!(result_summary("a\nb", false), "2 lines");
+    }
+
+    #[test]
+    fn result_summary_error() {
+        let s = result_summary("Error: file not found", true);
+        assert!(s.starts_with("Error:"));
+    }
+
+    #[test]
+    fn compact_tool_card_success() {
+        let theme = test_theme();
+        let call = ChatLine {
+            role: Role::ToolCall,
+            content: "bash > cargo test".into(),
+        };
+        let result = ChatLine {
+            role: Role::ToolResult,
+            content: "test result: ok\n47 passed\n0 failed".into(),
+        };
+        let mut lines = Vec::new();
+        build_compact_tool_card(&mut lines, &call, &result, &theme, 2, 5);
+
+        assert_eq!(lines.len(), 1);
+        let dl = &lines[0];
+        assert_eq!(dl.tool_detail_idx, Some(5));
+
+        let text: String = dl.spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(text.contains("bash"));
+        assert!(text.contains("cargo test"));
+        assert!(text.contains("3 lines"));
+        assert!(text.contains("✓"));
+    }
+
+    #[test]
+    fn compact_tool_card_error() {
+        let theme = test_theme();
+        let call = ChatLine {
+            role: Role::ToolCall,
+            content: "bash > make build".into(),
+        };
+        let result = ChatLine {
+            role: Role::ToolResult,
+            content: "Error: command not found".into(),
+        };
+        let mut lines = Vec::new();
+        build_compact_tool_card(&mut lines, &call, &result, &theme, 2, 3);
+
+        assert_eq!(lines.len(), 1);
+        let dl = &lines[0];
+        assert_eq!(dl.tool_detail_idx, Some(3));
+
+        let text: String = dl.spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(text.contains("✗"));
+        assert!(text.contains("Error:"));
+    }
+
+    #[test]
+    fn compact_tool_card_no_detail() {
+        let theme = test_theme();
+        let call = ChatLine {
+            role: Role::ToolCall,
+            content: "unknown_tool".into(),
+        };
+        let result = ChatLine {
+            role: Role::ToolResult,
+            content: "ok".into(),
+        };
+        let mut lines = Vec::new();
+        build_compact_tool_card(&mut lines, &call, &result, &theme, 2, 0);
+
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(text.contains("unknown_tool"));
+        assert!(!text.contains(" > "));
     }
 }

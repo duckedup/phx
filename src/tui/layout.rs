@@ -70,3 +70,39 @@ pub fn split_sidebar(area: Rect) -> (Rect, Rect) {
         (Rect::default(), area)
     }
 }
+
+#[cfg(all(test, not(miri)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_padded_area_gives_correct_hover_index() {
+        let raw = Rect::new(0, 0, 120, 40);
+        let chat_area = padded_chat_area(raw);
+
+        for target in [0, 1, 5, 10, 20] {
+            let mouse_row = chat_area.y + target as u16;
+            let idx = (mouse_row - chat_area.y) as usize;
+            assert_eq!(idx, target, "single-padded area maps mouse to correct line");
+        }
+    }
+
+    #[test]
+    fn double_padded_area_gives_wrong_hover_index() {
+        let raw = Rect::new(0, 0, 120, 40);
+        let chat_area = padded_chat_area(raw);
+        let double = padded_chat_area(chat_area);
+
+        let target = 5usize;
+        let mouse_row = chat_area.y + target as u16;
+
+        let correct = (mouse_row - chat_area.y) as usize;
+        let wrong = mouse_row.saturating_sub(double.y) as usize;
+
+        assert_eq!(correct, 5);
+        assert_ne!(
+            wrong, 5,
+            "double padding produces wrong index — this was the bug"
+        );
+    }
+}

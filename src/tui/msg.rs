@@ -84,6 +84,12 @@ pub enum Msg {
         response_tx: tokio::sync::oneshot::Sender<Option<String>>,
     },
 
+    // Tool detail panel
+    ToolDetailOpen {
+        tool_name: String,
+        content: String,
+    },
+
     // Modals
     ToolFormSubmit {
         answers: String,

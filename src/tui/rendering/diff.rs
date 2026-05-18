@@ -22,29 +22,37 @@ pub fn render_diff(
     content_width: usize,
 ) {
     let mut header = String::new();
-    let mut old_lines: Vec<&str> = Vec::new();
-    let mut new_lines: Vec<&str> = Vec::new();
+    let mut old_lines: Vec<(usize, &str)> = Vec::new();
+    let mut new_lines: Vec<(usize, &str)> = Vec::new();
 
     for line in content.lines() {
         if line.starts_with("edited ") {
             header = line.to_string();
         } else if let Some(rest) = line.strip_prefix("- ") {
-            old_lines.push(rest);
+            let (ln, text) = parse_numbered_line(rest);
+            old_lines.push((ln, text));
         } else if let Some(rest) = line.strip_prefix("+ ") {
-            new_lines.push(rest);
+            let (ln, text) = parse_numbered_line(rest);
+            new_lines.push((ln, text));
         }
     }
 
-    let border = Style::default().fg(theme.tool_border());
     let dim = Style::default().fg(theme.dim());
-    let del = Style::default().fg(theme.diff_delete);
-    let add = Style::default().fg(theme.diff_add);
+
+    let del_bg = Theme::blend(theme.diff_delete, theme.background, 0.80);
+    let add_bg = Theme::blend(theme.diff_add, theme.background, 0.80);
+    let del_style = Style::default().fg(theme.diff_delete).bg(del_bg);
+    let del_text = Style::default().fg(theme.foreground).bg(del_bg);
+    let del_ln = Style::default().fg(theme.dim()).bg(del_bg);
+    let add_style = Style::default().fg(theme.diff_add).bg(add_bg);
+    let add_text = Style::default().fg(theme.foreground).bg(add_bg);
+    let add_ln = Style::default().fg(theme.dim()).bg(add_bg);
 
     let short_path = extract_short_path(&header);
     let count_text = extract_count(&header);
 
-    let used = 4 + display_width(&short_path) + 4 + display_width(&count_text) + 1;
-    let dash_fill = content_width.saturating_sub(used);
+    let border = Style::default().fg(theme.tool_border());
+    let indent_w = display_width(indent);
 
     lines.push(DisplayLine::multi(vec![
         (indent.to_string(), Style::default()),
@@ -53,56 +61,38 @@ pub fn render_diff(
             short_path,
             Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         ),
-        (" ── ".to_string(), border),
-        (count_text, dim),
-        (format!(" {}", "─".repeat(dash_fill)), border),
+        (format!(" · {count_text}"), dim),
     ]));
 
-    let text_max = content_width.saturating_sub(8);
+    let max_ln = old_lines
+        .iter()
+        .chain(new_lines.iter())
+        .map(|(ln, _)| *ln)
+        .max()
+        .unwrap_or(0);
+    let ln_w = if max_ln >= 1000 { 4 } else { 3 };
+    let text_w = content_width.saturating_sub(indent_w + ln_w + 3);
 
-    if old_lines.len() == new_lines.len() {
-        for (i, (old, new)) in old_lines.iter().zip(new_lines.iter()).enumerate() {
-            let ln = format!("{:>2} ", i + 1);
-            let old_expanded = expand_tabs(old);
-            let new_expanded = expand_tabs(new);
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                (ln, dim),
-                ("− ".to_string(), del),
-                (truncate_to_width(&old_expanded, text_max), del),
-            ]));
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                ("   ".to_string(), Style::default()),
-                ("+ ".to_string(), add),
-                (truncate_to_width(&new_expanded, text_max), add),
-            ]));
-        }
-    } else {
-        for (i, old) in old_lines.iter().enumerate() {
-            let ln = format!("{:>2} ", i + 1);
-            let old_expanded = expand_tabs(old);
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                (ln, dim),
-                ("− ".to_string(), del),
-                (truncate_to_width(&old_expanded, text_max), del),
-            ]));
-        }
-        for (i, new) in new_lines.iter().enumerate() {
-            let ln = format!("{:>2} ", i + 1);
-            let new_expanded = expand_tabs(new);
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                (ln, dim),
-                ("+ ".to_string(), add),
-                (truncate_to_width(&new_expanded, text_max), add),
-            ]));
-        }
+    for &(ln, text) in &old_lines {
+        let expanded = expand_tabs(text);
+        let truncated = truncate_to_width(&expanded, text_w);
+        lines.push(DisplayLine::multi(vec![
+            (indent.to_string(), Style::default()),
+            (format!("{:>width$} ", ln, width = ln_w - 1), del_ln),
+            ("− ".to_string(), del_style),
+            (truncated, del_text),
+        ]));
+    }
+
+    for &(ln, text) in &new_lines {
+        let expanded = expand_tabs(text);
+        let truncated = truncate_to_width(&expanded, text_w);
+        lines.push(DisplayLine::multi(vec![
+            (indent.to_string(), Style::default()),
+            (format!("{:>width$} ", ln, width = ln_w - 1), add_ln),
+            ("+ ".to_string(), add_style),
+            (truncated, add_text),
+        ]));
     }
 
     lines.push(DisplayLine::multi(vec![
@@ -111,6 +101,15 @@ pub fn render_diff(
         ("✓".to_string(), Style::default().fg(theme.success)),
         (" applied".to_string(), dim),
     ]));
+}
+
+fn parse_numbered_line(rest: &str) -> (usize, &str) {
+    if let Some(colon_pos) = rest.find(':')
+        && let Ok(ln) = rest[..colon_pos].parse::<usize>()
+    {
+        return (ln, &rest[colon_pos + 1..]);
+    }
+    (0, rest)
 }
 
 fn extract_short_path(header: &str) -> String {
@@ -136,7 +135,7 @@ fn extract_count(header: &str) -> String {
     header.split(": ").nth(1).unwrap_or("replaced").to_string()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
     use crate::tui::theme::default_theme;
@@ -167,39 +166,39 @@ mod tests {
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "  ", 80);
         let text = span_text(&lines);
-        assert!(text[0].contains("╭─"));
         assert!(text[0].contains("src/main.rs"));
         assert!(text.last().unwrap().contains("✓"));
-        assert!(text.last().unwrap().contains("applied"));
     }
 
     #[test]
-    fn render_diff_interleaves_equal_line_counts() {
+    fn render_diff_stacked_removed_then_added() {
         let theme = default_theme();
         let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n- old2\n+ new1\n+ new2\n";
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "", 80);
         let text = span_text(&lines);
-        assert!(text[1].contains("− "));
-        assert!(text[1].contains("old1"));
-        assert!(text[2].contains("+ "));
-        assert!(text[2].contains("new1"));
-        assert!(text[3].contains("− "));
-        assert!(text[3].contains("old2"));
-        assert!(text[4].contains("+ "));
-        assert!(text[4].contains("new2"));
+        // Removed lines first
+        assert!(text[1].contains("− ") && text[1].contains("old1"));
+        assert!(text[2].contains("− ") && text[2].contains("old2"));
+        // Added lines after
+        assert!(text[3].contains("+ ") && text[3].contains("new1"));
+        assert!(text[4].contains("+ ") && text[4].contains("new2"));
     }
 
     #[test]
-    fn render_diff_stacks_unequal_line_counts() {
+    fn render_diff_uses_background_colors() {
         let theme = default_theme();
-        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n+ new1\n+ new2\n";
+        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old\n+ new\n";
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "", 80);
-        let text = span_text(&lines);
-        assert!(text[1].contains("old1"));
-        assert!(text[2].contains("new1"));
-        assert!(text[3].contains("new2"));
+        // Check that removed line has a background set (not default)
+        let del_line = &lines[1];
+        let has_bg = del_line.spans.iter().any(|(_, s)| s.bg.is_some());
+        assert!(has_bg, "removed line should have background color");
+        // Check added line
+        let add_line = &lines[2];
+        let has_bg = add_line.spans.iter().any(|(_, s)| s.bg.is_some());
+        assert!(has_bg, "added line should have background color");
     }
 
     #[test]

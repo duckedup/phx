@@ -17,6 +17,50 @@ use crate::tui::selection::Selection;
 use crate::tui::tabs::Tab;
 use crate::tui::ui::tool_form;
 
+fn find_call_for_result(chat_lines: &[crate::tui::tabs::ChatItem], result_idx: usize) -> String {
+    use crate::session::message::Role;
+    use crate::tui::tabs::{ChatItem, ChatLine};
+
+    let is_result = |item: &ChatItem| {
+        matches!(
+            item,
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                ..
+            })
+        )
+    };
+    let is_call = |item: &ChatItem| {
+        matches!(
+            item,
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                ..
+            })
+        )
+    };
+
+    let mut result_start = result_idx;
+    while result_start > 0 && is_result(&chat_lines[result_start - 1]) {
+        result_start -= 1;
+    }
+    let position = result_idx - result_start;
+
+    let call_end = result_start;
+    let mut call_start = call_end;
+    while call_start > 0 && is_call(&chat_lines[call_start - 1]) {
+        call_start -= 1;
+    }
+
+    let call_idx = call_start + position;
+    if call_idx < call_end
+        && let ChatItem::Line(cl) = &chat_lines[call_idx]
+    {
+        return cl.content.clone();
+    }
+    String::new()
+}
+
 pub async fn run(
     config: Config,
     _needs_onboarding: bool,
@@ -200,7 +244,16 @@ async fn run_loop(
         if app.toast.as_ref().is_some_and(|t| t.is_expired()) {
             crate::tui::update::update(app, Msg::ToastExpire);
         }
-        app.recompute_display_lines(app.chat_area.width, app.chat_area.width);
+        let narrow_width = if app.show_sidebar() {
+            if let Some(panel) = app.sidebar_area {
+                panel.x.saturating_sub(app.chat_area.x + 1)
+            } else {
+                app.chat_area.width
+            }
+        } else {
+            app.chat_area.width
+        };
+        app.recompute_display_lines(narrow_width, app.chat_area.width);
 
         terminal.draw(|f| app.render(f))?;
 
@@ -345,9 +398,9 @@ async fn run_loop(
                             let r = mouse.row;
                             let c = mouse.column;
 
-                            // Click on hovered file path opens in viewer
+                            // Click on hovered file path or tool detail opens in viewer
                             if !app.file_viewer.is_viewing_file() {
-                                let chat_area = padded_chat_area(app.chat_area);
+                                let chat_area = app.chat_area;
                                 if r >= chat_area.y
                                     && r < chat_area.y + chat_area.height
                                     && c >= chat_area.x
@@ -355,15 +408,41 @@ async fn run_loop(
                                 {
                                     let scroll = app.effective_scroll();
                                     let line_idx = scroll + (r - chat_area.y) as usize;
-                                    if let Some(dl) = app.display_lines.get(line_idx)
-                                        && let Some(path) = &dl.file_path
-                                        && path.exists()
-                                    {
-                                        crate::tui::update::update(
-                                            app,
-                                            Msg::FileViewerOpenFile(path.clone()),
-                                        );
-                                        continue;
+                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                        if let Some(path) = &dl.file_path {
+                                            if path.exists() {
+                                                crate::tui::update::update(
+                                                    app,
+                                                    Msg::FileViewerOpenFile(path.clone()),
+                                                );
+                                                continue;
+                                            }
+                                        } else if let Some(result_idx) = dl.tool_detail_idx
+                                            && let Some(tab) = app.current_tab()
+                                            && let Some(crate::tui::tabs::ChatItem::Line(
+                                                result_line,
+                                            )) = tab.chat_lines.get(result_idx)
+                                        {
+                                            let call_summary =
+                                                find_call_for_result(&tab.chat_lines, result_idx);
+                                            let tool_name = format!(
+                                                "#{result_idx} {}",
+                                                call_summary.split(" > ").next().unwrap_or("tool")
+                                            );
+                                            let content = if call_summary.is_empty() {
+                                                result_line.content.clone()
+                                            } else {
+                                                format!(
+                                                    "$ {}\n\n{}",
+                                                    call_summary, result_line.content
+                                                )
+                                            };
+                                            crate::tui::update::update(
+                                                app,
+                                                Msg::ToolDetailOpen { tool_name, content },
+                                            );
+                                            continue;
+                                        }
                                     }
                                 }
                             }
@@ -510,7 +589,7 @@ async fn run_loop(
                             crate::tui::update::update(app, Msg::FileViewerHoverClose(hover_close));
 
                             let hovered = if !app.file_viewer.is_viewing_file() {
-                                let chat_area = padded_chat_area(app.chat_area);
+                                let chat_area = app.chat_area;
                                 if mouse.row >= chat_area.y
                                     && mouse.row < chat_area.y + chat_area.height
                                     && mouse.column >= chat_area.x
@@ -518,13 +597,12 @@ async fn run_loop(
                                 {
                                     let scroll = app.effective_scroll();
                                     let line_idx = scroll + (mouse.row - chat_area.y) as usize;
-                                    if app
-                                        .display_lines
-                                        .get(line_idx)
-                                        .and_then(|dl| dl.file_path.as_ref())
-                                        .is_some()
-                                    {
-                                        Some(line_idx)
+                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                        if dl.file_path.is_some() || dl.tool_detail_idx.is_some() {
+                                            Some(line_idx)
+                                        } else {
+                                            None
+                                        }
                                     } else {
                                         None
                                     }
