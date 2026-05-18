@@ -4,6 +4,7 @@ use ratatui::widgets::Paragraph;
 use crate::session::message::Role;
 use crate::session::orchestration::{ChildInfo, ChildStatus};
 use crate::tui::layout::CHAT_PADDING;
+use crate::tui::rendering::diff::{is_diff_content, render_diff};
 use crate::tui::rendering::display::{
     DisplayLine, build_compact_tool_card, build_item_display_lines, is_tool_call_item,
 };
@@ -509,13 +510,20 @@ pub fn compute_display_lines(
                 if num_calls > 1 {
                     lines.push(DisplayLine::empty());
                 }
+                let indent = " ".repeat(pad as usize);
                 for k in 0..num_calls {
                     let call_idx = i + k;
                     let result_idx = call_end + k;
                     if let (ChatItem::Line(call), ChatItem::Line(result)) =
                         (&items[call_idx], &items[result_idx])
                     {
-                        build_compact_tool_card(&mut lines, call, result, theme, pad, result_idx);
+                        if is_diff_content(&result.content) {
+                            render_diff(&mut lines, &result.content, theme, &indent, content_width);
+                        } else {
+                            build_compact_tool_card(
+                                &mut lines, call, result, theme, pad, result_idx,
+                            );
+                        }
                     }
                 }
                 lines.push(DisplayLine::empty());
@@ -836,5 +844,69 @@ mod tests {
         let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
         let has_tool_detail = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
         assert!(!has_tool_detail, "no results means no compact cards");
+    }
+
+    #[test]
+    fn compute_edit_diff_renders_inline_not_compact() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "edit > /src/main.rs".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "edited /src/main.rs: replaced 1 occurrence(s)\n- old_line\n+ new_line\n"
+                    .into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let all_text: Vec<String> = lines
+            .iter()
+            .map(|dl| dl.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect();
+
+        let has_diff_header = all_text.iter().any(|l| l.contains("╭─"));
+        assert!(
+            has_diff_header,
+            "edit diff should render inline with border"
+        );
+
+        let has_compact = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
+        assert!(!has_compact, "edit diff should not be a compact card");
+    }
+
+    #[test]
+    fn compute_mixed_edit_and_bash_renders_correctly() {
+        let theme = crate::tui::theme::default_theme();
+        let tab = make_tab_with_items(vec![
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "bash > cargo test".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                content: "edit > /src/lib.rs".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "47 passed\n0 failed".into(),
+            }),
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                content: "edited /src/lib.rs: replaced 1 occurrence(s)\n- old\n+ new\n".into(),
+            }),
+        ]);
+        let lines = compute_display_lines(Some(&tab), &theme, false, 0, (80, 80), 0, &[]);
+        let all_text: Vec<String> = lines
+            .iter()
+            .map(|dl| dl.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+            .collect();
+
+        let has_compact = lines.iter().any(|dl| dl.tool_detail_idx.is_some());
+        assert!(has_compact, "bash result should be a compact card");
+
+        let has_diff_header = all_text.iter().any(|l| l.contains("╭─"));
+        assert!(has_diff_header, "edit result should render inline diff");
     }
 }
