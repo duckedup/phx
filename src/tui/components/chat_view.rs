@@ -507,9 +507,6 @@ pub fn compute_display_lines(
             let num_results = result_end - call_end;
 
             if num_results == num_calls && num_calls > 0 {
-                if num_calls > 1 {
-                    lines.push(DisplayLine::empty());
-                }
                 let indent = " ".repeat(pad as usize);
                 for k in 0..num_calls {
                     let call_idx = i + k;
@@ -526,7 +523,6 @@ pub fn compute_display_lines(
                         }
                     }
                 }
-                lines.push(DisplayLine::empty());
                 i = result_end;
             } else {
                 build_item_display_lines(
