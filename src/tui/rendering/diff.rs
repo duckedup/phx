@@ -22,16 +22,18 @@ pub fn render_diff(
     content_width: usize,
 ) {
     let mut header = String::new();
-    let mut old_lines: Vec<&str> = Vec::new();
-    let mut new_lines: Vec<&str> = Vec::new();
+    let mut old_lines: Vec<(usize, &str)> = Vec::new();
+    let mut new_lines: Vec<(usize, &str)> = Vec::new();
 
     for line in content.lines() {
         if line.starts_with("edited ") {
             header = line.to_string();
         } else if let Some(rest) = line.strip_prefix("- ") {
-            old_lines.push(rest);
+            let (ln, text) = parse_numbered_line(rest);
+            old_lines.push((ln, text));
         } else if let Some(rest) = line.strip_prefix("+ ") {
-            new_lines.push(rest);
+            let (ln, text) = parse_numbered_line(rest);
+            new_lines.push((ln, text));
         }
     }
 
@@ -58,15 +60,24 @@ pub fn render_diff(
         (format!(" {}", "─".repeat(dash_fill)), border),
     ]));
 
-    // indent + "│ " + "NN " + "− " + old + " │ " + "NN " + "+ " + new
     let indent_w = display_width(indent);
-    let overhead = indent_w + 2 + 3 + 2 + 3 + 3 + 2;
-    let half = content_width.saturating_sub(overhead) / 2;
     let row_count = old_lines.len().max(new_lines.len());
 
+    // Use 4-digit line number field for files with many lines
+    let max_ln = old_lines
+        .iter()
+        .chain(new_lines.iter())
+        .map(|(ln, _)| *ln)
+        .max()
+        .unwrap_or(0);
+    let ln_digits = if max_ln >= 1000 { 4 } else { 3 };
+
+    let overhead = indent_w + 2 + ln_digits + 2 + 3 + ln_digits + 2;
+    let half = content_width.saturating_sub(overhead) / 2;
+
     for i in 0..row_count {
-        let old = old_lines.get(i).copied().unwrap_or("");
-        let new = new_lines.get(i).copied().unwrap_or("");
+        let (old_ln, old) = old_lines.get(i).copied().unwrap_or((0, ""));
+        let (new_ln, new) = new_lines.get(i).copied().unwrap_or((0, ""));
         let old_expanded = expand_tabs(old);
         let new_expanded = expand_tabs(new);
 
@@ -76,13 +87,13 @@ pub fn render_diff(
         ];
 
         if !old.is_empty() {
-            parts.push((format!("{:>2} ", i + 1), dim));
+            parts.push((format!("{:>width$} ", old_ln, width = ln_digits - 1), dim));
             let old_text = truncate_to_width(&old_expanded, half);
             let padded = pad_to_width(&old_text, half);
             parts.push(("− ".to_string(), del));
             parts.push((padded, del));
         } else {
-            parts.push(("   ".to_string(), Style::default()));
+            parts.push((" ".repeat(ln_digits), Style::default()));
             parts.push(("  ".to_string(), Style::default()));
             parts.push((" ".repeat(half), Style::default()));
         }
@@ -90,7 +101,7 @@ pub fn render_diff(
         parts.push((" │ ".to_string(), border));
 
         if !new.is_empty() {
-            parts.push((format!("{:>2} ", i + 1), dim));
+            parts.push((format!("{:>width$} ", new_ln, width = ln_digits - 1), dim));
             let new_text = truncate_to_width(&new_expanded, half);
             parts.push(("+ ".to_string(), add));
             parts.push((new_text, add));
@@ -105,6 +116,15 @@ pub fn render_diff(
         ("✓".to_string(), Style::default().fg(theme.success)),
         (" applied".to_string(), dim),
     ]));
+}
+
+fn parse_numbered_line(rest: &str) -> (usize, &str) {
+    if let Some(colon_pos) = rest.find(':')
+        && let Ok(ln) = rest[..colon_pos].parse::<usize>()
+    {
+        return (ln, &rest[colon_pos + 1..]);
+    }
+    (0, rest)
 }
 
 fn extract_short_path(header: &str) -> String {

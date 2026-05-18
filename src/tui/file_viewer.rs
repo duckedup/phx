@@ -257,16 +257,18 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
     let info_bold = Style::default().fg(theme.info).add_modifier(Modifier::BOLD);
 
     let mut header = String::new();
-    let mut old_lines: Vec<String> = Vec::new();
-    let mut new_lines: Vec<String> = Vec::new();
+    let mut old_lines: Vec<(usize, String)> = Vec::new();
+    let mut new_lines: Vec<(usize, String)> = Vec::new();
 
     for line in content.lines() {
         if line.starts_with("edited ") {
             header = line.to_string();
         } else if let Some(rest) = line.strip_prefix("- ") {
-            old_lines.push(rest.replace('\t', "    "));
+            let (ln, text) = parse_diff_line_number(rest);
+            old_lines.push((ln, text.replace('\t', "    ")));
         } else if let Some(rest) = line.strip_prefix("+ ") {
-            new_lines.push(rest.replace('\t', "    "));
+            let (ln, text) = parse_diff_line_number(rest);
+            new_lines.push((ln, text.replace('\t', "    ")));
         }
     }
 
@@ -285,23 +287,29 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
         (count_text.to_string(), dim),
     ]);
 
-    let half = 38;
+    let half = 36;
     let row_count = old_lines.len().max(new_lines.len());
 
     for i in 0..row_count {
-        let old = old_lines.get(i).map(|s| s.as_str()).unwrap_or("");
-        let new = new_lines.get(i).map(|s| s.as_str()).unwrap_or("");
+        let (old_ln, old) = old_lines
+            .get(i)
+            .map(|(ln, s)| (*ln, s.as_str()))
+            .unwrap_or((0, ""));
+        let (new_ln, new) = new_lines
+            .get(i)
+            .map(|(ln, s)| (*ln, s.as_str()))
+            .unwrap_or((0, ""));
 
         let mut parts: Vec<(String, Style)> = vec![("│ ".to_string(), border)];
 
         if !old.is_empty() {
-            parts.push((format!("{:>2} ", i + 1), dim));
+            parts.push((format!("{:>3} ", old_ln), dim));
             let old_text = crate::tui::rendering::measure::truncate_to_width(old, half);
             let padded = crate::tui::rendering::measure::pad_to_width(&old_text, half);
             parts.push(("− ".to_string(), del));
             parts.push((padded, del));
         } else {
-            parts.push(("   ".to_string(), Style::default()));
+            parts.push(("    ".to_string(), Style::default()));
             parts.push(("  ".to_string(), Style::default()));
             parts.push((" ".repeat(half), Style::default()));
         }
@@ -309,7 +317,7 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
         parts.push((" │ ".to_string(), border));
 
         if !new.is_empty() {
-            parts.push((format!("{:>2} ", i + 1), dim));
+            parts.push((format!("{:>3} ", new_ln), dim));
             let new_text = crate::tui::rendering::measure::truncate_to_width(new, half);
             parts.push(("+ ".to_string(), add));
             parts.push((new_text, add));
@@ -325,6 +333,15 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
     ]);
 
     result
+}
+
+fn parse_diff_line_number(rest: &str) -> (usize, &str) {
+    if let Some(colon_pos) = rest.find(':')
+        && let Ok(ln) = rest[..colon_pos].parse::<usize>()
+    {
+        return (ln, &rest[colon_pos + 1..]);
+    }
+    (0, rest)
 }
 
 // ---------------------------------------------------------------------------
