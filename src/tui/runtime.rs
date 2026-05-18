@@ -17,6 +17,42 @@ use crate::tui::selection::Selection;
 use crate::tui::tabs::Tab;
 use crate::tui::ui::tool_form;
 
+fn find_call_for_result(chat_lines: &[crate::tui::tabs::ChatItem], result_idx: usize) -> String {
+    use crate::session::message::Role;
+    use crate::tui::tabs::{ChatItem, ChatLine};
+
+    let mut result_count = 0;
+    let mut i = result_idx;
+    while i > 0 {
+        i -= 1;
+        if matches!(
+            &chat_lines[i],
+            ChatItem::Line(ChatLine {
+                role: Role::ToolResult,
+                ..
+            })
+        ) {
+            result_count += 1;
+        } else if matches!(
+            &chat_lines[i],
+            ChatItem::Line(ChatLine {
+                role: Role::ToolCall,
+                ..
+            })
+        ) {
+            if result_count == 0
+                && let ChatItem::Line(cl) = &chat_lines[i]
+            {
+                return cl.content.clone();
+            }
+            result_count -= 1;
+        } else {
+            break;
+        }
+    }
+    String::new()
+}
+
 pub async fn run(
     config: Config,
     _needs_onboarding: bool,
@@ -379,21 +415,12 @@ async fn run_loop(
                                                 result_line,
                                             )) = tab.chat_lines.get(result_idx)
                                         {
-                                            let (tool_name, call_summary) = if result_idx > 0
-                                                && let Some(crate::tui::tabs::ChatItem::Line(
-                                                    call_line,
-                                                )) = tab.chat_lines.get(result_idx - 1)
-                                            {
-                                                let name = call_line
-                                                    .content
-                                                    .split(" > ")
-                                                    .next()
-                                                    .unwrap_or("tool")
-                                                    .to_string();
-                                                (name, call_line.content.clone())
-                                            } else {
-                                                ("tool".to_string(), String::new())
-                                            };
+                                            let call_summary =
+                                                find_call_for_result(&tab.chat_lines, result_idx);
+                                            let tool_name = format!(
+                                                "#{result_idx} {}",
+                                                call_summary.split(" > ").next().unwrap_or("tool")
+                                            );
                                             let content = if call_summary.is_empty() {
                                                 result_line.content.clone()
                                             } else {
