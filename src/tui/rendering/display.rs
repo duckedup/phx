@@ -202,14 +202,11 @@ fn build_chat_display_lines(
 
     match cl.role {
         Role::User => {
-            let bg = theme.user_msg_bg();
             let border_style = Style::default().fg(theme.user_msg_border());
-            let text_style = Style::default().fg(theme.foreground).bg(bg);
+            let text_style = Style::default().fg(theme.foreground);
             let header_style = Style::default()
                 .fg(theme.primary)
-                .bg(bg)
                 .add_modifier(Modifier::BOLD);
-            let fill = Style::default().bg(bg);
 
             lines.push(DisplayLine::multi(vec![
                 (indent.to_string(), Style::default()),
@@ -223,7 +220,6 @@ fn build_chat_display_lines(
                     (indent.to_string(), Style::default()),
                     ("│ ".to_string(), border_style),
                     (wl, text_style),
-                    (" ".to_string(), fill),
                 ]));
             }
 
