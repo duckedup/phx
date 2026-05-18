@@ -284,39 +284,37 @@ fn highlight_diff_output(content: &str, theme: &Theme) -> Vec<Vec<(String, Style
         (" ── ".to_string(), border),
         (count_text.to_string(), dim),
     ]);
-    result.push(vec![("│".to_string(), border)]);
 
-    if old_lines.len() == new_lines.len() {
-        for (old, new) in old_lines.iter().zip(new_lines.iter()) {
-            result.push(vec![
-                ("│  ".to_string(), border),
-                ("− ".to_string(), del),
-                (old.clone(), del),
-            ]);
-            result.push(vec![
-                ("│  ".to_string(), border),
-                ("+ ".to_string(), add),
-                (new.clone(), add),
-            ]);
+    let half = 40;
+    let row_count = old_lines.len().max(new_lines.len());
+
+    for i in 0..row_count {
+        let old = old_lines.get(i).map(|s| s.as_str()).unwrap_or("");
+        let new = new_lines.get(i).map(|s| s.as_str()).unwrap_or("");
+
+        let mut parts: Vec<(String, Style)> = vec![("│ ".to_string(), border)];
+
+        if !old.is_empty() {
+            let old_text = crate::tui::rendering::measure::truncate_to_width(old, half);
+            let padded = crate::tui::rendering::measure::pad_to_width(&old_text, half);
+            parts.push(("− ".to_string(), del));
+            parts.push((padded, del));
+        } else {
+            parts.push(("  ".to_string(), Style::default()));
+            parts.push((" ".repeat(half), Style::default()));
         }
-    } else {
-        for old in &old_lines {
-            result.push(vec![
-                ("│  ".to_string(), border),
-                ("− ".to_string(), del),
-                (old.clone(), del),
-            ]);
+
+        parts.push((" │ ".to_string(), border));
+
+        if !new.is_empty() {
+            let new_text = crate::tui::rendering::measure::truncate_to_width(new, half);
+            parts.push(("+ ".to_string(), add));
+            parts.push((new_text, add));
         }
-        for new in &new_lines {
-            result.push(vec![
-                ("│  ".to_string(), border),
-                ("+ ".to_string(), add),
-                (new.clone(), add),
-            ]);
-        }
+
+        result.push(parts);
     }
 
-    result.push(vec![("│".to_string(), border)]);
     result.push(vec![
         ("╰─ ".to_string(), border),
         ("✓".to_string(), Style::default().fg(theme.success)),

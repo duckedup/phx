@@ -200,7 +200,12 @@ async fn run_loop(
         if app.toast.as_ref().is_some_and(|t| t.is_expired()) {
             crate::tui::update::update(app, Msg::ToastExpire);
         }
-        app.recompute_display_lines(app.chat_area.width, app.chat_area.width);
+        let narrow_width = if let Some(panel) = app.sidebar_area {
+            panel.x.saturating_sub(app.chat_area.x + 1)
+        } else {
+            app.chat_area.width
+        };
+        app.recompute_display_lines(narrow_width, app.chat_area.width);
 
         terminal.draw(|f| app.render(f))?;
 
@@ -619,6 +624,11 @@ pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::S
     app.chat_area_height = padded.height;
     app.chat_area = padded;
     app.frame_tick = app.frame_tick.wrapping_add(1);
-    app.recompute_display_lines(padded.width, padded.width);
+    let narrow = if let Some(panel) = app.sidebar_area {
+        panel.x.saturating_sub(padded.x + 1)
+    } else {
+        padded.width
+    };
+    app.recompute_display_lines(narrow, padded.width);
     let _ = terminal.draw(|f| app.render(f));
 }

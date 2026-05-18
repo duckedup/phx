@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 
 use crate::tui::rendering::display::DisplayLine;
-use crate::tui::rendering::measure::{display_width, expand_tabs, truncate_to_width};
+use crate::tui::rendering::measure::{display_width, expand_tabs, pad_to_width, truncate_to_width};
 use crate::tui::theme::Theme;
 
 pub fn is_diff_content(content: &str) -> bool {
@@ -58,51 +58,41 @@ pub fn render_diff(
         (format!(" {}", "─".repeat(dash_fill)), border),
     ]));
 
-    let text_max = content_width.saturating_sub(8);
+    // "│ − " (4) + old_text + " │ + " (4) + new_text
+    let overhead = 4 + 4;
+    let half = content_width.saturating_sub(overhead + 2) / 2;
+    let row_count = old_lines.len().max(new_lines.len());
 
-    if old_lines.len() == new_lines.len() {
-        for (i, (old, new)) in old_lines.iter().zip(new_lines.iter()).enumerate() {
-            let ln = format!("{:>2} ", i + 1);
-            let old_expanded = expand_tabs(old);
-            let new_expanded = expand_tabs(new);
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                (ln, dim),
-                ("− ".to_string(), del),
-                (truncate_to_width(&old_expanded, text_max), del),
-            ]));
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                ("   ".to_string(), Style::default()),
-                ("+ ".to_string(), add),
-                (truncate_to_width(&new_expanded, text_max), add),
-            ]));
+    for i in 0..row_count {
+        let old = old_lines.get(i).copied().unwrap_or("");
+        let new = new_lines.get(i).copied().unwrap_or("");
+        let old_expanded = expand_tabs(old);
+        let new_expanded = expand_tabs(new);
+
+        let mut parts = vec![
+            (indent.to_string(), Style::default()),
+            ("│ ".to_string(), border),
+        ];
+
+        if !old.is_empty() {
+            let old_text = truncate_to_width(&old_expanded, half);
+            let padded = pad_to_width(&old_text, half);
+            parts.push(("− ".to_string(), del));
+            parts.push((padded, del));
+        } else {
+            parts.push(("  ".to_string(), Style::default()));
+            parts.push((" ".repeat(half), Style::default()));
         }
-    } else {
-        for (i, old) in old_lines.iter().enumerate() {
-            let ln = format!("{:>2} ", i + 1);
-            let old_expanded = expand_tabs(old);
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                (ln, dim),
-                ("− ".to_string(), del),
-                (truncate_to_width(&old_expanded, text_max), del),
-            ]));
+
+        parts.push((" │ ".to_string(), border));
+
+        if !new.is_empty() {
+            let new_text = truncate_to_width(&new_expanded, half);
+            parts.push(("+ ".to_string(), add));
+            parts.push((new_text, add));
         }
-        for (i, new) in new_lines.iter().enumerate() {
-            let ln = format!("{:>2} ", i + 1);
-            let new_expanded = expand_tabs(new);
-            lines.push(DisplayLine::multi(vec![
-                (indent.to_string(), Style::default()),
-                ("│ ".to_string(), border),
-                (ln, dim),
-                ("+ ".to_string(), add),
-                (truncate_to_width(&new_expanded, text_max), add),
-            ]));
-        }
+
+        lines.push(DisplayLine::multi(parts));
     }
 
     lines.push(DisplayLine::multi(vec![
@@ -174,32 +164,30 @@ mod tests {
     }
 
     #[test]
-    fn render_diff_interleaves_equal_line_counts() {
+    fn render_diff_side_by_side_equal_counts() {
         let theme = default_theme();
         let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n- old2\n+ new1\n+ new2\n";
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "", 80);
         let text = span_text(&lines);
-        assert!(text[1].contains("− "));
-        assert!(text[1].contains("old1"));
-        assert!(text[2].contains("+ "));
-        assert!(text[2].contains("new1"));
-        assert!(text[3].contains("− "));
-        assert!(text[3].contains("old2"));
-        assert!(text[4].contains("+ "));
-        assert!(text[4].contains("new2"));
+        // Each row has old and new side by side
+        assert!(text[1].contains("− ") && text[1].contains("old1"));
+        assert!(text[1].contains("+ ") && text[1].contains("new1"));
+        assert!(text[2].contains("old2") && text[2].contains("new2"));
     }
 
     #[test]
-    fn render_diff_stacks_unequal_line_counts() {
+    fn render_diff_side_by_side_unequal_counts() {
         let theme = default_theme();
-        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n+ new1\n+ new2\n";
+        let content = "edited /f.rs: replaced 1 occurrence(s)\n- old1\n- old2\n+ new1\n";
         let mut lines = Vec::new();
         render_diff(&mut lines, content, &theme, "", 80);
         let text = span_text(&lines);
-        assert!(text[1].contains("old1"));
-        assert!(text[2].contains("new1"));
-        assert!(text[3].contains("new2"));
+        // Row 1: old1 + new1
+        assert!(text[1].contains("old1") && text[1].contains("new1"));
+        // Row 2: old2 + empty right side
+        assert!(text[2].contains("old2"));
+        assert!(!text[2].contains("+ "));
     }
 
     #[test]
