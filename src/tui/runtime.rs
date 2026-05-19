@@ -8,7 +8,7 @@ use crate::config::schema::Config;
 use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::tui::app::{App, command_source_tag};
 use crate::tui::cmd::Cmd;
-use crate::tui::components::{modal_picker, sidebar};
+use crate::tui::components::{chat_view, modal_picker, sidebar};
 use crate::tui::file_viewer;
 use crate::tui::layout::{self, padded_chat_area};
 use crate::tui::msg::Msg;
@@ -409,8 +409,15 @@ async fn run_loop(
                                     && c < chat_area.x + chat_area.width
                                 {
                                     let scroll = app.effective_scroll();
-                                    let line_idx = scroll + (r - chat_area.y) as usize;
-                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                    let screen_row = (r - chat_area.y) as usize;
+                                    if let Some(line_idx) = chat_view::screen_row_to_display_line(
+                                        chat_area,
+                                        &app.display_lines,
+                                        scroll,
+                                        app.sidebar_area,
+                                        screen_row,
+                                    ) {
+                                        let dl = &app.display_lines[line_idx];
                                         if let Some(path) = &dl.file_path {
                                             if path.exists() {
                                                 crate::tui::update::update(
@@ -598,16 +605,22 @@ async fn run_loop(
                                     && mouse.column < chat_area.x + chat_area.width
                                 {
                                     let scroll = app.effective_scroll();
-                                    let line_idx = scroll + (mouse.row - chat_area.y) as usize;
-                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                    let screen_row = (mouse.row - chat_area.y) as usize;
+                                    let line_idx = chat_view::screen_row_to_display_line(
+                                        chat_area,
+                                        &app.display_lines,
+                                        scroll,
+                                        app.sidebar_area,
+                                        screen_row,
+                                    );
+                                    line_idx.and_then(|idx| {
+                                        let dl = &app.display_lines[idx];
                                         if dl.file_path.is_some() || dl.tool_detail_idx.is_some() {
-                                            Some(line_idx)
+                                            Some(idx)
                                         } else {
                                             None
                                         }
-                                    } else {
-                                        None
-                                    }
+                                    })
                                 } else {
                                     None
                                 }

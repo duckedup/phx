@@ -166,6 +166,86 @@ pub fn render_chat_with_panel(
     }
 }
 
+/// Map a screen row (relative to `area.y`) to a display-line index, accounting
+/// for lines that wrap across multiple screen rows — the same wrapping logic
+/// used by `render_chat_with_panel`.
+///
+/// Returns `None` if the screen row falls past the end of the display lines.
+pub fn screen_row_to_display_line(
+    area: Rect,
+    display_lines: &[DisplayLine],
+    effective_scroll: usize,
+    panel: Option<Rect>,
+    target_screen_row: usize,
+) -> Option<usize> {
+    let visible = area.height as usize;
+    let full_width = area.width as usize;
+
+    let row_width_at = |y: u16| -> usize {
+        if let Some(p) = panel {
+            if y >= p.y && y < p.y + p.height {
+                (p.x.saturating_sub(area.x + 1)) as usize
+            } else {
+                full_width
+            }
+        } else {
+            full_width
+        }
+    };
+
+    let mut screen_row: usize = 0;
+    let mut line_idx = effective_scroll;
+
+    while screen_row < visible && line_idx < display_lines.len() {
+        let dl = &display_lines[line_idx];
+        let total_width: usize = dl.spans.iter().map(|(t, _)| display_width(t)).sum();
+
+        let y = area.y + screen_row as u16;
+        let rw = row_width_at(y);
+
+        if rw == 0 || total_width == 0 {
+            if screen_row == target_screen_row {
+                return Some(line_idx);
+            }
+            screen_row += 1;
+            line_idx += 1;
+            continue;
+        }
+
+        if total_width <= rw {
+            if screen_row == target_screen_row {
+                return Some(line_idx);
+            }
+            screen_row += 1;
+        } else {
+            // This display line wraps across multiple screen rows.
+            let first_screen_row = screen_row;
+            let mut remaining_width = total_width;
+            while screen_row < visible && remaining_width > 0 {
+                let y = area.y + screen_row as u16;
+                let rw = row_width_at(y);
+                if rw == 0 {
+                    screen_row += 1;
+                    break;
+                }
+                if remaining_width <= rw {
+                    screen_row += 1;
+                    break;
+                }
+                remaining_width = remaining_width.saturating_sub(rw);
+                screen_row += 1;
+            }
+            // If target falls within any of the rows this line occupied
+            if target_screen_row >= first_screen_row && target_screen_row < screen_row {
+                return Some(line_idx);
+            }
+        }
+        line_idx += 1;
+    }
+
+    None
+}
+
 fn render_row(frame: &mut Frame, x: u16, y: u16, width: usize, line: Line<'static>, bg: Style) {
     let rect = Rect {
         x,
@@ -908,5 +988,96 @@ mod tests {
             .iter()
             .any(|l| l.contains("− ") || l.contains("+ "));
         assert!(has_diff_header, "edit result should render inline diff");
+    }
+
+    #[test]
+    fn screen_row_maps_without_wrap() {
+        let area = Rect::new(0, 0, 80, 10);
+        let lines: Vec<DisplayLine> = (0..5)
+            .map(|i| make_display_line(&format!("line {i}")))
+            .collect();
+        // No wrapping needed — each display line fits in 80 cols
+        for row in 0..5 {
+            let idx = screen_row_to_display_line(area, &lines, 0, None, row);
+            assert_eq!(idx, Some(row), "row {row} should map to display line {row}");
+        }
+        // Past end
+        assert_eq!(screen_row_to_display_line(area, &lines, 0, None, 5), None);
+    }
+
+    #[test]
+    fn screen_row_maps_with_scroll() {
+        let area = Rect::new(0, 0, 80, 5);
+        let lines: Vec<DisplayLine> = (0..10)
+            .map(|i| make_display_line(&format!("line {i}")))
+            .collect();
+        // Scroll offset 3 — screen row 0 maps to display line 3
+        let idx = screen_row_to_display_line(area, &lines, 3, None, 0);
+        assert_eq!(idx, Some(3));
+        let idx = screen_row_to_display_line(area, &lines, 3, None, 4);
+        assert_eq!(idx, Some(7));
+    }
+
+    #[test]
+    fn screen_row_maps_with_wrapping() {
+        let area = Rect::new(0, 0, 10, 10);
+        // "a".repeat(25) = 25 chars wide in a 10-col area → wraps to 3 screen rows
+        let lines: Vec<DisplayLine> = vec![
+            make_display_line(&"a".repeat(25)),
+            make_display_line("short"),
+        ];
+        // Screen rows 0,1,2 all belong to display line 0
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, None, 0),
+            Some(0)
+        );
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, None, 1),
+            Some(0)
+        );
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, None, 2),
+            Some(0)
+        );
+        // Screen row 3 is display line 1
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, None, 3),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn screen_row_maps_with_panel_narrowing() {
+        // Area starts at (0,0), 40 cols wide, 10 rows
+        let area = Rect::new(0, 0, 40, 10);
+        // Panel at x=20, covering rows 5-9 → narrowed to 19 cols on those rows
+        let panel = Some(Rect::new(20, 5, 20, 5));
+        // A 30-char line fits in row 0-4 (40 cols) but wraps on rows 5+ (19 cols)
+        let lines: Vec<DisplayLine> = (0..10)
+            .map(|_| make_display_line(&"x".repeat(30)))
+            .collect();
+        // Row 0: 30 chars fits in 40 cols → 1 row
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, panel, 0),
+            Some(0)
+        );
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, panel, 4),
+            Some(4)
+        );
+        // Row 5: narrowed to 19 cols → 30 chars wraps to 2 rows
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, panel, 5),
+            Some(5)
+        );
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, panel, 6),
+            Some(5)
+        );
+        // Row 7: next display line after the wrap
+        assert_eq!(
+            screen_row_to_display_line(area, &lines, 0, panel, 7),
+            Some(6)
+        );
     }
 }
