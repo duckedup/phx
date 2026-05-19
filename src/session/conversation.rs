@@ -495,10 +495,12 @@ fn build_system_prompt(
 }
 
 fn build_provider_messages(session: &Session) -> Vec<ProviderMessage> {
-    // TODO: compression disabled pending settings support
-    // let compressed = crate::session::compress::compress_for_provider(&session.messages);
-    session
-        .messages
+    let messages = if session.profile.compression {
+        crate::session::compress::compress_for_provider(&session.messages)
+    } else {
+        session.messages.clone()
+    };
+    messages
         .iter()
         .map(|m| ProviderMessage {
             role: match m.role {

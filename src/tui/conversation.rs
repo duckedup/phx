@@ -339,10 +339,12 @@ pub async fn send_message(
             crate::tui::runtime::redraw(app, terminal);
         }
 
-        // TODO: compression disabled pending settings support
-        // let compressed = crate::session::compress::compress_for_provider(&session.messages);
-        let provider_messages: Vec<ProviderMessage> = session
-            .messages
+        let messages = if session.profile.compression {
+            crate::session::compress::compress_for_provider(&session.messages)
+        } else {
+            session.messages.clone()
+        };
+        let provider_messages: Vec<ProviderMessage> = messages
             .iter()
             .map(|m| ProviderMessage {
                 role: match m.role {
