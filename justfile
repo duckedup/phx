@@ -27,7 +27,10 @@ clippy: build-plugins
 
 lint: fmt clippy
 
-check: lint build test
+check: lint build test lockfile
+
+lockfile:
+    cargo check --locked
 
 bench:
     @echo "bench: not yet implemented"
