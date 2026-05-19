@@ -1,4 +1,4 @@
-build: build-plugins
+build:
     @cargo build
 
 build-release: build-plugins
