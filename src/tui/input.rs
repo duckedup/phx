@@ -44,6 +44,26 @@ impl InputState {
         self.textarea.lines().len()
     }
 
+    /// Count visual rows after wrapping lines to `text_width`.
+    /// This matches the wrapping logic used by `render_input`.
+    pub fn wrapped_line_count(&self, text_width: usize) -> usize {
+        if text_width == 0 {
+            return self.line_count();
+        }
+        self.textarea
+            .lines()
+            .iter()
+            .map(|line| {
+                let char_count = line.chars().count();
+                if char_count == 0 {
+                    1
+                } else {
+                    char_count.div_ceil(text_width)
+                }
+            })
+            .sum()
+    }
+
     pub fn cursor_line(&self) -> usize {
         self.textarea.cursor().0
     }
@@ -552,5 +572,43 @@ mod tests {
         assert_eq!(loaded.len(), MAX_HISTORY);
         assert_eq!(loaded[0], "entry-100");
         assert_eq!(loaded[MAX_HISTORY - 1], "entry-599");
+    }
+
+    #[test]
+    fn wrapped_line_count_no_wrap() {
+        let mut input = test_input();
+        input.insert_str("hello");
+        // "hello" is 5 chars, fits in width 80
+        assert_eq!(input.wrapped_line_count(80), 1);
+    }
+
+    #[test]
+    fn wrapped_line_count_single_line_wraps() {
+        let mut input = test_input();
+        // 25 chars should wrap into 3 rows at width 10
+        input.insert_str("abcdefghijklmnopqrstuvwxy");
+        assert_eq!(input.wrapped_line_count(10), 3);
+    }
+
+    #[test]
+    fn wrapped_line_count_multiline_with_wrap() {
+        let mut input = test_input();
+        // Line 1: 15 chars → 2 rows at width 10
+        // Line 2: 5 chars → 1 row at width 10
+        input.insert_str("abcdefghijklmno");
+        input.insert_newline();
+        input.insert_str("hello");
+        assert_eq!(input.line_count(), 2);
+        assert_eq!(input.wrapped_line_count(10), 3);
+    }
+
+    #[test]
+    fn wrapped_line_count_empty_lines() {
+        let mut input = test_input();
+        input.insert_newline();
+        input.insert_newline();
+        // 3 logical lines (all empty)
+        assert_eq!(input.line_count(), 3);
+        assert_eq!(input.wrapped_line_count(10), 3);
     }
 }

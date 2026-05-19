@@ -166,10 +166,12 @@ async fn run_loop(
     loop {
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
-        let input_lines = app
-            .current_tab()
-            .map(|t| t.input.line_count() as u16)
-            .unwrap_or(1);
+        let input_lines = {
+            let text_width = layout::input_text_width(area.width);
+            app.current_tab()
+                .map(|t| t.input.wrapped_line_count(text_width) as u16)
+                .unwrap_or(1)
+        };
         app.sidebar_area = None;
         app.tab_bar_area = None;
         let viewing_file = app.file_viewer.is_viewing_file();
@@ -657,14 +659,16 @@ pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::S
     }
     let sz = terminal.size().unwrap_or_default();
     let sz_rect = Rect::new(0, 0, sz.width, sz.height);
-    let input_lines = app
-        .current_tab()
-        .map(|t| t.input.line_count() as u16)
-        .unwrap_or(1);
     let content_area = if app.show_sidebar() {
         layout::split_sidebar(sz_rect).1
     } else {
         sz_rect
+    };
+    let input_lines = {
+        let text_width = layout::input_text_width(content_area.width);
+        app.current_tab()
+            .map(|t| t.input.wrapped_line_count(text_width) as u16)
+            .unwrap_or(1)
     };
     let chunks = layout::main_layout(content_area, input_lines);
     let padded = layout::padded_chat_area(chunks[0]);

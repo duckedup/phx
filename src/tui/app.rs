@@ -464,9 +464,10 @@ impl App {
         }
     }
 
-    fn input_line_count(&self) -> u16 {
+    fn input_line_count(&self, area_width: u16) -> u16 {
+        let text_width = layout::input_text_width(area_width);
         self.current_tab()
-            .map(|t| t.input.line_count() as u16)
+            .map(|t| t.input.wrapped_line_count(text_width) as u16)
             .unwrap_or(1)
     }
 
@@ -488,7 +489,7 @@ impl App {
         } else if viewing_file {
             layout::file_viewer_layout(area)
         } else {
-            layout::main_layout(area, self.input_line_count())
+            layout::main_layout(area, self.input_line_count(area.width))
         };
 
         let provider_info = crate::config::loader::active_provider(&self.config)
