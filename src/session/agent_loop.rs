@@ -273,10 +273,12 @@ impl Session {
                 });
             }
 
-            // TODO: compression disabled pending settings support
-            // let compressed = crate::session::compress::compress_for_provider(&self.messages);
-            let provider_messages = self
-                .messages
+            let messages = if self.profile.compression {
+                crate::session::compress::compress_for_provider(&self.messages)
+            } else {
+                self.messages.clone()
+            };
+            let provider_messages = messages
                 .iter()
                 .map(|m| crate::providers::traits::ProviderMessage {
                     role: match m.role {
