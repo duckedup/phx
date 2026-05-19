@@ -82,6 +82,7 @@ mod tests {
             source: SkillSource::Project,
             compatibility: None,
             license: None,
+            model: None,
             metadata: BTreeMap::new(),
             allowed_tools: None,
             is_tool: false,

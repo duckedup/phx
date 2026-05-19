@@ -60,13 +60,14 @@ pub async fn handle_command(app: &mut App, input: &str) {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                 tab.chat_lines.clear();
                 tab.streaming_text.clear();
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: "Session cleared.".into(),
-                }));
             }
+            app.show_toast("Session cleared");
         }
-        crate::commands::CommandResult::InjectContext { name, content } => {
+        crate::commands::CommandResult::InjectContext {
+            name,
+            content,
+            model_override,
+        } => {
             if app.session.is_none() {
                 app.session = Some(Session::new(
                     SessionId::new(),
@@ -89,10 +90,21 @@ pub async fn handle_command(app: &mut App, input: &str) {
                     } else {
                         content.clone()
                     };
+
+                    let model_msg = if let Some(ref model_id) = model_override {
+                        apply_skill_model_override(app, model_id)
+                    } else {
+                        None
+                    };
+
                     if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                        let mut status = format!("Skill loaded: {preview}");
+                        if let Some(msg) = model_msg {
+                            status.push_str(&format!("\n{msg}"));
+                        }
                         tab.chat_lines.push(ChatItem::Line(ChatLine {
                             role: crate::session::message::Role::System,
-                            content: format!("Skill loaded: {preview}"),
+                            content: status,
                         }));
                     }
                 }
@@ -106,12 +118,7 @@ pub async fn handle_command(app: &mut App, input: &str) {
                 }
                 let config_path = crate::config::paths::user_config_file();
                 let _ = crate::config::writer::save_theme(&config_path, &entry.id);
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatItem::Line(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: format!("Theme: {}", entry.name),
-                    }));
-                }
+                app.show_toast(format!("Theme: {}", entry.name));
             } else {
                 app.saved_theme = Some(app.theme.clone());
                 let items: Vec<PickerItem> = themes
@@ -150,12 +157,7 @@ pub async fn handle_command(app: &mut App, input: &str) {
         }
         crate::commands::CommandResult::SessionPicker(choices) => {
             if choices.is_empty() {
-                if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                    tab.chat_lines.push(ChatItem::Line(ChatLine {
-                        role: crate::session::message::Role::System,
-                        content: "No sessions to resume.".into(),
-                    }));
-                }
+                app.show_toast("No sessions to resume");
             } else {
                 let items: Vec<PickerItem> = choices
                     .iter()
@@ -199,11 +201,8 @@ pub async fn handle_command(app: &mut App, input: &str) {
                         }));
                     }
                 }
-            } else if let Some(tab) = app.tabs.get_mut(app.active_tab) {
-                tab.chat_lines.push(ChatItem::Line(ChatLine {
-                    role: crate::session::message::Role::System,
-                    content: "No active session to compact.".into(),
-                }));
+            } else {
+                app.show_toast("No active session to compact");
             }
         }
         crate::commands::CommandResult::ConnectWizard => {
@@ -497,6 +496,59 @@ async fn handle_conductor_command(app: &mut App) {
         crate::tui::conversation::deactivate_conductor_mode(app).await;
     } else {
         crate::tui::conversation::activate_conductor(app).await;
+    }
+}
+
+fn apply_skill_model_override(app: &mut App, model_id: &str) -> Option<String> {
+    use crate::providers::{model_info, registry::create_provider};
+
+    let target_kind = match model_info::provider_kind_for_model(model_id) {
+        Some(kind) => kind,
+        None => {
+            tracing::warn!("skill model '{model_id}' not in known models, ignoring");
+            return Some(format!("Model '{model_id}' not recognized, using default."));
+        }
+    };
+
+    let matching_provider = app
+        .config
+        .providers
+        .iter()
+        .find(|(_, profile)| profile.kind == target_kind);
+
+    let (provider_name, base_profile) = match matching_provider {
+        Some((name, profile)) => (name.clone(), profile.clone()),
+        None => {
+            tracing::warn!(
+                "no configured provider for kind {:?} (model '{model_id}'), falling back",
+                target_kind,
+            );
+            return Some(format!(
+                "No provider configured for model '{model_id}', using default."
+            ));
+        }
+    };
+
+    let mut profile = base_profile;
+    profile.model = model_id.to_string();
+
+    match create_provider(&provider_name, &profile) {
+        Ok(p) => {
+            app.provider = Some(Arc::from(p));
+            if let Some(session) = &mut app.session {
+                session.provider_name.clone_from(&provider_name);
+                session.model_name = model_id.to_string();
+            }
+            Some(format!("Model switched to {model_id} for this skill."))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to create provider for skill model '{model_id}': {e}, falling back"
+            );
+            Some(format!(
+                "Failed to switch to model '{model_id}': {e}. Using default."
+            ))
+        }
     }
 }
 

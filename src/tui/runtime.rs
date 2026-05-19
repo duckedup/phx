@@ -209,6 +209,7 @@ async fn run_loop(
         if !viewing_file {
             app.sidebar_area = crate::tui::app::agent_panel_rect(
                 app.conductor_mode,
+                app.conductor_panel_hidden,
                 app.sidebar_state.agents.len(),
                 padded_chat_area(content_rect),
             );
@@ -454,6 +455,20 @@ async fn run_loop(
                                         }
                                     }
                                 }
+                            }
+
+                            if app.conductor_mode
+                                && app.conductor_panel_hidden
+                                && sidebar::collapsed_tab_hit_test(
+                                    app.chat_area,
+                                    app.sidebar_state.agents.len(),
+                                    r,
+                                    c,
+                                )
+                            {
+                                app.conductor_panel_hidden = false;
+                                app.show_toast("Panel visible");
+                                continue;
                             }
 
                             if let Some(sb_area) = app.sidebar_area

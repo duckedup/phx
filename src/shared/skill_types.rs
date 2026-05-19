@@ -17,6 +17,8 @@ pub struct SkillMetadataShared {
     pub compatibility: Option<String>,
     #[serde(default)]
     pub license: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

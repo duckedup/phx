@@ -67,6 +67,7 @@ pub struct App {
     pub is_reloading: bool,
     pub reload_task: Option<tokio::task::JoinHandle<ReloadOutput>>,
     pub conductor_mode: bool,
+    pub conductor_panel_hidden: bool,
     pub panel_focused: bool,
     pub session_pool: Arc<SessionPool>,
     pub orch_ctx: Arc<crate::tools::orchestration::OrchestrationContext>,
@@ -199,6 +200,7 @@ impl App {
             is_reloading: false,
             reload_task: None,
             conductor_mode: true,
+            conductor_panel_hidden: false,
             panel_focused: false,
             session_pool: pool,
             orch_ctx,
@@ -518,6 +520,7 @@ impl App {
         let panel_rect = if !viewing_file {
             agent_panel_rect(
                 self.conductor_mode,
+                self.conductor_panel_hidden,
                 self.sidebar_state.agents.len(),
                 padded_chat_area(content_rect),
             )
@@ -580,6 +583,14 @@ impl App {
                     self.panel_focused,
                     active_sid,
                 );
+            } else if self.conductor_mode && self.conductor_panel_hidden {
+                let chat_area = padded_chat_area(content_rect);
+                sidebar::render_collapsed_tab(
+                    frame,
+                    chat_area,
+                    self.sidebar_state.agents.len(),
+                    &self.theme,
+                );
             }
 
             if let Some(ref form) = self.tool_form {
@@ -625,6 +636,7 @@ impl App {
             context: session_context,
             is_running: self.is_running,
             conductor_mode: self.conductor_mode,
+            conductor_panel_hidden: self.conductor_panel_hidden,
             agent_count: self.sidebar_state.agents.len(),
             provider_info: &provider_info,
             frame_tick: self.frame_tick,
@@ -1059,10 +1071,11 @@ const AGENT_PANEL_HEIGHT: u16 = 10;
 
 pub(crate) fn agent_panel_rect(
     conductor_mode: bool,
+    conductor_panel_hidden: bool,
     _agent_count: usize,
     chat: Rect,
 ) -> Option<Rect> {
-    if !conductor_mode {
+    if !conductor_mode || conductor_panel_hidden {
         return None;
     }
     if chat.width < 20 || chat.height < 8 {

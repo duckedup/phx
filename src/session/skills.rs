@@ -14,6 +14,7 @@ pub struct SkillMetadata {
     pub description: Option<String>,
     pub compatibility: Option<String>,
     pub license: Option<String>,
+    pub model: Option<String>,
     pub metadata: BTreeMap<String, String>,
     pub allowed_tools: Option<String>,
     pub is_tool: bool,
@@ -30,6 +31,7 @@ pub struct Skill {
     pub source: SkillSource,
     pub compatibility: Option<String>,
     pub license: Option<String>,
+    pub model: Option<String>,
     pub metadata: BTreeMap<String, String>,
     pub allowed_tools: Option<String>,
     pub is_tool: bool,
@@ -139,6 +141,7 @@ pub fn parse_skill_frontmatter(content: &str) -> (SkillMetadata, String) {
             "description" => meta.description = Some(value.to_string()),
             "compatibility" => meta.compatibility = Some(value.to_string()),
             "license" => meta.license = Some(value.to_string()),
+            "model" => meta.model = Some(value.to_string()),
             "allowed-tools" => meta.allowed_tools = Some(value.to_string()),
             "isTool" | "is-tool" | "is_tool" => {
                 meta.is_tool = value.eq_ignore_ascii_case("true");
@@ -207,6 +210,7 @@ fn scan_skills_dir(dir: &Path, source: SkillSource) -> Vec<Skill> {
                 source: source.clone(),
                 compatibility: meta.compatibility,
                 license: meta.license,
+                model: meta.model,
                 metadata: meta.metadata,
                 allowed_tools: meta.allowed_tools,
                 is_tool: meta.is_tool,
@@ -553,6 +557,36 @@ mod tests {
         let content = "---\nname: tools-skill\ndescription: Has tools\nallowed-tools: Bash(git:*) Read\n---\nbody";
         let (meta, _body) = parse_skill_frontmatter(content);
         assert_eq!(meta.allowed_tools.as_deref(), Some("Bash(git:*) Read"));
+    }
+
+    #[test]
+    fn parse_frontmatter_model() {
+        let content = "---\nname: fancy\ndescription: Uses a specific model\nmodel: claude-opus-4-7\n---\nbody";
+        let (meta, _body) = parse_skill_frontmatter(content);
+        assert_eq!(meta.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn parse_frontmatter_model_quoted() {
+        let content = "---\nname: fancy\ndescription: Quoted model\nmodel: \"gpt-4.1\"\n---\nbody";
+        let (meta, _body) = parse_skill_frontmatter(content);
+        assert_eq!(meta.model.as_deref(), Some("gpt-4.1"));
+    }
+
+    #[test]
+    fn discovered_skill_carries_model() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        std::fs::create_dir_all(skills_dir.join("modeled")).unwrap();
+        std::fs::write(
+            skills_dir.join("modeled/skill.md"),
+            "---\nname: modeled\ndescription: Has model\nmodel: claude-sonnet-4-6\n---\n# Body",
+        )
+        .unwrap();
+
+        let skills = discover_in(dir.path(), SkillSource::User);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].model.as_deref(), Some("claude-sonnet-4-6"));
     }
 
     // --- Discovery tests ---

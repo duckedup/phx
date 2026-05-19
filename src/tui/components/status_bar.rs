@@ -21,6 +21,7 @@ pub struct StatusState<'a> {
     pub context: Option<ContextUsage>,
     pub is_running: bool,
     pub conductor_mode: bool,
+    pub conductor_panel_hidden: bool,
     pub agent_count: usize,
     pub provider_info: &'a str,
     pub frame_tick: u64,
@@ -71,7 +72,12 @@ pub fn render_status(frame: &mut Frame, area: Rect, state: &StatusState<'_>, the
     ];
 
     if state.conductor_mode {
-        left_spans.push(Span::styled(" · conductor", Style::default().fg(dim)));
+        if state.conductor_panel_hidden {
+            left_spans.push(Span::styled(" · conductor ", Style::default().fg(dim)));
+            left_spans.push(Span::styled("◇", Style::default().fg(theme.warning)));
+        } else {
+            left_spans.push(Span::styled(" · conductor", Style::default().fg(dim)));
+        }
     }
 
     let mut right_parts: Vec<String> = Vec::new();

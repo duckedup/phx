@@ -34,6 +34,14 @@ pub fn handle_sidebar_click(app: &mut App, mouse: crossterm::event::MouseEvent) 
     if mouse.kind != MouseEventKind::Down(crossterm::event::MouseButton::Left) {
         return;
     }
+    if app.conductor_mode && app.conductor_panel_hidden {
+        let count = app.sidebar_state.agents.len();
+        if sidebar::collapsed_tab_hit_test(app.chat_area, count, mouse.row, mouse.column) {
+            app.conductor_panel_hidden = false;
+            app.show_toast("Panel visible");
+        }
+        return;
+    }
     if let Some(sb_area) = app.sidebar_area
         && let Some(hit) = crate::tui::components::sidebar::hit_test(
             sb_area,
@@ -326,7 +334,7 @@ impl App {
             }
         }
 
-        if self.conductor_mode && key.code == KeyCode::Right {
+        if self.conductor_mode && !self.conductor_panel_hidden && key.code == KeyCode::Right {
             let input_empty = self
                 .current_tab()
                 .map(|t| t.input.buffer_text().is_empty())
@@ -458,6 +466,17 @@ impl App {
                     crate::tui::cmd::Cmd::RunCommand("/conductor".into())
                         .execute(self)
                         .await;
+                }
+            }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.conductor_mode {
+                    self.conductor_panel_hidden = !self.conductor_panel_hidden;
+                    if self.conductor_panel_hidden {
+                        self.panel_focused = false;
+                        self.show_toast("Panel hidden (Ctrl+B to show)");
+                    } else {
+                        self.show_toast("Panel visible");
+                    }
                 }
             }
             KeyCode::Char('w')
