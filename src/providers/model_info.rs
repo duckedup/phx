@@ -368,6 +368,13 @@ pub fn cost_for_model(
     Some(cost)
 }
 
+pub fn provider_kind_for_model(model_id: &str) -> Option<ProviderKind> {
+    known_models()
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .map(|m| m.provider_kind)
+}
+
 pub fn models_for_provider(kind: ProviderKind) -> Vec<&'static ModelInfo> {
     // Leak the vec so we can return static references — called rarely.
     let models: &'static Vec<ModelInfo> = Box::leak(Box::new(known_models()));
@@ -416,5 +423,26 @@ mod tests {
                 kind
             );
         }
+    }
+
+    #[test]
+    fn provider_kind_for_known_model() {
+        assert_eq!(
+            provider_kind_for_model("claude-opus-4-7"),
+            Some(ProviderKind::Claude)
+        );
+        assert_eq!(
+            provider_kind_for_model("gpt-4.1"),
+            Some(ProviderKind::OpenAI)
+        );
+        assert_eq!(
+            provider_kind_for_model("gemini-2.5-pro"),
+            Some(ProviderKind::Gemini)
+        );
+    }
+
+    #[test]
+    fn provider_kind_for_unknown_model() {
+        assert_eq!(provider_kind_for_model("nonexistent-model-xyz"), None);
     }
 }

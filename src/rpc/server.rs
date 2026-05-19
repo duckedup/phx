@@ -112,8 +112,16 @@ pub async fn run(
                             .collect();
                         serde_json::json!({"type": "theme_picker", "items": items})
                     }
-                    dispatcher::CommandResult::InjectContext { name, content } => {
-                        serde_json::json!({"type": "inject_context", "name": name, "text": content})
+                    dispatcher::CommandResult::InjectContext {
+                        name,
+                        content,
+                        model_override,
+                    } => {
+                        let mut val = serde_json::json!({"type": "inject_context", "name": name, "text": content});
+                        if let Some(model) = model_override {
+                            val["model"] = serde_json::Value::String(model);
+                        }
+                        val
                     }
                     dispatcher::CommandResult::ClearSession => {
                         serde_json::json!({"type": "clear_session"})

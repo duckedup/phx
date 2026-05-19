@@ -24,6 +24,7 @@ pub fn handle_skill(args: &str, skills: &[Skill]) -> CommandResult {
             Ok(body) => CommandResult::InjectContext {
                 name: skill.name.clone(),
                 content: body,
+                model_override: skill.model.clone(),
             },
             Err(e) => CommandResult::Error(format!("failed to load skill: {e}")),
         },

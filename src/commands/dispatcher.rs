@@ -51,6 +51,7 @@ pub enum CommandResult {
     InjectContext {
         name: String,
         content: String,
+        model_override: Option<String>,
     },
     PluginCommand {
         plugin_command: String,
@@ -155,6 +156,7 @@ pub fn try_dispatch_sync(
                     Ok(body) => CommandResult::InjectContext {
                         name: s.name.clone(),
                         content: body,
+                        model_override: s.model.clone(),
                     },
                     Err(e) => CommandResult::Error(format!("failed to load skill: {e}")),
                 }

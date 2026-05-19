@@ -8,7 +8,7 @@ use crate::config::schema::Config;
 use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::tui::app::{App, command_source_tag};
 use crate::tui::cmd::Cmd;
-use crate::tui::components::{modal_picker, sidebar};
+use crate::tui::components::{chat_view, modal_picker, sidebar};
 use crate::tui::file_viewer;
 use crate::tui::layout::{self, padded_chat_area};
 use crate::tui::msg::Msg;
@@ -166,10 +166,12 @@ async fn run_loop(
     loop {
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
-        let input_lines = app
-            .current_tab()
-            .map(|t| t.input.line_count() as u16)
-            .unwrap_or(1);
+        let input_lines = {
+            let text_width = layout::input_text_width(area.width);
+            app.current_tab()
+                .map(|t| t.input.wrapped_line_count(text_width) as u16)
+                .unwrap_or(1)
+        };
         app.sidebar_area = None;
         app.tab_bar_area = None;
         let viewing_file = app.file_viewer.is_viewing_file();
@@ -207,6 +209,7 @@ async fn run_loop(
         if !viewing_file {
             app.sidebar_area = crate::tui::app::agent_panel_rect(
                 app.conductor_mode,
+                app.conductor_panel_hidden,
                 app.sidebar_state.agents.len(),
                 padded_chat_area(content_rect),
             );
@@ -407,8 +410,15 @@ async fn run_loop(
                                     && c < chat_area.x + chat_area.width
                                 {
                                     let scroll = app.effective_scroll();
-                                    let line_idx = scroll + (r - chat_area.y) as usize;
-                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                    let screen_row = (r - chat_area.y) as usize;
+                                    if let Some(line_idx) = chat_view::screen_row_to_display_line(
+                                        chat_area,
+                                        &app.display_lines,
+                                        scroll,
+                                        app.sidebar_area,
+                                        screen_row,
+                                    ) {
+                                        let dl = &app.display_lines[line_idx];
                                         if let Some(path) = &dl.file_path {
                                             if path.exists() {
                                                 crate::tui::update::update(
@@ -445,6 +455,20 @@ async fn run_loop(
                                         }
                                     }
                                 }
+                            }
+
+                            if app.conductor_mode
+                                && app.conductor_panel_hidden
+                                && sidebar::collapsed_tab_hit_test(
+                                    app.chat_area,
+                                    app.sidebar_state.agents.len(),
+                                    r,
+                                    c,
+                                )
+                            {
+                                app.conductor_panel_hidden = false;
+                                app.show_toast("Panel visible");
+                                continue;
                             }
 
                             if let Some(sb_area) = app.sidebar_area
@@ -596,16 +620,22 @@ async fn run_loop(
                                     && mouse.column < chat_area.x + chat_area.width
                                 {
                                     let scroll = app.effective_scroll();
-                                    let line_idx = scroll + (mouse.row - chat_area.y) as usize;
-                                    if let Some(dl) = app.display_lines.get(line_idx) {
+                                    let screen_row = (mouse.row - chat_area.y) as usize;
+                                    let line_idx = chat_view::screen_row_to_display_line(
+                                        chat_area,
+                                        &app.display_lines,
+                                        scroll,
+                                        app.sidebar_area,
+                                        screen_row,
+                                    );
+                                    line_idx.and_then(|idx| {
+                                        let dl = &app.display_lines[idx];
                                         if dl.file_path.is_some() || dl.tool_detail_idx.is_some() {
-                                            Some(line_idx)
+                                            Some(idx)
                                         } else {
                                             None
                                         }
-                                    } else {
-                                        None
-                                    }
+                                    })
                                 } else {
                                     None
                                 }
@@ -657,14 +687,16 @@ pub fn redraw(app: &mut App, terminal: &mut Terminal<CrosstermBackend<std::io::S
     }
     let sz = terminal.size().unwrap_or_default();
     let sz_rect = Rect::new(0, 0, sz.width, sz.height);
-    let input_lines = app
-        .current_tab()
-        .map(|t| t.input.line_count() as u16)
-        .unwrap_or(1);
     let content_area = if app.show_sidebar() {
         layout::split_sidebar(sz_rect).1
     } else {
         sz_rect
+    };
+    let input_lines = {
+        let text_width = layout::input_text_width(content_area.width);
+        app.current_tab()
+            .map(|t| t.input.wrapped_line_count(text_width) as u16)
+            .unwrap_or(1)
     };
     let chunks = layout::main_layout(content_area, input_lines);
     let padded = layout::padded_chat_area(chunks[0]);

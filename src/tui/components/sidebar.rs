@@ -283,6 +283,78 @@ fn is_agent_finished(status: &ChildStatus) -> bool {
     )
 }
 
+pub fn collapsed_tab_rect(chat: Rect, agent_count: usize) -> Rect {
+    let label_len = if agent_count > 0 {
+        let digits = if agent_count >= 10 { 2 } else { 1 };
+        // "◀ N agents (^B)"
+        1 + 1 + digits + 1 + 6 + 1 + 4
+    } else {
+        // "◀ conductor (^B)"
+        1 + 1 + 9 + 1 + 4
+    };
+    let w = (label_len as u16 + 4).min(chat.width.saturating_sub(4)); // +4 for border + padding
+    let h: u16 = 3;
+    if w < 8 || chat.height < h + 1 {
+        return Rect::default();
+    }
+    Rect {
+        x: chat.x + chat.width - w,
+        y: chat.y + chat.height - h,
+        width: w,
+        height: h,
+    }
+}
+
+pub fn render_collapsed_tab(frame: &mut Frame, chat: Rect, agent_count: usize, theme: &Theme) {
+    use ratatui::widgets::{Clear, Padding};
+
+    let area = collapsed_tab_rect(chat, agent_count);
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Clear, area);
+
+    let border_fg = Theme::blend(theme.accent, theme.background, 0.5);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_fg))
+        .style(Style::default().bg(theme.background))
+        .padding(Padding::horizontal(1));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let label = if agent_count > 0 {
+        format!("{agent_count} agents")
+    } else {
+        "conductor".to_string()
+    };
+
+    let line = Line::from(vec![
+        Span::styled("◀ ", Style::default().fg(theme.accent)),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" (^B)", Style::default().fg(theme.dim())),
+    ]);
+
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(theme.background)),
+        inner,
+    );
+}
+
+pub fn collapsed_tab_hit_test(chat: Rect, agent_count: usize, row: u16, col: u16) -> bool {
+    let area = collapsed_tab_rect(chat, agent_count);
+    col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+}
+
 pub fn render_agent_panel(
     frame: &mut Frame,
     area: Rect,

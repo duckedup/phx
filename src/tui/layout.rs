@@ -8,6 +8,13 @@ pub const MAX_INPUT_HEIGHT: u16 = 10;
 pub const STATUS_HEIGHT: u16 = 2;
 pub const CHAT_PADDING: u16 = 2;
 
+/// Compute the text width available for input wrapping given the total content area width.
+/// This mirrors the padding/border/prompt math in `render_input`:
+///   pad_x(2)*2 + border(1)*2 + inner_pad(1)*2 + prompt_len(2) = 10
+pub fn input_text_width(area_width: u16) -> usize {
+    area_width.saturating_sub(10) as usize
+}
+
 pub fn main_layout(area: Rect, input_lines: u16) -> Rc<[Rect]> {
     let input_height = (input_lines + 2).clamp(3, MAX_INPUT_HEIGHT);
     let chat_height = area.height.saturating_sub(input_height + STATUS_HEIGHT);
