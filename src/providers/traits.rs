@@ -63,7 +63,9 @@ pub struct ProviderMessage {
 pub struct SendOptions {
     pub messages: Vec<ProviderMessage>,
     pub tools: Vec<ToolSchema>,
-    pub system_prompt: Option<String>,
+    /// System prompt blocks. Each block may receive its own cache breakpoint
+    /// on providers that support it (e.g. Anthropic). Other providers join them.
+    pub system_prompt: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +215,7 @@ mod tests {
             .send(SendOptions {
                 messages: vec![],
                 tools: vec![],
-                system_prompt: None,
+                system_prompt: vec![],
             })
             .await
             .unwrap();
@@ -231,7 +233,7 @@ mod tests {
             .send(SendOptions {
                 messages: vec![],
                 tools: vec![],
-                system_prompt: None,
+                system_prompt: vec![],
             })
             .await;
         assert!(result.is_err());

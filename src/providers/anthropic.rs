@@ -41,7 +41,6 @@ impl Provider for AnthropicProvider {
     async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError> {
         let client = reqwest::Client::new();
 
-        let system_prompt = opts.system_prompt.unwrap_or_default();
         let messages = build_messages(&opts.messages);
         let tools = build_tools(&opts.tools);
 
@@ -52,12 +51,23 @@ impl Provider for AnthropicProvider {
             "messages": messages,
         });
 
-        if !system_prompt.is_empty() {
-            body["system"] = serde_json::json!([{
-                "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"}
-            }]);
+        let system_blocks: Vec<serde_json::Value> = opts
+            .system_prompt
+            .iter()
+            .filter(|s| !s.is_empty())
+            .enumerate()
+            .map(|(i, text)| {
+                let mut block = serde_json::json!({"type": "text", "text": text});
+                // Cache breakpoint on the last block (stable prefix stays cached
+                // even when later blocks change)
+                if i == opts.system_prompt.len() - 1 {
+                    block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                }
+                block
+            })
+            .collect();
+        if !system_blocks.is_empty() {
+            body["system"] = serde_json::json!(system_blocks);
         }
         if !tools.is_empty() {
             body["tools"] = serde_json::json!(tools);

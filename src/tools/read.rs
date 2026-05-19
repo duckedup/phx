@@ -89,7 +89,7 @@ impl Tool for ReadTool {
         let mut out = String::new();
         for (i, line) in selected.iter().enumerate() {
             let line_num = start + i + 1; // 1-indexed
-            out.push_str(&format!("{line_num:>6}\t{line}\n"));
+            out.push_str(&format!("{line_num}:{line}\n"));
         }
 
         let truncated = raw.len() >= MAX_BYTES || end < lines.len();
@@ -134,9 +134,9 @@ mod tests {
         assert!(result.output.contains("beta"));
         assert!(result.output.contains("gamma"));
         // Check line numbers are present.
-        assert!(result.output.contains("1\t"));
-        assert!(result.output.contains("2\t"));
-        assert!(result.output.contains("3\t"));
+        assert!(result.output.contains("1:"));
+        assert!(result.output.contains("2:"));
+        assert!(result.output.contains("3:"));
     }
 
     #[tokio::test]
@@ -155,8 +155,8 @@ mod tests {
         // offset=1 means skip line 1 ("one"), start at line 2 ("two").
         assert!(result.output.contains("two"));
         assert!(result.output.contains("three"));
-        assert!(!result.output.contains("\tone\n"));
-        assert!(!result.output.contains("\tfour\n"));
+        assert!(!result.output.contains(":one\n") || !result.output.starts_with("1:one"));
+        assert!(!result.output.contains("4:four"));
     }
 
     #[tokio::test]
@@ -212,11 +212,7 @@ mod tests {
             .await
             .unwrap();
         let first_line = result.output.lines().next().unwrap();
-        // Should start with "     1\t"
-        assert!(
-            first_line.trim_start().starts_with("1\t"),
-            "first line was: {first_line}"
-        );
+        assert!(first_line.starts_with("1:"), "first line was: {first_line}");
     }
 
     #[tokio::test]
