@@ -26,10 +26,7 @@ pub fn start_conversation(app: &mut App, text: String) {
     };
 
     let session = app.session.take().unwrap_or_else(|| {
-        let mut s = Session::new(
-            SessionId::new(),
-            crate::config::schema::SessionProfile::default(),
-        );
+        let mut s = Session::new(SessionId::new(), crate::config::SessionProfile::default());
         if let Some((name, profile)) = crate::config::loader::active_provider(&app.config) {
             s.provider_name = name.to_string();
             s.model_name = profile.model.clone();
@@ -44,7 +41,7 @@ pub fn start_conversation(app: &mut App, text: String) {
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let tool_router = crate::session::tool_router::ToolRouter::from_config(&app.config);
-    let cfg = crate::session::conversation::ConvConfig {
+    let cfg = crate::session::conversation::ConvParams {
         provider,
         tools: app.tools.clone(),
         store: app.store.clone(),
@@ -91,7 +88,7 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
     let sid = SessionId::from(session_id.to_string());
     match app.store.load_messages(&app.project, &sid).await {
         Ok(raw_messages) => {
-            let mut session = Session::new(sid, crate::config::schema::SessionProfile::default());
+            let mut session = Session::new(sid, crate::config::SessionProfile::default());
             if let Some((name, profile)) = crate::config::loader::active_provider(&app.config) {
                 session.provider_name = name.to_string();
                 session.model_name = profile.model.clone();
@@ -231,10 +228,7 @@ pub async fn send_message(
     };
 
     let mut session = app.session.take().unwrap_or_else(|| {
-        let mut s = Session::new(
-            SessionId::new(),
-            crate::config::schema::SessionProfile::default(),
-        );
+        let mut s = Session::new(SessionId::new(), crate::config::SessionProfile::default());
         if let Some((name, profile)) = crate::config::loader::active_provider(&app.config) {
             s.provider_name = name.to_string();
             s.model_name = profile.model.clone();

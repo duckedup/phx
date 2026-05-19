@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::config::schema::ProviderProfile;
+use crate::config::ProviderProfile;
 use crate::providers::traits::*;
 
 pub struct AnthropicProvider {

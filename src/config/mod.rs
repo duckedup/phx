@@ -4,4 +4,4 @@ pub mod paths;
 pub mod schema;
 pub mod writer;
 
-// Re-export the most commonly used types at the module level.
+pub use schema::{AuthEntry, Config, ProviderKind, ProviderProfile, SessionProfile, ToolRoute};

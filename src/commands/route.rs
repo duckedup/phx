@@ -1,4 +1,4 @@
-use crate::config::schema::{Config, ToolRoute};
+use crate::config::{Config, ToolRoute};
 
 #[derive(Debug)]
 pub struct RouteEntry {

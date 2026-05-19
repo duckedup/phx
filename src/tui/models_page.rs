@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
-use crate::config::schema::{Config, ProviderKind};
+use crate::config::{Config, ProviderKind};
 use crate::tui::theme::Theme;
 
 pub struct ProviderEntry {

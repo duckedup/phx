@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::broadcast;
 
-use crate::config::schema::SessionProfile;
+use crate::config::SessionProfile;
 use crate::plugin::hooks::{HookAction, HookDispatcher, HookEvent};
 use crate::providers::traits::{Event, Provider, SendOptions, StopReason, ToolSchema};
 use crate::session::message::{Message, ToolCall, ToolResult};
@@ -254,7 +254,7 @@ impl Session {
                     .send(SessionEvent::ContextLoaded(ctx.newly_loaded));
             }
 
-            let provider_profile = crate::config::schema::ProviderProfile::default();
+            let provider_profile = crate::config::ProviderProfile::default();
             let limits = crate::session::context::resolve_context_limits(
                 &self.model_name,
                 &provider_profile,

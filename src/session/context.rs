@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::config::schema::{ProviderProfile, SessionProfile};
+use crate::config::{ProviderProfile, SessionProfile};
 use crate::providers::model_info;
 use crate::session::message::{Message, Role};
 

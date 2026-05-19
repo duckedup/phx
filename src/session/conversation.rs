@@ -44,12 +44,12 @@ pub enum ConvEvent {
     Cancelled(Session),
 }
 
-pub struct ConvConfig {
+pub struct ConvParams {
     pub provider: Arc<dyn Provider>,
     pub tools: Arc<parking_lot::RwLock<ToolRegistry>>,
     pub store: SessionStore,
     pub project: PathBuf,
-    pub config: crate::config::schema::Config,
+    pub config: crate::config::Config,
     pub system_prompt_override: Option<String>,
     pub plugin_runtime:
         Option<Arc<parking_lot::Mutex<crate::plugin::plugin_runtime::PluginRuntime>>>,
@@ -63,7 +63,7 @@ pub struct ConvConfig {
 pub fn spawn_conversation(
     mut session: Session,
     text: String,
-    cfg: ConvConfig,
+    cfg: ConvParams,
     cancel: Arc<AtomicBool>,
 ) -> mpsc::UnboundedReceiver<ConvEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -72,7 +72,7 @@ pub fn spawn_conversation(
     session.add_message(user_msg);
 
     tokio::spawn(async move {
-        let ConvConfig {
+        let ConvParams {
             provider,
             tools,
             store,
@@ -438,7 +438,7 @@ fn build_system_prompt(
     messages: &[Message],
     context_state: &mut crate::session::context::ContextState,
     project: &std::path::Path,
-    config: &crate::config::schema::Config,
+    config: &crate::config::Config,
     system_prompt_override: &Option<String>,
     tx: &mpsc::UnboundedSender<ConvEvent>,
 ) -> Vec<String> {

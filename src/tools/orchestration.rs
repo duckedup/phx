@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::{Value, json};
 
-use crate::config::schema::Config;
+use crate::config::Config;
 use crate::session::orchestration::SessionPool;
 use crate::store::session_store::SessionStore;
 
@@ -158,7 +158,7 @@ impl Tool for SpawnAgentTool {
         let id = self
             .ctx
             .pool
-            .spawn(crate::session::orchestration::SpawnConfig {
+            .spawn(crate::session::orchestration::SpawnParams {
                 provider,
                 provider_name: prov_name.clone(),
                 model_name: model_name.clone(),

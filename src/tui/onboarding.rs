@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
-use crate::config::schema::ProviderKind;
+use crate::config::ProviderKind;
 use crate::providers::model_info;
 use crate::tui::components::dialog as d;
 use crate::tui::theme::Theme;

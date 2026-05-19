@@ -78,7 +78,7 @@ pub fn apply_mutation(session: &mut Session, mutation: ContextMutation) {
 #[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
-    use crate::config::schema::SessionProfile;
+    use crate::config::SessionProfile;
     use crate::session::agent_loop::Session;
     use crate::store::session_store::SessionId;
 

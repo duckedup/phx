@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use tokio::sync::{Mutex, Semaphore, broadcast};
 
-use crate::config::schema::{Config, SessionProfile};
+use crate::config::{Config, SessionProfile};
 use crate::providers::registry::create_provider;
 use crate::providers::traits::Provider;
 use crate::session::agent_loop::{Session, SessionEvent};
@@ -111,7 +111,7 @@ impl ChildHandle {
     }
 }
 
-pub struct SpawnConfig {
+pub struct SpawnParams {
     pub provider: Arc<dyn Provider>,
     pub provider_name: String,
     pub model_name: String,
@@ -178,8 +178,8 @@ impl SessionPool {
         result
     }
 
-    pub async fn spawn(&self, cfg: SpawnConfig) -> SessionId {
-        let SpawnConfig {
+    pub async fn spawn(&self, cfg: SpawnParams) -> SessionId {
+        let SpawnParams {
             provider,
             provider_name,
             model_name,
@@ -269,10 +269,10 @@ impl SessionPool {
                 }
             }
 
-            use crate::session::conversation::ConvConfig;
+            use crate::session::conversation::ConvParams;
 
             let tool_router = crate::session::tool_router::ToolRouter::from_config(&config);
-            let conv_cfg = ConvConfig {
+            let conv_cfg = ConvParams {
                 provider,
                 tools,
                 store: (*store).clone(),
