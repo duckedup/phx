@@ -1,4 +1,4 @@
-use crate::config::schema::ProviderProfile;
+use crate::config::ProviderProfile;
 use crate::providers::traits::{Provider, ProviderError};
 
 pub fn create_llamacpp(profile: &ProviderProfile) -> Result<Box<dyn Provider>, ProviderError> {

@@ -1,5 +1,5 @@
 use crate::commands::{connect, model, route, session_cmd, skill, theme};
-use crate::config::schema::{Config, ProviderProfile};
+use crate::config::{Config, ProviderProfile};
 use crate::plugin::PluginManager;
 use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::session::skills::Skill;

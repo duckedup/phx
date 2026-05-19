@@ -415,7 +415,7 @@ mod tests {
     use ratatui::prelude::Rect;
 
     fn test_app() -> App {
-        let config = crate::config::schema::Config::default();
+        let config = crate::config::Config::default();
         let mut app = App::new(config);
         app.onboarding = None;
         app.conductor_mode = false;

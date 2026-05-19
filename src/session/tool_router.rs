@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::config::schema::Config;
+use crate::config::Config;
 use crate::providers::registry::create_provider;
 use crate::providers::traits::Provider;
 

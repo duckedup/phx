@@ -4,7 +4,7 @@ use std::time::Duration;
 use crossterm::event::{self as ct_event, Event as CEvent, KeyCode, KeyModifiers};
 use ratatui::prelude::*;
 
-use crate::config::schema::Config;
+use crate::config::Config;
 use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::tui::app::{App, command_source_tag};
 use crate::tui::cmd::Cmd;

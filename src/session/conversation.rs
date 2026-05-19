@@ -44,12 +44,12 @@ pub enum ConvEvent {
     Cancelled(Session),
 }
 
-pub struct ConvConfig {
+pub struct ConvParams {
     pub provider: Arc<dyn Provider>,
     pub tools: Arc<parking_lot::RwLock<ToolRegistry>>,
     pub store: SessionStore,
     pub project: PathBuf,
-    pub config: crate::config::schema::Config,
+    pub config: crate::config::Config,
     pub system_prompt_override: Option<String>,
     pub plugin_runtime:
         Option<Arc<parking_lot::Mutex<crate::plugin::plugin_runtime::PluginRuntime>>>,
@@ -63,7 +63,7 @@ pub struct ConvConfig {
 pub fn spawn_conversation(
     mut session: Session,
     text: String,
-    cfg: ConvConfig,
+    cfg: ConvParams,
     cancel: Arc<AtomicBool>,
 ) -> mpsc::UnboundedReceiver<ConvEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
@@ -72,7 +72,7 @@ pub fn spawn_conversation(
     session.add_message(user_msg);
 
     tokio::spawn(async move {
-        let ConvConfig {
+        let ConvParams {
             provider,
             tools,
             store,
@@ -84,6 +84,16 @@ pub fn spawn_conversation(
         } = cfg;
 
         let mut current_provider: Arc<dyn Provider> = Arc::clone(&provider);
+        let all_tool_schemas: Vec<ToolSchema> = tools
+            .read()
+            .list_schemas()
+            .into_iter()
+            .map(|s| ToolSchema {
+                name: s.name.to_string(),
+                description: s.description.to_string(),
+                parameters: s.parameters,
+            })
+            .collect();
 
         // The belt keeps spinning until the LLM says "done" with no tool calls,
         // or an error / cancellation stops it.
@@ -94,8 +104,12 @@ pub fn spawn_conversation(
             }
 
             // --- Build context & prepare the LLM call ---
-            let tool_schemas =
-                collect_tool_schemas(&tools, &current_provider, &provider, &tool_router);
+            let tool_schemas = filter_tool_schemas(
+                &all_tool_schemas,
+                &current_provider,
+                &provider,
+                &tool_router,
+            );
 
             let custom_prompt = match &session.profile.system_prompt_path {
                 Some(p) => tokio::fs::read_to_string(p).await.ok(),
@@ -401,23 +415,12 @@ async fn execute_tool(
 // Helpers — context building (pure functions, no I/O in hot path)
 // ---------------------------------------------------------------------------
 
-fn collect_tool_schemas(
-    tools: &Arc<parking_lot::RwLock<ToolRegistry>>,
+fn filter_tool_schemas(
+    all: &[ToolSchema],
     current_provider: &Arc<dyn Provider>,
     default_provider: &Arc<dyn Provider>,
     tool_router: &Option<crate::session::tool_router::ToolRouter>,
 ) -> Vec<ToolSchema> {
-    let all: Vec<ToolSchema> = tools
-        .read()
-        .list_schemas()
-        .into_iter()
-        .map(|s| ToolSchema {
-            name: s.name.to_string(),
-            description: s.description.to_string(),
-            parameters: s.parameters,
-        })
-        .collect();
-
     if !Arc::ptr_eq(current_provider, default_provider)
         && let Some(router) = tool_router
     {
@@ -427,7 +430,7 @@ fn collect_tool_schemas(
             .cloned()
             .collect();
     }
-    all
+    all.to_vec()
 }
 
 fn build_system_prompt(
@@ -435,10 +438,10 @@ fn build_system_prompt(
     messages: &[Message],
     context_state: &mut crate::session::context::ContextState,
     project: &std::path::Path,
-    config: &crate::config::schema::Config,
+    config: &crate::config::Config,
     system_prompt_override: &Option<String>,
     tx: &mpsc::UnboundedSender<ConvEvent>,
-) -> Option<String> {
+) -> Vec<String> {
     let base_prompt = if let Some(override_prompt) = system_prompt_override {
         Some(override_prompt.clone())
     } else {
@@ -481,18 +484,23 @@ fn build_system_prompt(
         let _ = tx.send(ConvEvent::ContextLoaded(ctx.newly_loaded));
     }
 
-    base_prompt.map(|base| {
-        if ctx.system_prompt_suffix.is_empty() {
-            base
-        } else {
-            format!("{base}\n\n{}", ctx.system_prompt_suffix)
-        }
-    })
+    let mut blocks = Vec::new();
+    if let Some(base) = base_prompt {
+        blocks.push(base);
+    }
+    if !ctx.system_prompt_suffix.is_empty() {
+        blocks.push(ctx.system_prompt_suffix);
+    }
+    blocks
 }
 
 fn build_provider_messages(session: &Session) -> Vec<ProviderMessage> {
-    session
-        .messages
+    let messages = if session.profile.compression {
+        crate::session::compress::compress_for_provider(&session.messages)
+    } else {
+        session.messages.clone()
+    };
+    messages
         .iter()
         .map(|m| ProviderMessage {
             role: match m.role {

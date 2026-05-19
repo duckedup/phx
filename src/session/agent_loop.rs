@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::broadcast;
 
-use crate::config::schema::SessionProfile;
+use crate::config::SessionProfile;
 use crate::plugin::hooks::{HookAction, HookDispatcher, HookEvent};
 use crate::providers::traits::{Event, Provider, SendOptions, StopReason, ToolSchema};
 use crate::session::message::{Message, ToolCall, ToolResult};
@@ -210,6 +210,8 @@ impl Session {
             "session started",
         );
 
+        let cached_tool_schemas = self.tool_schemas(tools);
+
         loop {
             if self.is_cancelled() {
                 self.state = SessionStatus::Cancelled;
@@ -220,7 +222,7 @@ impl Session {
 
             self.turn_count += 1;
 
-            let tool_schemas = self.tool_schemas(tools);
+            let tool_schemas = cached_tool_schemas.clone();
             let base_prompt = match &self.profile.system_prompt_path {
                 Some(p) => tokio::fs::read_to_string(p).await.ok(),
                 None => None,
@@ -238,13 +240,13 @@ impl Session {
                 skills,
             );
 
-            let system_prompt = base_prompt.map(|base| {
-                if ctx.system_prompt_suffix.is_empty() {
-                    base
-                } else {
-                    format!("{base}\n\n{}", ctx.system_prompt_suffix)
-                }
-            });
+            let mut system_prompt_blocks = Vec::new();
+            if let Some(base) = base_prompt {
+                system_prompt_blocks.push(base);
+            }
+            if !ctx.system_prompt_suffix.is_empty() {
+                system_prompt_blocks.push(ctx.system_prompt_suffix);
+            }
 
             if !ctx.newly_loaded.is_empty() {
                 let _ = self
@@ -252,15 +254,18 @@ impl Session {
                     .send(SessionEvent::ContextLoaded(ctx.newly_loaded));
             }
 
-            let provider_profile = crate::config::schema::ProviderProfile::default();
+            let provider_profile = crate::config::ProviderProfile::default();
             let limits = crate::session::context::resolve_context_limits(
                 &self.model_name,
                 &provider_profile,
                 &self.profile,
             );
-            let prompt_ref = system_prompt.as_deref().unwrap_or("");
-            let compaction =
-                crate::session::context::enforce_limits(&mut self.messages, prompt_ref, &limits);
+            let prompt_combined = system_prompt_blocks.join("\n\n");
+            let compaction = crate::session::context::enforce_limits(
+                &mut self.messages,
+                &prompt_combined,
+                &limits,
+            );
             if compaction.was_compacted {
                 let _ = self.events_tx.send(SessionEvent::ContextCompacted {
                     removed: compaction.removed_count,
@@ -268,8 +273,12 @@ impl Session {
                 });
             }
 
-            let provider_messages = self
-                .messages
+            let messages = if self.profile.compression {
+                crate::session::compress::compress_for_provider(&self.messages)
+            } else {
+                self.messages.clone()
+            };
+            let provider_messages = messages
                 .iter()
                 .map(|m| crate::providers::traits::ProviderMessage {
                     role: match m.role {
@@ -310,7 +319,7 @@ impl Session {
             let opts = SendOptions {
                 messages: provider_messages,
                 tools: tool_schemas,
-                system_prompt,
+                system_prompt: system_prompt_blocks,
             };
 
             let provider_span =

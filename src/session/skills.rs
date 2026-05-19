@@ -292,29 +292,18 @@ pub fn build_skill_catalog(skills: &[Skill]) -> String {
     }
 
     let mut catalog = String::from(
-        "The following skills provide specialized instructions for specific tasks.\n\
-         When a task matches a skill's description, use your file-read tool to load\n\
-         the SKILL.md at the listed location before proceeding.\n\
-         When a skill references relative paths, resolve them against the skill's\n\
-         directory (the parent of SKILL.md) and use absolute paths in tool calls.\n\n\
-         <available_skills>\n",
+        "Available skills (load SKILL.md with read tool before use, resolve relative paths against the skill directory):\n",
     );
 
     for skill in skills.iter().filter(|s| !s.is_tool) {
-        catalog.push_str("  <skill>\n");
-        catalog.push_str(&format!("    <name>{}</name>\n", skill.name));
         catalog.push_str(&format!(
-            "    <description>{}</description>\n",
-            skill.description
-        ));
-        catalog.push_str(&format!(
-            "    <location>{}</location>\n",
+            "- {}: {} → {}\n",
+            skill.name,
+            skill.description,
             skill.skill_md.display()
         ));
-        catalog.push_str("  </skill>\n");
     }
 
-    catalog.push_str("</available_skills>");
     catalog
 }
 
@@ -683,12 +672,9 @@ mod tests {
 
         let skills = discover_layered(None, home.path(), &[]);
         let catalog = build_skill_catalog(&skills);
-        assert!(catalog.contains("<available_skills>"));
-        assert!(catalog.contains("<name>my-skill</name>"));
-        assert!(catalog.contains("<description>Does things</description>"));
-        assert!(catalog.contains("<location>"));
-        assert!(catalog.contains("</available_skills>"));
-        assert!(catalog.contains("use your file-read tool"));
+        assert!(catalog.contains("Available skills"));
+        assert!(catalog.contains("- my-skill: Does things"));
+        assert!(catalog.contains("skill.md"));
     }
 
     // --- Activation tests ---

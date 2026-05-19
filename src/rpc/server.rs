@@ -1,7 +1,7 @@
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite};
 
 use crate::commands::dispatcher;
-use crate::config::schema::Config;
+use crate::config::Config;
 use crate::providers;
 use crate::rpc::protocol::*;
 use crate::session::SessionEvent;
@@ -142,10 +142,7 @@ pub async fn run(
                     .unwrap_or("");
 
                 let sess = session.get_or_insert_with(|| {
-                    Session::new(
-                        SessionId::new(),
-                        crate::config::schema::SessionProfile::default(),
-                    )
+                    Session::new(SessionId::new(), crate::config::SessionProfile::default())
                 });
 
                 sess.add_message(crate::session::Message::user(msg_text));

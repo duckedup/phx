@@ -1,4 +1,4 @@
-use crate::config::schema::{ProviderKind, ProviderProfile};
+use crate::config::{ProviderKind, ProviderProfile};
 use crate::providers::traits::{Provider, ProviderError};
 
 pub fn create_provider(

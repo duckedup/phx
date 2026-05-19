@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::ui::{InputRequest, PluginWidget};
-use crate::config::schema::Config;
+use crate::config::Config;
 use crate::session::orchestration::SessionPool;
 use crate::tools::traits::ToolRegistry;
 
@@ -179,7 +179,7 @@ impl HostHandler {
 #[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
-    use crate::config::schema::Config;
+    use crate::config::Config;
     use crate::tools::traits::ToolRegistry;
 
     #[tokio::test]

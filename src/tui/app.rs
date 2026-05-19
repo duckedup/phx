@@ -6,7 +6,7 @@ use ratatui::widgets::*;
 use tokio::sync::broadcast;
 
 use crate::commands::dispatcher::ModelChoice;
-use crate::config::schema::Config;
+use crate::config::Config;
 use crate::plugin::manager::PluginManager;
 use crate::plugin::plugin_runtime::PluginRuntime;
 use crate::providers;
@@ -929,14 +929,14 @@ impl App {
     pub(crate) fn complete_onboarding(
         &mut self,
         name: String,
-        kind: crate::config::schema::ProviderKind,
+        kind: crate::config::ProviderKind,
         model: String,
         api_key: Option<String>,
         env_hint: String,
         base_url: Option<String>,
         subagent_model: Option<String>,
     ) {
-        use crate::config::schema::{AuthEntry, ProviderProfile};
+        use crate::config::{AuthEntry, ProviderProfile};
 
         let auth = api_key.map(AuthEntry::InlineValue).or({
             if !env_hint.is_empty() {

@@ -1,4 +1,4 @@
-use crate::config::schema::ProviderKind;
+use crate::config::ProviderKind;
 
 #[derive(Debug, Clone)]
 pub struct ModelInfo {

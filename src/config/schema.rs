@@ -237,6 +237,8 @@ pub struct SessionProfile {
     pub persist: bool,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub compression: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
 }
@@ -257,6 +259,7 @@ impl Default for SessionProfile {
             tools: Vec::new(),
             persist: true,
             compaction: CompactionConfig::default(),
+            compression: false,
             token_budget: None,
         }
     }
@@ -642,6 +645,7 @@ mod tests {
         assert_eq!(s.name, "default");
         assert!(s.persist);
         assert!(!s.compaction.enabled);
+        assert!(!s.compression);
         assert!((s.compaction.threshold - 0.8).abs() < f64::EPSILON);
     }
 

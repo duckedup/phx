@@ -1,8 +1,6 @@
 use crate::commands::dispatcher::{CommandResult, ModelChoice};
-use crate::config::schema::{Config, ProviderProfile};
-use crate::config::writer;
+use crate::config::Config;
 use crate::providers::model_info;
-use std::path::Path;
 
 pub fn handle_model(args: &str, config: &Config) -> CommandResult {
     let choices = list_model_entries(config);
@@ -60,25 +58,4 @@ pub fn list_model_entries(config: &Config) -> Vec<ModelChoice> {
     }
 
     choices
-}
-
-pub fn apply_model_choice(choice: &ModelChoice, config_path: &Path) -> anyhow::Result<()> {
-    let mut config = crate::config::loader::load(Some(config_path))?;
-    for (_name, profile) in config.providers.iter_mut() {
-        profile.active = false;
-    }
-    if let Some(profile) = config.providers.get_mut(&choice.provider_name) {
-        profile.active = true;
-    }
-    writer::save(&config, config_path)?;
-    Ok(())
-}
-
-pub fn add_provider(
-    name: &str,
-    profile: ProviderProfile,
-    config_path: &Path,
-) -> anyhow::Result<()> {
-    writer::save_provider(config_path, name, &profile)?;
-    Ok(())
 }

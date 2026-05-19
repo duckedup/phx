@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod agents;
+pub mod compress;
 pub mod context;
 pub mod context_bridge;
 pub mod conversation;

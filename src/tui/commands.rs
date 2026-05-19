@@ -71,7 +71,7 @@ pub async fn handle_command(app: &mut App, input: &str) {
             if app.session.is_none() {
                 app.session = Some(Session::new(
                     SessionId::new(),
-                    crate::config::schema::SessionProfile::default(),
+                    crate::config::SessionProfile::default(),
                 ));
             }
             if let Some(session) = &mut app.session {

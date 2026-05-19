@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::config::schema::ProviderProfile;
+use crate::config::ProviderProfile;
 use crate::providers::traits::*;
 
 pub struct GoogleProvider {
@@ -48,9 +48,8 @@ impl Provider for GoogleProvider {
             "contents": contents,
         });
 
-        if let Some(sys) = &opts.system_prompt
-            && !sys.is_empty()
-        {
+        let sys = opts.system_prompt.join("\n\n");
+        if !sys.is_empty() {
             body["system_instruction"] = serde_json::json!({"parts": [{"text": sys}]});
         }
 

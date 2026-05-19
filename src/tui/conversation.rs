@@ -26,10 +26,7 @@ pub fn start_conversation(app: &mut App, text: String) {
     };
 
     let session = app.session.take().unwrap_or_else(|| {
-        let mut s = Session::new(
-            SessionId::new(),
-            crate::config::schema::SessionProfile::default(),
-        );
+        let mut s = Session::new(SessionId::new(), crate::config::SessionProfile::default());
         if let Some((name, profile)) = crate::config::loader::active_provider(&app.config) {
             s.provider_name = name.to_string();
             s.model_name = profile.model.clone();
@@ -44,7 +41,7 @@ pub fn start_conversation(app: &mut App, text: String) {
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let tool_router = crate::session::tool_router::ToolRouter::from_config(&app.config);
-    let cfg = crate::session::conversation::ConvConfig {
+    let cfg = crate::session::conversation::ConvParams {
         provider,
         tools: app.tools.clone(),
         store: app.store.clone(),
@@ -91,7 +88,7 @@ pub async fn resume_session(app: &mut App, session_id: &str) {
     let sid = SessionId::from(session_id.to_string());
     match app.store.load_messages(&app.project, &sid).await {
         Ok(raw_messages) => {
-            let mut session = Session::new(sid, crate::config::schema::SessionProfile::default());
+            let mut session = Session::new(sid, crate::config::SessionProfile::default());
             if let Some((name, profile)) = crate::config::loader::active_provider(&app.config) {
                 session.provider_name = name.to_string();
                 session.model_name = profile.model.clone();
@@ -231,10 +228,7 @@ pub async fn send_message(
     };
 
     let mut session = app.session.take().unwrap_or_else(|| {
-        let mut s = Session::new(
-            SessionId::new(),
-            crate::config::schema::SessionProfile::default(),
-        );
+        let mut s = Session::new(SessionId::new(), crate::config::SessionProfile::default());
         if let Some((name, profile)) = crate::config::loader::active_provider(&app.config) {
             s.provider_name = name.to_string();
             s.model_name = profile.model.clone();
@@ -260,20 +254,22 @@ pub async fn send_message(
 
     let mut term_events = EventStream::new();
 
+    let cached_tool_schemas: Vec<ToolSchema> = app
+        .tools
+        .read()
+        .list_schemas()
+        .into_iter()
+        .map(|s| ToolSchema {
+            name: s.name.to_string(),
+            description: s.description.to_string(),
+            parameters: s.parameters,
+        })
+        .collect();
+
     loop {
         session.turn_count += 1;
 
-        let tool_schemas: Vec<ToolSchema> = app
-            .tools
-            .read()
-            .list_schemas()
-            .into_iter()
-            .map(|s| ToolSchema {
-                name: s.name.to_string(),
-                description: s.description.to_string(),
-                parameters: s.parameters,
-            })
-            .collect();
+        let tool_schemas = cached_tool_schemas.clone();
 
         let base_prompt = match &session.profile.system_prompt_path {
             Some(p) => tokio::fs::read_to_string(p).await.ok(),
@@ -298,13 +294,13 @@ pub async fn send_message(
             &skills,
         );
 
-        let system_prompt = base_prompt.map(|base| {
-            if ctx.system_prompt_suffix.is_empty() {
-                base
-            } else {
-                format!("{base}\n\n{}", ctx.system_prompt_suffix)
-            }
-        });
+        let mut system_prompt: Vec<String> = Vec::new();
+        if let Some(base) = base_prompt {
+            system_prompt.push(base);
+        }
+        if !ctx.system_prompt_suffix.is_empty() {
+            system_prompt.push(ctx.system_prompt_suffix);
+        }
 
         if !ctx.newly_loaded.is_empty() {
             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
@@ -324,7 +320,8 @@ pub async fn send_message(
             &active_provider_profile,
             &session.profile,
         );
-        let prompt_ref = system_prompt.as_deref().unwrap_or("");
+        let prompt_combined = system_prompt.join("\n\n");
+        let prompt_ref = prompt_combined.as_str();
         let compaction =
             crate::session::context::enforce_limits(&mut session.messages, prompt_ref, &limits);
         if compaction.was_compacted {
@@ -342,8 +339,12 @@ pub async fn send_message(
             crate::tui::runtime::redraw(app, terminal);
         }
 
-        let provider_messages: Vec<ProviderMessage> = session
-            .messages
+        let messages = if session.profile.compression {
+            crate::session::compress::compress_for_provider(&session.messages)
+        } else {
+            session.messages.clone()
+        };
+        let provider_messages: Vec<ProviderMessage> = messages
             .iter()
             .map(|m| ProviderMessage {
                 role: match m.role {
