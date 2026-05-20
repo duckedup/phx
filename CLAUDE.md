@@ -52,9 +52,13 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
+Always use `just` commands instead of running `cargo` directly.
+
 ```bash
+just check             # Run all quality gates: lint, build, test, lockfile
 just lint              # Run cargo fmt + clippy
 just test              # Run cargo test --all-features
+just build             # Run cargo build
 ```
 
 ## Architecture Overview

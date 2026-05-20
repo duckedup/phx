@@ -10,10 +10,10 @@ members = [
 
 [package]
 name = "phx"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 license = "MIT"
-description = "it was already on fire. we just gave it wings."
+description = "everyone else is rewriting things in rust."
 repository = "https://github.com/duckedup/phx"
 
 [[bin]]
