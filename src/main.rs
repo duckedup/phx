@@ -52,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         otlp_endpoint: None,
         service_name: "phx".into(),
         ring_capacity: 4096,
+        log_level: cfg.log_level.clone(),
     });
 
     match cli.command {

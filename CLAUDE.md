@@ -89,4 +89,4 @@ All logging uses the `tracing` crate with leveled, structured fields. Logs are w
 - Every outbound HTTP request must log: `debug!` before send (with URL and provider), `error!` on failure (with URL, status, response body), `debug!` on stream start
 - Use spans from `otel::spans` for provider calls, tool execution, and sessions
 - Never use `println!`, `eprintln!`, or `dbg!` — all output goes through `tracing`
-- Default filter is `PHX_LOG=info`. Use `PHX_LOG=debug` to see request-level details
+- Log level is configurable via `"log_level"` in `phx.json` (project `.phx/phx.json` overrides global `~/.phx/phx.json`). `PHX_LOG` env var overrides both. Default is `info`

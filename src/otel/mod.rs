@@ -26,6 +26,9 @@ pub struct TelemetryInit {
     pub service_name: String,
     /// Maximum number of events kept in the in-memory ring buffer.
     pub ring_capacity: usize,
+    /// Log level from config (project overrides global). `PHX_LOG` env var
+    /// takes highest priority. Falls back to `"info"` if neither is set.
+    pub log_level: Option<String>,
 }
 
 /// Handle returned by [`init`]. Holds the shared ring buffer so callers can
@@ -51,8 +54,8 @@ impl TelemetryHandle {
 
 /// Initialise the global tracing subscriber with:
 ///
-/// 1. An [`EnvFilter`] sourced from `RUST_LOG` (default: `info`).
-/// 2. A `fmt` layer that writes human-readable logs to stderr.
+/// 1. An [`EnvFilter`] — priority: `PHX_LOG` env var > config `log_level` > `"info"`.
+/// 2. A `fmt` layer that writes human-readable logs to `~/.phx/phx.log`.
 /// 3. A [`RingLayer`] that captures events into an in-memory ring buffer.
 ///
 /// Returns a [`TelemetryHandle`] whose [`RingBuffer`] can be shared with the
@@ -66,7 +69,9 @@ pub fn init(cfg: TelemetryInit) -> TelemetryHandle {
     let ring = RingBuffer::new(cfg.ring_capacity);
     let ring_layer = RingLayer::new(ring.clone());
 
-    let env_filter = EnvFilter::try_from_env("PHX_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let default_level = cfg.log_level.as_deref().unwrap_or("info");
+    let env_filter =
+        EnvFilter::try_from_env("PHX_LOG").unwrap_or_else(|_| EnvFilter::new(default_level));
 
     let log_writer = {
         let log_dir = crate::config::paths::config_dir();
@@ -115,10 +120,12 @@ mod tests {
             otlp_endpoint: Some("http://localhost:4318".into()),
             service_name: "test-service".into(),
             ring_capacity: 128,
+            log_level: Some("debug".into()),
         };
         assert_eq!(cfg.ring_capacity, 128);
         assert_eq!(cfg.service_name, "test-service");
         assert_eq!(cfg.otlp_endpoint.as_deref(), Some("http://localhost:4318"));
+        assert_eq!(cfg.log_level.as_deref(), Some("debug"));
     }
 
     #[test]
