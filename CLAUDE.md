@@ -89,4 +89,4 @@ All logging uses the `tracing` crate with leveled, structured fields. Logs are w
 - Every outbound HTTP request must log: `debug!` before send (with URL and provider), `error!` on failure (with URL, status, response body), `debug!` on stream start
 - Use spans from `otel::spans` for provider calls, tool execution, and sessions
 - Never use `println!`, `eprintln!`, or `dbg!` — all output goes through `tracing`
-- Default filter is `RUST_LOG=info`. Use `RUST_LOG=debug` to see request-level details
+- Default filter is `PHX_LOG=info`. Use `PHX_LOG=debug` to see request-level details

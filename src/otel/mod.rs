@@ -66,7 +66,7 @@ pub fn init(cfg: TelemetryInit) -> TelemetryHandle {
     let ring = RingBuffer::new(cfg.ring_capacity);
     let ring_layer = RingLayer::new(ring.clone());
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_env("PHX_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
 
     let log_writer = {
         let log_dir = crate::config::paths::config_dir();
