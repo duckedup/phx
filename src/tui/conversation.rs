@@ -87,7 +87,9 @@ pub fn spawn_remote_conversation(app: &mut App, text: String) {
                 }
                 "session_id" => {
                     if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
-                        tracing::info!(remote_session_id = sid, "remote assigned session_id");
+                        let _ = tx.send(crate::session::conversation::ConvEvent::RemoteSessionId(
+                            sid.to_string(),
+                        ));
                     }
                 }
                 "error" => {

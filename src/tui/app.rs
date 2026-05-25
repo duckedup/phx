@@ -428,6 +428,9 @@ impl App {
                             messages: msgs,
                         });
                     }
+                    ConvEvent::RemoteSessionId(sid) => {
+                        self.remote_session_id = Some(sid);
+                    }
                 }
             }
         }
