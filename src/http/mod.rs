@@ -102,6 +102,23 @@ pub enum RetryOutcome {
     Cancelled,
 }
 
+pub fn should_retry(err: &ProviderError, attempt: u32) -> bool {
+    is_retryable(err) && attempt + 1 < MAX_RETRIES
+}
+
+pub fn format_retry_msg(err: &ProviderError, attempt: u32) -> String {
+    let delay = backoff_delay(attempt);
+    format!(
+        "{err} — retrying in {}s (attempt {} of {MAX_RETRIES})",
+        delay.as_secs(),
+        attempt + 1,
+    )
+}
+
+pub fn format_recovered_msg(attempts: u32) -> String {
+    format!("Recovered after {attempts} attempts")
+}
+
 pub async fn send_with_retry(
     provider: &dyn Provider,
     opts: &SendOptions,
@@ -121,7 +138,7 @@ pub async fn send_with_retry(
                 };
             }
             Err(e) => {
-                if !is_retryable(&e) || attempt + 1 >= MAX_RETRIES {
+                if !should_retry(&e, attempt) {
                     return RetryOutcome::Failed(e);
                 }
 
@@ -228,6 +245,36 @@ mod tests {
     #[test]
     fn max_retries_is_ten() {
         assert_eq!(MAX_RETRIES, 10);
+    }
+
+    #[test]
+    fn should_retry_respects_attempt_limit() {
+        let err = ProviderError::HttpError("timeout".into());
+        assert!(should_retry(&err, 0));
+        assert!(should_retry(&err, 8));
+        assert!(!should_retry(&err, 9));
+    }
+
+    #[test]
+    fn should_retry_rejects_non_retryable() {
+        let err = ProviderError::MissingCredential;
+        assert!(!should_retry(&err, 0));
+    }
+
+    #[test]
+    fn format_retry_msg_includes_details() {
+        let err = ProviderError::BadResponse {
+            status: 429,
+            body: "rate limited".into(),
+        };
+        let msg = format_retry_msg(&err, 2);
+        assert!(msg.contains("retrying in 5s"));
+        assert!(msg.contains("attempt 3 of 10"));
+    }
+
+    #[test]
+    fn format_recovered_msg_includes_count() {
+        assert_eq!(format_recovered_msg(3), "Recovered after 3 attempts");
     }
 
     #[test]

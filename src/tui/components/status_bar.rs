@@ -25,6 +25,7 @@ pub struct StatusState<'a> {
     pub agent_count: usize,
     pub provider_info: &'a str,
     pub frame_tick: u64,
+    pub remote_endpoint: Option<&'a str>,
 }
 
 fn format_cost(cost: f64) -> String {
@@ -81,6 +82,9 @@ pub fn render_status(frame: &mut Frame, area: Rect, state: &StatusState<'_>, the
     }
 
     let mut right_parts: Vec<String> = Vec::new();
+    if let Some(endpoint) = state.remote_endpoint {
+        right_parts.push(format!("remote: {endpoint}"));
+    }
     if state.conductor_mode && state.agent_count > 0 {
         right_parts.push(format!("{} agents", state.agent_count));
     }

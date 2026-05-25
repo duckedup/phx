@@ -395,6 +395,35 @@ impl Default for FileViewerConfig {
 }
 
 // ---------------------------------------------------------------------------
+// RemoteConfig
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteConfig {
+    #[serde(default = "default_remote_host")]
+    pub host: String,
+    #[serde(default = "default_remote_port")]
+    pub port: u16,
+}
+
+fn default_remote_host() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_remote_port() -> u16 {
+    4200
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            host: default_remote_host(),
+            port: default_remote_port(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ToolRoute
 // ---------------------------------------------------------------------------
 
@@ -433,6 +462,8 @@ pub struct Config {
     pub log_level: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteConfig>,
 }
 
 fn deserialize_providers<'de, D: Deserializer<'de>>(
@@ -550,6 +581,9 @@ impl Config {
         }
         if other.log_level.is_some() {
             self.log_level = other.log_level;
+        }
+        if other.remote.is_some() {
+            self.remote = other.remote;
         }
     }
 }
@@ -731,5 +765,70 @@ mod tests {
         let c = CompactionConfig::default();
         assert!(!c.enabled);
         assert!((c.threshold - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn remote_config_defaults() {
+        let r = RemoteConfig::default();
+        assert_eq!(r.host, "127.0.0.1");
+        assert_eq!(r.port, 4200);
+    }
+
+    #[test]
+    fn remote_config_parses_partial() {
+        let json = r#"{"port": 5000}"#;
+        let r: RemoteConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(r.host, "127.0.0.1");
+        assert_eq!(r.port, 5000);
+    }
+
+    #[test]
+    fn remote_config_parses_empty_object() {
+        let json = r#"{}"#;
+        let r: RemoteConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(r.host, "127.0.0.1");
+        assert_eq!(r.port, 4200);
+    }
+
+    #[test]
+    fn default_config_has_no_remote() {
+        let cfg = Config::default();
+        assert!(cfg.remote.is_none());
+    }
+
+    #[test]
+    fn config_remote_omitted_when_none() {
+        let cfg = Config::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(!json.contains("remote"));
+    }
+
+    #[test]
+    fn config_remote_roundtrip() {
+        let cfg = Config {
+            remote: Some(RemoteConfig {
+                host: "0.0.0.0".into(),
+                port: 5000,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn config_merge_remote() {
+        let mut base = Config::default();
+        let layer = Config {
+            remote: Some(RemoteConfig {
+                host: "0.0.0.0".into(),
+                port: 5000,
+            }),
+            ..Default::default()
+        };
+        base.merge(layer);
+        assert_eq!(base.remote.as_ref().unwrap().host, "0.0.0.0");
+        assert_eq!(base.remote.as_ref().unwrap().port, 5000);
     }
 }

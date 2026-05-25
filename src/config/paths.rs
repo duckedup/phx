@@ -18,6 +18,35 @@ pub fn clear_home_override() {
     *HOME_OVERRIDE.lock().unwrap() = None;
 }
 
+/// RAII guard that sets a home override and clears it on drop.
+#[cfg(test)]
+pub struct HomeOverrideGuard {
+    _tmpdir: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl Default for HomeOverrideGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+impl HomeOverrideGuard {
+    pub fn new() -> Self {
+        let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
+        set_home_override(tmpdir.path());
+        Self { _tmpdir: tmpdir }
+    }
+}
+
+#[cfg(test)]
+impl Drop for HomeOverrideGuard {
+    fn drop(&mut self) {
+        clear_home_override();
+    }
+}
+
 /// Returns the user home directory (`~`).
 pub fn user_home() -> PathBuf {
     home_dir()

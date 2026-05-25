@@ -11,6 +11,172 @@ use crate::tui::app::App;
 use crate::tui::rendering::helpers::tool_call_summary;
 use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine};
 
+pub fn spawn_remote_conversation(app: &mut App, text: String) {
+    use std::sync::atomic::AtomicBool;
+
+    let client = match app.remote.as_ref() {
+        Some(c) => Arc::clone(c),
+        None => return,
+    };
+
+    let session_id = app.remote_session_id.clone();
+    let tab_idx = app.active_tab;
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    if let Some(tab) = app.current_tab_mut() {
+        tab.add_user_message(text.clone());
+    }
+
+    let (tx, rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::session::conversation::ConvEvent>();
+
+    let cancel_for_task = Arc::clone(&cancel);
+    tokio::spawn(async move {
+        let params = match session_id {
+            Some(sid) => serde_json::json!({"message": text, "session_id": sid}),
+            None => serde_json::json!({"message": text}),
+        };
+
+        let mut event_rx = match client.send_streaming("session.send", params).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(crate::session::conversation::ConvEvent::Error(
+                    e.to_string(),
+                ));
+                let stub = Session::new(SessionId::new(), crate::config::SessionProfile::default());
+                let _ = tx.send(crate::session::conversation::ConvEvent::Done(stub));
+                return;
+            }
+        };
+
+        while let Some(line) = event_rx.recv().await {
+            if cancel_for_task.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+
+            let event_type = line.get("event").and_then(|v| v.as_str()).unwrap_or("");
+            let data = line.get("data").cloned().unwrap_or_default();
+
+            match event_type {
+                "token" => {
+                    let t = data
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = tx.send(crate::session::conversation::ConvEvent::StreamToken(t));
+                }
+                "tool_call" => {
+                    let name = data
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = tx.send(crate::session::conversation::ConvEvent::ToolCall(name));
+                }
+                "tool_result" => {
+                    let out = data
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = tx.send(crate::session::conversation::ConvEvent::ToolResult {
+                        output: out,
+                        is_error: false,
+                    });
+                }
+                "session_id" => {
+                    if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
+                        let _ = tx.send(crate::session::conversation::ConvEvent::RemoteSessionId(
+                            sid.to_string(),
+                        ));
+                    }
+                }
+                "error" => {
+                    let m = data
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let _ = tx.send(crate::session::conversation::ConvEvent::Error(m));
+                }
+                "done" => break,
+                _ => {}
+            }
+        }
+
+        let stub = Session::new(SessionId::new(), crate::config::SessionProfile::default());
+        let _ = tx.send(crate::session::conversation::ConvEvent::Done(stub));
+    });
+
+    app.is_running = true;
+    app.agent_receivers.push(crate::tui::app::AgentReceiver {
+        tab_index: tab_idx,
+        session_id: None,
+        rx,
+        cancel: Some(cancel),
+    });
+}
+
+pub fn resume_remote_session(app: &mut App, session_id: &str) {
+    let client = match app.remote.as_ref() {
+        Some(c) => Arc::clone(c),
+        None => return,
+    };
+
+    app.remote_session_id = Some(session_id.to_string());
+
+    let sid = session_id.to_string();
+    let tab_idx = app.active_tab;
+
+    let (tx, rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::session::conversation::ConvEvent>();
+
+    tokio::spawn(async move {
+        match client
+            .send("session.resume", serde_json::json!({"session_id": sid}))
+            .await
+        {
+            Ok(resp) => {
+                let messages_json = resp
+                    .get("result")
+                    .and_then(|r| r.get("messages"))
+                    .and_then(|m| m.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                let mut parsed: Vec<Message> = Vec::with_capacity(messages_json.len());
+                for raw in &messages_json {
+                    if let Ok(msg) = serde_json::from_value::<Message>(raw.clone()) {
+                        parsed.push(msg);
+                    }
+                }
+
+                let _ = tx.send(crate::session::conversation::ConvEvent::ResumeHistory(
+                    parsed,
+                ));
+                tracing::info!(session_id = %sid, "resumed remote session");
+            }
+            Err(e) => {
+                let _ = tx.send(crate::session::conversation::ConvEvent::Error(format!(
+                    "Failed to resume: {e}"
+                )));
+                tracing::error!(error = %e, "failed to resume remote session");
+            }
+        }
+
+        let stub = Session::new(SessionId::new(), crate::config::SessionProfile::default());
+        let _ = tx.send(crate::session::conversation::ConvEvent::Done(stub));
+    });
+
+    app.agent_receivers.push(crate::tui::app::AgentReceiver {
+        tab_index: tab_idx,
+        session_id: None,
+        rx,
+        cancel: None,
+    });
+}
+
 pub fn start_conversation(app: &mut App, text: String) {
     let provider = match &app.provider {
         Some(p) => Arc::clone(p),
@@ -395,7 +561,7 @@ pub async fn send_message(
                         {
                             tab.chat_lines.push(ChatItem::Line(ChatLine {
                                 role: crate::session::message::Role::System,
-                                content: format!("Recovered after {attempt} attempts"),
+                                content: crate::http::format_recovered_msg(attempt),
                             }));
                         }
                         break 'retry s;
@@ -404,8 +570,7 @@ pub async fn send_message(
                         break 'retry futures::stream::empty().boxed();
                     }
                     Err(e) => {
-                        if !crate::http::is_retryable(&e) || attempt + 1 >= crate::http::MAX_RETRIES
-                        {
+                        if !crate::http::should_retry(&e, attempt) {
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                                 tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: crate::session::message::Role::System,
@@ -417,18 +582,14 @@ pub async fn send_message(
                             return;
                         }
 
-                        let delay = crate::http::backoff_delay(attempt);
                         if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                             tab.chat_lines.push(ChatItem::Line(ChatLine {
                                 role: crate::session::message::Role::System,
-                                content: format!(
-                                    "{e} — retrying in {}s (attempt {} of {})",
-                                    delay.as_secs(),
-                                    attempt + 1,
-                                    crate::http::MAX_RETRIES,
-                                ),
+                                content: crate::http::format_retry_msg(&e, attempt),
                             }));
                         }
+
+                        let delay = crate::http::backoff_delay(attempt);
 
                         let sleep_until = tokio::time::Instant::now() + delay;
                         while tokio::time::Instant::now() < sleep_until {

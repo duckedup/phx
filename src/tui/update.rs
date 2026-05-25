@@ -315,7 +315,7 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
                 tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
                     crate::tui::tabs::ChatLine {
                         role: crate::session::message::Role::System,
-                        content: format!("Recovered after {attempts} attempts"),
+                        content: crate::http::format_recovered_msg(attempts),
                     },
                 ));
             }
@@ -382,6 +382,52 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
                 &config,
             ));
             app.interactive_response_tx = Some(response_tx);
+        }
+        Msg::ConvResumeHistory { tab_idx, messages } => {
+            use crate::session::message::Role;
+            use crate::tui::rendering::helpers::{tool_call_summary, truncate_output};
+            use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine};
+
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.chat_lines.clear();
+                for msg in &messages {
+                    match msg.role {
+                        Role::User => {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: msg.role.clone(),
+                                content: msg.content.clone(),
+                            }));
+                        }
+                        Role::Assistant => {
+                            tab.chat_lines.push(ChatItem::Assistant(AssistantLine {
+                                content: msg.content.clone(),
+                                turn: 0,
+                            }));
+                        }
+                        Role::ToolCall => {
+                            if let Some(tc) = &msg.tool_call {
+                                let summary = tool_call_summary(&tc.name, &tc.args_json);
+                                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                    role: Role::ToolCall,
+                                    content: summary,
+                                }));
+                            }
+                        }
+                        Role::ToolResult => {
+                            if let Some(tr) = &msg.tool_result {
+                                let output = truncate_output(&tr.output, 2000);
+                                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                    role: Role::ToolResult,
+                                    content: output,
+                                }));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let count = messages.len();
+            app.show_toast(format!("Resumed session ({count} messages)"));
         }
 
         // ── Input ────────────────────────────────────────────────────────
@@ -850,6 +896,36 @@ mod tests {
             },
         );
         assert_eq!(app.file_viewer.tabs.len(), 2);
+    }
+
+    // ── Conv resume history ─────────────────────────────────────────
+
+    #[test]
+    fn conv_resume_history_repopulates_tab() {
+        use crate::session::message::{Message, Role};
+
+        let mut app = test_app();
+        app.tabs[0]
+            .chat_lines
+            .push(crate::tui::tabs::ChatItem::Line(
+                crate::tui::tabs::ChatLine {
+                    role: Role::User,
+                    content: "stale".into(),
+                },
+            ));
+
+        let messages = vec![Message::user("hello"), Message::assistant("hi there")];
+
+        update(
+            &mut app,
+            Msg::ConvResumeHistory {
+                tab_idx: 0,
+                messages,
+            },
+        );
+
+        assert_eq!(app.tabs[0].chat_lines.len(), 2);
+        assert!(app.toast.is_some());
     }
 
     // ── File viewer ─────────────────────────────────────────────────

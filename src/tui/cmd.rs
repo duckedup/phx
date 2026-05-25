@@ -25,7 +25,11 @@ impl Cmd {
         match self {
             Cmd::None => {}
             Cmd::StartConversation(text) => {
-                crate::tui::conversation::start_conversation(app, text);
+                if app.remote.is_some() {
+                    crate::tui::conversation::spawn_remote_conversation(app, text);
+                } else {
+                    crate::tui::conversation::start_conversation(app, text);
+                }
             }
             Cmd::RunCommand(input) => {
                 crate::tui::commands::handle_command(app, &input).await;
@@ -34,7 +38,11 @@ impl Cmd {
                 app.session_pool.try_send_message(&session_id, &text);
             }
             Cmd::ResumeSession(session_id) => {
-                crate::tui::conversation::resume_session(app, &session_id).await;
+                if app.remote.is_some() {
+                    crate::tui::conversation::resume_remote_session(app, &session_id);
+                } else {
+                    crate::tui::conversation::resume_session(app, &session_id).await;
+                }
             }
             Cmd::RunToolCommand {
                 tool_name,

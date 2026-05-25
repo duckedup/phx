@@ -7,6 +7,14 @@ use crate::tui::app::App;
 use crate::tui::tabs::{AssistantLine, ChatItem, ChatLine};
 
 pub async fn handle_command(app: &mut App, input: &str) {
+    let trimmed = input.trim().trim_start_matches('/');
+    let cmd_name = trimmed.split_whitespace().next().unwrap_or("");
+
+    if app.remote.is_some() && matches!(cmd_name, "sessions" | "resume") {
+        handle_remote_sessions(app).await;
+        return;
+    }
+
     let skills = crate::session::skills::discover_layered(
         Some(&app.project),
         &crate::config::paths::user_home(),
@@ -548,6 +556,68 @@ fn apply_skill_model_override(app: &mut App, model_id: &str) -> Option<String> {
             Some(format!(
                 "Failed to switch to model '{model_id}': {e}. Using default."
             ))
+        }
+    }
+}
+
+async fn handle_remote_sessions(app: &mut App) {
+    use crate::tui::picker::{PickerItem, PickerMode, PickerState};
+
+    let client = match app.remote.as_ref() {
+        Some(c) => Arc::clone(c),
+        None => return,
+    };
+
+    match client.send("session.list", serde_json::json!({})).await {
+        Ok(resp) => {
+            let sessions = resp
+                .get("result")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            if sessions.is_empty() {
+                app.show_toast("No remote sessions to resume");
+                return;
+            }
+
+            let items: Vec<PickerItem> = sessions
+                .iter()
+                .filter_map(|s| {
+                    let id = s.get("id")?.as_str()?;
+                    let name = s
+                        .get("display_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(untitled)");
+                    let provider = s.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                    let model = s.get("model").and_then(|v| v.as_str()).unwrap_or("");
+                    let description = if model.is_empty() {
+                        provider.to_string()
+                    } else {
+                        format!("{provider}/{model}")
+                    };
+                    Some(PickerItem {
+                        id: id.to_string(),
+                        label: name.to_string(),
+                        description,
+                        source_tag: None,
+                    })
+                })
+                .collect();
+
+            if items.is_empty() {
+                app.show_toast("No remote sessions to resume");
+            } else {
+                app.picker = Some(PickerState::new(items, PickerMode::Session));
+            }
+        }
+        Err(e) => {
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: format!("Failed to list remote sessions: {e}"),
+                }));
+            }
         }
     }
 }

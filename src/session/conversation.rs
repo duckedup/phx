@@ -48,6 +48,8 @@ pub enum ConvEvent {
     Error(String),
     Done(Session),
     Cancelled(Session),
+    ResumeHistory(Vec<Message>),
+    RemoteSessionId(String),
 }
 
 pub struct ConvParams {

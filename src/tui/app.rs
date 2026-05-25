@@ -84,6 +84,9 @@ pub struct App {
     pub file_viewer: file_viewer::FileViewerState,
     pub tab_bar_area: Option<Rect>,
     pub hovered_line: Option<usize>,
+    pub remote: Option<Arc<crate::remote::client::RemoteClient>>,
+    pub remote_session_id: Option<String>,
+    pub remote_endpoint_display: Option<String>,
 }
 
 pub struct AgentReceiver {
@@ -216,6 +219,9 @@ impl App {
             file_viewer: file_viewer::FileViewerState::new(),
             tab_bar_area: None,
             hovered_line: None,
+            remote: None,
+            remote_session_id: None,
+            remote_endpoint_display: None,
         }
     }
 
@@ -415,6 +421,15 @@ impl App {
                             agent_idx: i,
                         });
                         break;
+                    }
+                    ConvEvent::ResumeHistory(msgs) => {
+                        messages.push(Msg::ConvResumeHistory {
+                            tab_idx,
+                            messages: msgs,
+                        });
+                    }
+                    ConvEvent::RemoteSessionId(sid) => {
+                        self.remote_session_id = Some(sid);
                     }
                 }
             }
@@ -657,6 +672,7 @@ impl App {
             agent_count: self.sidebar_state.agents.len(),
             provider_info: &provider_info,
             frame_tick: self.frame_tick,
+            remote_endpoint: self.remote_endpoint_display.as_deref(),
         };
 
         status_bar::render_status(frame, chunks[2], &status_state, &self.theme);

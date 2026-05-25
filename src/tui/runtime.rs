@@ -65,6 +65,7 @@ pub async fn run(
     config: Config,
     _needs_onboarding: bool,
     extra_plugin_dirs: Vec<std::path::PathBuf>,
+    remote: Option<(crate::remote::client::RemoteClient, String)>,
 ) -> anyhow::Result<()> {
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -84,58 +85,68 @@ pub async fn run(
     let mut app = App::new(config);
     app.extra_plugin_dirs = extra_plugin_dirs;
 
-    let plugin_dirs = crate::plugin::discover_plugin_dirs(
-        Some(&app.project),
-        &crate::config::paths::user_home(),
-        &app.config.plugins.dirs,
-    );
-    if !plugin_dirs.is_empty() {
-        let mut tools_snapshot = app.tools.read().clone();
-        app.plugin_manager
-            .load_and_start(plugin_dirs, &app.project, &mut tools_snapshot)
-            .await;
-        *app.tools.write() = tools_snapshot;
-    }
-
-    {
-        let mut rt = PluginRuntime::new(std::env::current_dir().unwrap_or_default());
-        rt.load_bundled();
-        let plugin_dirs =
-            PluginRuntime::discover_dirs(Some(&app.project), &crate::config::paths::user_home());
-        for dir in &plugin_dirs {
-            let _ = rt.load_from_dir(dir);
-        }
-        let rt_arc = Arc::new(parking_lot::Mutex::new(rt));
-        crate::plugin::plugin_tool_adapter::register_plugin_tools(&rt_arc, &mut app.tools.write());
-        app.plugin_runtime = Some(rt_arc);
-    }
-
-    if app
-        .plugin_runtime
-        .as_ref()
-        .is_some_and(|rt| rt.lock().tool_count() > 0)
-        || app.plugin_manager.plugin_count() > 0
-    {
-        let skills = crate::session::skills::discover_layered(
+    if let Some((client, endpoint)) = remote {
+        app.remote = Some(Arc::new(client));
+        app.remote_endpoint_display = Some(endpoint);
+    } else {
+        let plugin_dirs = crate::plugin::discover_plugin_dirs(
             Some(&app.project),
             &crate::config::paths::user_home(),
-            &app.config.skills.dirs,
+            &app.config.plugins.dirs,
         );
-        let rt_ref = app.plugin_runtime.as_ref().map(|rt| rt.lock());
-        let command_list = crate::commands::dispatcher::list_commands_with_plugins(
-            &skills,
-            Some(&app.plugin_manager),
-            rt_ref.as_deref(),
-        );
-        app.command_items = command_list
-            .iter()
-            .map(|cmd| PickerItem {
-                id: cmd.name.clone(),
-                label: cmd.name.clone(),
-                description: cmd.summary.clone(),
-                source_tag: command_source_tag(&cmd.source),
-            })
-            .collect();
+        if !plugin_dirs.is_empty() {
+            let mut tools_snapshot = app.tools.read().clone();
+            app.plugin_manager
+                .load_and_start(plugin_dirs, &app.project, &mut tools_snapshot)
+                .await;
+            *app.tools.write() = tools_snapshot;
+        }
+
+        {
+            let mut rt = PluginRuntime::new(std::env::current_dir().unwrap_or_default());
+            rt.load_bundled();
+            let plugin_dirs = PluginRuntime::discover_dirs(
+                Some(&app.project),
+                &crate::config::paths::user_home(),
+            );
+            for dir in &plugin_dirs {
+                let _ = rt.load_from_dir(dir);
+            }
+            let rt_arc = Arc::new(parking_lot::Mutex::new(rt));
+            crate::plugin::plugin_tool_adapter::register_plugin_tools(
+                &rt_arc,
+                &mut app.tools.write(),
+            );
+            app.plugin_runtime = Some(rt_arc);
+        }
+
+        if app
+            .plugin_runtime
+            .as_ref()
+            .is_some_and(|rt| rt.lock().tool_count() > 0)
+            || app.plugin_manager.plugin_count() > 0
+        {
+            let skills = crate::session::skills::discover_layered(
+                Some(&app.project),
+                &crate::config::paths::user_home(),
+                &app.config.skills.dirs,
+            );
+            let rt_ref = app.plugin_runtime.as_ref().map(|rt| rt.lock());
+            let command_list = crate::commands::dispatcher::list_commands_with_plugins(
+                &skills,
+                Some(&app.plugin_manager),
+                rt_ref.as_deref(),
+            );
+            app.command_items = command_list
+                .iter()
+                .map(|cmd| PickerItem {
+                    id: cmd.name.clone(),
+                    label: cmd.name.clone(),
+                    description: cmd.summary.clone(),
+                    source_tag: command_source_tag(&cmd.source),
+                })
+                .collect();
+        }
     }
 
     let history_file = crate::config::paths::history_file();

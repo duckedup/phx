@@ -94,6 +94,10 @@ pub enum Msg {
         fields: Vec<crate::shared::ui_field_types::UiField>,
         response_tx: tokio::sync::oneshot::Sender<Option<String>>,
     },
+    ConvResumeHistory {
+        tab_idx: usize,
+        messages: Vec<crate::session::message::Message>,
+    },
 
     // Tool detail panel
     ToolDetailOpen {
