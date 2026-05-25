@@ -1,22 +1,17 @@
 pub mod sse;
 
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
 
-use crate::providers::traits::ProviderError;
+use crate::providers::traits::{EventStream, Provider, ProviderError, SendOptions};
 
 const BACKOFF_SECS: &[u64] = &[1, 2, 5, 10, 15, 20, 25, 30, 30, 30];
 pub const MAX_RETRIES: u32 = 10;
 
-#[derive(Debug, Clone)]
-pub struct RetryEvent {
-    pub attempt: u32,
-    pub max_retries: u32,
-    pub wait_secs: u64,
-    pub error: String,
-    pub provider_name: String,
-}
+static SHARED_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 pub struct StreamingRequest {
     pub url: String,
@@ -35,7 +30,6 @@ impl StreamingRequest {
 }
 
 pub async fn send_streaming(req: &StreamingRequest) -> Result<reqwest::Response, ProviderError> {
-    let client = reqwest::Client::new();
     let display_url = req.display_url();
 
     tracing::debug!(
@@ -44,7 +38,7 @@ pub async fn send_streaming(req: &StreamingRequest) -> Result<reqwest::Response,
         "sending request",
     );
 
-    let resp = client
+    let resp = SHARED_CLIENT
         .post(&req.url)
         .headers(req.headers.clone())
         .json(&req.body)
@@ -70,7 +64,10 @@ pub async fn send_streaming(req: &StreamingRequest) -> Result<reqwest::Response,
             response_body = %text,
             "bad response from API",
         );
-        return Err(ProviderError::BadResponse(format!("{status}: {text}")));
+        return Err(ProviderError::BadResponse {
+            status: status.as_u16(),
+            body: text,
+        });
     }
 
     tracing::debug!(
@@ -90,17 +87,59 @@ pub fn backoff_delay(attempt: u32) -> Duration {
 pub fn is_retryable(err: &ProviderError) -> bool {
     match err {
         ProviderError::HttpError(_) | ProviderError::Timeout => true,
-        ProviderError::BadResponse(msg) => msg
-            .split_whitespace()
-            .next()
-            .and_then(|s| s.parse::<u16>().ok())
-            .is_some_and(is_retryable_status),
+        ProviderError::BadResponse { status, .. } => is_retryable_status(*status),
         _ => false,
     }
 }
 
 fn is_retryable_status(status: u16) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504)
+}
+
+pub enum RetryOutcome {
+    Success { stream: EventStream, attempts: u32 },
+    Failed(ProviderError),
+    Cancelled,
+}
+
+pub async fn send_with_retry(
+    provider: &dyn Provider,
+    opts: &SendOptions,
+    cancel: Option<&AtomicBool>,
+    mut on_retry: impl FnMut(u32, u64, &ProviderError),
+) -> RetryOutcome {
+    for attempt in 0..MAX_RETRIES {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return RetryOutcome::Cancelled;
+        }
+
+        match provider.send(opts).await {
+            Ok(stream) => {
+                return RetryOutcome::Success {
+                    stream,
+                    attempts: attempt,
+                };
+            }
+            Err(e) => {
+                if !is_retryable(&e) || attempt + 1 >= MAX_RETRIES {
+                    return RetryOutcome::Failed(e);
+                }
+
+                let delay = backoff_delay(attempt);
+                on_retry(attempt + 1, delay.as_secs(), &e);
+
+                let sleep_until = tokio::time::Instant::now() + delay;
+                while tokio::time::Instant::now() < sleep_until {
+                    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        return RetryOutcome::Cancelled;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    RetryOutcome::Failed(ProviderError::HttpError("all retries exhausted".into()))
 }
 
 #[cfg(test)]
@@ -145,34 +184,42 @@ mod tests {
             "connection refused".into()
         )));
         assert!(is_retryable(&ProviderError::Timeout));
-        assert!(is_retryable(&ProviderError::BadResponse(
-            "429 Too Many Requests: rate limited".into()
-        )));
-        assert!(is_retryable(&ProviderError::BadResponse(
-            "500 Internal Server Error: oops".into()
-        )));
-        assert!(is_retryable(&ProviderError::BadResponse(
-            "502 Bad Gateway: ".into()
-        )));
-        assert!(is_retryable(&ProviderError::BadResponse(
-            "503 Service Unavailable: ".into()
-        )));
-        assert!(is_retryable(&ProviderError::BadResponse(
-            "504 Gateway Timeout: ".into()
-        )));
+        assert!(is_retryable(&ProviderError::BadResponse {
+            status: 429,
+            body: "rate limited".into()
+        }));
+        assert!(is_retryable(&ProviderError::BadResponse {
+            status: 500,
+            body: "internal server error".into()
+        }));
+        assert!(is_retryable(&ProviderError::BadResponse {
+            status: 502,
+            body: String::new()
+        }));
+        assert!(is_retryable(&ProviderError::BadResponse {
+            status: 503,
+            body: String::new()
+        }));
+        assert!(is_retryable(&ProviderError::BadResponse {
+            status: 504,
+            body: String::new()
+        }));
     }
 
     #[test]
     fn non_retryable_provider_errors() {
-        assert!(!is_retryable(&ProviderError::BadResponse(
-            "400 Bad Request: invalid json".into()
-        )));
-        assert!(!is_retryable(&ProviderError::BadResponse(
-            "401 Unauthorized: bad key".into()
-        )));
-        assert!(!is_retryable(&ProviderError::BadResponse(
-            "403 Forbidden: no access".into()
-        )));
+        assert!(!is_retryable(&ProviderError::BadResponse {
+            status: 400,
+            body: "invalid json".into()
+        }));
+        assert!(!is_retryable(&ProviderError::BadResponse {
+            status: 401,
+            body: "bad key".into()
+        }));
+        assert!(!is_retryable(&ProviderError::BadResponse {
+            status: 403,
+            body: "no access".into()
+        }));
         assert!(!is_retryable(&ProviderError::MissingCredential));
         assert!(!is_retryable(&ProviderError::InvalidConfig("bad".into())));
         assert!(!is_retryable(&ProviderError::Cancelled));

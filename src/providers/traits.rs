@@ -114,8 +114,8 @@ pub enum ProviderError {
     MissingCredential,
     #[error("HTTP error: {0}")]
     HttpError(String),
-    #[error("bad response: {0}")]
-    BadResponse(String),
+    #[error("bad response ({status}): {body}")]
+    BadResponse { status: u16, body: String },
     #[error("cancelled")]
     Cancelled,
     #[error("timeout")]

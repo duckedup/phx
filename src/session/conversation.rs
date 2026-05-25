@@ -5,9 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::providers::traits::{
-    Event, Provider, ProviderError, SendOptions, StopReason, ToolSchema,
-};
+use crate::providers::traits::{Event, Provider, SendOptions, StopReason, ToolSchema};
 use crate::session::agent_loop::Session;
 use crate::session::context;
 use crate::session::message::{self, Message};
@@ -142,56 +140,36 @@ pub fn spawn_conversation(
             };
 
             // --- Send to LLM, get the stream (with retry + backoff) ---
-            let stream = 'send: {
-                let mut last_err = None;
-                for attempt in 0..crate::http::MAX_RETRIES {
-                    if cancel.load(Ordering::Relaxed) {
-                        let _ = tx.send(ConvEvent::Cancelled(session));
-                        return;
+            let stream = match crate::http::send_with_retry(
+                current_provider.as_ref() as &dyn Provider,
+                &opts,
+                Some(&cancel),
+                |attempt, wait_secs, err| {
+                    let _ = tx.send(ConvEvent::Retrying {
+                        attempt,
+                        max_retries: crate::http::MAX_RETRIES,
+                        wait_secs,
+                        error: err.to_string(),
+                    });
+                },
+            )
+            .await
+            {
+                crate::http::RetryOutcome::Success { stream, attempts } => {
+                    if attempts > 0 {
+                        let _ = tx.send(ConvEvent::RetryRecovered { attempts });
                     }
-
-                    match current_provider.send(&opts).await {
-                        Ok(s) => {
-                            if attempt > 0 {
-                                let _ = tx.send(ConvEvent::RetryRecovered { attempts: attempt });
-                            }
-                            break 'send s;
-                        }
-                        Err(e) => {
-                            if !crate::http::is_retryable(&e)
-                                || attempt + 1 >= crate::http::MAX_RETRIES
-                            {
-                                let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
-                                let _ = tx.send(ConvEvent::Done(session));
-                                return;
-                            }
-
-                            let delay = crate::http::backoff_delay(attempt);
-                            let _ = tx.send(ConvEvent::Retrying {
-                                attempt: attempt + 1,
-                                max_retries: crate::http::MAX_RETRIES,
-                                wait_secs: delay.as_secs(),
-                                error: e.to_string(),
-                            });
-
-                            let sleep_until = tokio::time::Instant::now() + delay;
-                            while tokio::time::Instant::now() < sleep_until {
-                                if cancel.load(Ordering::Relaxed) {
-                                    let _ = tx.send(ConvEvent::Cancelled(session));
-                                    return;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            }
-
-                            last_err = Some(e);
-                        }
-                    }
+                    stream
                 }
-                let e =
-                    last_err.unwrap_or(ProviderError::HttpError("all retries exhausted".into()));
-                let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
-                let _ = tx.send(ConvEvent::Done(session));
-                return;
+                crate::http::RetryOutcome::Failed(e) => {
+                    let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
+                    let _ = tx.send(ConvEvent::Done(session));
+                    return;
+                }
+                crate::http::RetryOutcome::Cancelled => {
+                    let _ = tx.send(ConvEvent::Cancelled(session));
+                    return;
+                }
             };
 
             futures::pin_mut!(stream);

@@ -245,10 +245,7 @@ pub async fn send_message(
 
     crate::tui::runtime::redraw(app, terminal);
 
-    use crate::providers::traits::{
-        Event, ProviderMessage, ProviderRole, ProviderToolCall, ProviderToolResult, SendOptions,
-        StopReason, ToolSchema,
-    };
+    use crate::providers::traits::{Event, SendOptions, StopReason, ToolSchema};
     use crossterm::event::EventStream;
     use futures::StreamExt;
 
@@ -344,29 +341,7 @@ pub async fn send_message(
         } else {
             session.messages.clone()
         };
-        let provider_messages: Vec<ProviderMessage> = messages
-            .iter()
-            .map(|m| ProviderMessage {
-                role: match m.role {
-                    crate::session::message::Role::System => ProviderRole::System,
-                    crate::session::message::Role::User => ProviderRole::User,
-                    crate::session::message::Role::Assistant => ProviderRole::Assistant,
-                    crate::session::message::Role::ToolCall => ProviderRole::Assistant,
-                    crate::session::message::Role::ToolResult => ProviderRole::Tool,
-                },
-                content: m.content.clone(),
-                tool_call: m.tool_call.as_ref().map(|tc| ProviderToolCall {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    args_json: tc.args_json.clone(),
-                }),
-                tool_result: m.tool_result.as_ref().map(|tr| ProviderToolResult {
-                    id: tr.id.clone(),
-                    output: tr.output.clone(),
-                    is_error: tr.is_error,
-                }),
-            })
-            .collect();
+        let provider_messages = crate::session::message::to_provider_messages(&messages);
 
         let opts = SendOptions {
             messages: provider_messages,
@@ -464,12 +439,16 @@ pub async fn send_message(
                                             if key.code == KeyCode::Char('c')
                                                 && key.modifiers.contains(KeyModifiers::CONTROL) =>
                                         {
+                                            app.handle_key(key).await;
                                             cancelled = true;
                                         }
                                         Some(Ok(CEvent::Key(key)))
                                             if key.code == KeyCode::Esc =>
                                         {
                                             cancelled = true;
+                                        }
+                                        Some(Ok(CEvent::Mouse(mouse))) => {
+                                            crate::tui::event_handler::handle_sidebar_click(app, mouse);
                                         }
                                         _ => {}
                                     }

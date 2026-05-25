@@ -1,5 +1,5 @@
 pub struct SseParser {
-    buffer: String,
+    buffer: Vec<u8>,
     delimiter: SseDelimiter,
 }
 
@@ -17,13 +17,13 @@ pub enum SseLine {
 impl SseParser {
     pub fn new(delimiter: SseDelimiter) -> Self {
         Self {
-            buffer: String::new(),
+            buffer: Vec::new(),
             delimiter,
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        self.buffer.extend_from_slice(chunk);
     }
 
     pub fn next_line(&mut self) -> Option<SseLine> {
@@ -34,9 +34,11 @@ impl SseParser {
     }
 
     fn next_single(&mut self) -> Option<SseLine> {
-        let pos = self.buffer.find('\n')?;
-        let line = self.buffer[..pos].trim().to_string();
-        self.buffer = self.buffer[pos + 1..].to_string();
+        let pos = self.buffer.iter().position(|&b| b == b'\n')?;
+        let line_bytes = self.buffer[..pos].to_vec();
+        self.buffer = self.buffer[pos + 1..].to_vec();
+
+        let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
 
         if line.is_empty() {
             return Some(SseLine::Raw(String::new()));
@@ -59,9 +61,11 @@ impl SseParser {
     }
 
     fn next_double(&mut self) -> Option<SseLine> {
-        let pos = self.buffer.find("\n\n")?;
-        let block = self.buffer[..pos].to_string();
-        self.buffer = self.buffer[pos + 2..].to_string();
+        let pos = self.buffer.windows(2).position(|w| w == b"\n\n")?;
+        let block_bytes = self.buffer[..pos].to_vec();
+        self.buffer = self.buffer[pos + 2..].to_vec();
+
+        let block = String::from_utf8_lossy(&block_bytes).to_string();
 
         for line in block.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
@@ -150,6 +154,24 @@ mod tests {
         match parser.next_line() {
             Some(SseLine::Raw(s)) => assert!(s.is_empty()),
             other => panic!("expected empty Raw, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multibyte_utf8_split_across_chunks() {
+        let mut parser = SseParser::new(SseDelimiter::SingleNewline);
+        let emoji = "data: {\"text\":\"hello 🌍\"}\n";
+        let bytes = emoji.as_bytes();
+        // Split in the middle of the 4-byte emoji (🌍 = F0 9F 8C 8D)
+        let split = bytes.len() - 3;
+        parser.push(&bytes[..split]);
+        assert!(parser.next_line().is_none());
+        parser.push(&bytes[split..]);
+        match parser.next_line() {
+            Some(SseLine::Data(json)) => {
+                assert_eq!(json["text"], "hello 🌍");
+            }
+            other => panic!("expected Data with emoji, got {other:?}"),
         }
     }
 
