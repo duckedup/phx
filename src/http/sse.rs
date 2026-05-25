@@ -67,15 +67,27 @@ impl SseParser {
 
         let block = String::from_utf8_lossy(&block_bytes).to_string();
 
+        // Collect all data: field values per SSE spec — they get concatenated
+        // with newlines before interpretation.
+        let mut data_parts: Vec<&str> = Vec::new();
         for line in block.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
-                if data == "[DONE]" {
-                    return Some(SseLine::Done);
-                }
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                    return Some(SseLine::Data(json));
-                }
+                data_parts.push(data);
             }
+        }
+
+        if !data_parts.is_empty() {
+            // Check for [DONE] sentinel (only when it's the sole data line)
+            if data_parts.len() == 1 && data_parts[0] == "[DONE]" {
+                return Some(SseLine::Done);
+            }
+
+            let concatenated = data_parts.join("\n");
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&concatenated) {
+                return Some(SseLine::Data(json));
+            }
+
+            return Some(SseLine::Raw(concatenated));
         }
 
         Some(SseLine::Raw(block))
@@ -172,6 +184,23 @@ mod tests {
                 assert_eq!(json["text"], "hello 🌍");
             }
             other => panic!("expected Data with emoji, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn double_newline_concatenates_multiline_data() {
+        // Per SSE spec, multiple "data:" lines in one block should be
+        // concatenated (joined by newlines) before parsing as JSON.
+        let mut parser = SseParser::new(SseDelimiter::DoubleNewline);
+        parser.push(b"data: {\"part1\":\ndata: \"hello\"}\n\n");
+        match parser.next_line() {
+            Some(SseLine::Data(json)) => {
+                assert_eq!(
+                    json["part1"], "hello",
+                    "multi-line data should be concatenated and parsed as one JSON value"
+                );
+            }
+            other => panic!("expected Data with concatenated JSON, got {other:?}"),
         }
     }
 
