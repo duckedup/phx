@@ -160,11 +160,12 @@ fn build_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
 }
 
 fn parse_anthropic_sse(resp: reqwest::Response) -> EventStream {
+    use crate::http::sse::{SseDelimiter, SseLine, SseParser};
     use futures::StreamExt;
 
     let stream = async_stream::stream! {
         let mut bytes_stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut parser = SseParser::new(SseDelimiter::DoubleNewline);
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_args = String::new();
@@ -183,87 +184,81 @@ fn parse_anthropic_sse(resp: reqwest::Response) -> EventStream {
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            parser.push(&chunk);
 
-            while let Some(pos) = buffer.find("\n\n") {
-                let block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+            while let Some(line) = parser.next_line() {
+                let json = match line {
+                    SseLine::Data(json) => json,
+                    SseLine::Done => continue,
+                    SseLine::Raw(_) => continue,
+                };
 
-                for line in block.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            continue;
+                let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match event_type {
+                    "content_block_start" => {
+                        if let Some(cb) = json.get("content_block") {
+                            let cb_type = cb.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if cb_type == "tool_use" {
+                                current_tool_id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").into();
+                                current_tool_name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").into();
+                                current_tool_args.clear();
+                            }
                         }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            match event_type {
-                                "content_block_start" => {
-                                    if let Some(cb) = json.get("content_block") {
-                                        let cb_type = cb.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                        if cb_type == "tool_use" {
-                                            current_tool_id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").into();
-                                            current_tool_name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").into();
-                                            current_tool_args.clear();
-                                        }
+                    }
+                    "content_block_delta" => {
+                        if let Some(delta) = json.get("delta") {
+                            let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match delta_type {
+                                "text_delta" => {
+                                    if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                        yield Event::Token(text.into());
                                     }
                                 }
-                                "content_block_delta" => {
-                                    if let Some(delta) = json.get("delta") {
-                                        let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                        match delta_type {
-                                            "text_delta" => {
-                                                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                                    yield Event::Token(text.into());
-                                                }
-                                            }
-                                            "input_json_delta" => {
-                                                if let Some(partial) = delta.get("partial_json").and_then(|t| t.as_str()) {
-                                                    current_tool_args.push_str(partial);
-                                                }
-                                            }
-                                            _ => {}
-                                        }
+                                "input_json_delta" => {
+                                    if let Some(partial) = delta.get("partial_json").and_then(|t| t.as_str()) {
+                                        current_tool_args.push_str(partial);
                                     }
-                                }
-                                "content_block_stop"
-                                    if !current_tool_name.is_empty() => {
-                                        yield Event::ToolCall {
-                                            id: std::mem::take(&mut current_tool_id),
-                                            name: std::mem::take(&mut current_tool_name),
-                                            args_json: if current_tool_args.is_empty() { "{}".into() } else { std::mem::take(&mut current_tool_args) },
-                                        };
-                                    }
-                                "message_start" => {
-                                    if let Some(usage) = json.get("message").and_then(|m| m.get("usage")) {
-                                        input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                        cache_creation_tokens = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                        cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    }
-                                }
-                                "message_delta" => {
-                                    if let Some(usage) = json.get("usage") {
-                                        output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    }
-                                    let stop_reason = json.get("delta")
-                                        .and_then(|d| d.get("stop_reason"))
-                                        .and_then(|s| s.as_str())
-                                        .unwrap_or("end_turn");
-                                    let reason = match stop_reason {
-                                        "end_turn" => StopReason::EndTurn,
-                                        "max_tokens" => StopReason::MaxTokens,
-                                        "tool_use" => StopReason::ToolUse,
-                                        "stop_sequence" => StopReason::StopSequence,
-                                        other => StopReason::Other(other.into()),
-                                    };
-                                    yield Event::Done {
-                                        stop_reason: reason,
-                                        usage: Usage { input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens },
-                                    };
                                 }
                                 _ => {}
                             }
                         }
                     }
+                    "content_block_stop"
+                        if !current_tool_name.is_empty() => {
+                            yield Event::ToolCall {
+                                id: std::mem::take(&mut current_tool_id),
+                                name: std::mem::take(&mut current_tool_name),
+                                args_json: if current_tool_args.is_empty() { "{}".into() } else { std::mem::take(&mut current_tool_args) },
+                            };
+                        }
+                    "message_start" => {
+                        if let Some(usage) = json.get("message").and_then(|m| m.get("usage")) {
+                            input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            cache_creation_tokens = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                        }
+                    }
+                    "message_delta" => {
+                        if let Some(usage) = json.get("usage") {
+                            output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                        }
+                        let stop_reason = json.get("delta")
+                            .and_then(|d| d.get("stop_reason"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("end_turn");
+                        let reason = match stop_reason {
+                            "end_turn" => StopReason::EndTurn,
+                            "max_tokens" => StopReason::MaxTokens,
+                            "tool_use" => StopReason::ToolUse,
+                            "stop_sequence" => StopReason::StopSequence,
+                            other => StopReason::Other(other.into()),
+                        };
+                        yield Event::Done {
+                            stop_reason: reason,
+                            usage: Usage { input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens },
+                        };
+                    }
+                    _ => {}
                 }
             }
         }

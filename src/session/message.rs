@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::providers::traits::{
+    ProviderMessage, ProviderRole, ProviderToolCall, ProviderToolResult,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -80,6 +84,33 @@ impl Message {
             tool_result: Some(tr),
         }
     }
+
+    pub fn to_provider_message(&self) -> ProviderMessage {
+        ProviderMessage {
+            role: match self.role {
+                Role::System => ProviderRole::System,
+                Role::User => ProviderRole::User,
+                Role::Assistant => ProviderRole::Assistant,
+                Role::ToolCall => ProviderRole::Assistant,
+                Role::ToolResult => ProviderRole::Tool,
+            },
+            content: self.content.clone(),
+            tool_call: self.tool_call.as_ref().map(|tc| ProviderToolCall {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                args_json: tc.args_json.clone(),
+            }),
+            tool_result: self.tool_result.as_ref().map(|tr| ProviderToolResult {
+                id: tr.id.clone(),
+                output: tr.output.clone(),
+                is_error: tr.is_error,
+            }),
+        }
+    }
+}
+
+pub fn to_provider_messages(messages: &[Message]) -> Vec<ProviderMessage> {
+    messages.iter().map(Message::to_provider_message).collect()
 }
 
 #[cfg(test)]

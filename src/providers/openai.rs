@@ -120,27 +120,16 @@ fn build_messages(opts: &SendOptions) -> Vec<serde_json::Value> {
 }
 
 fn build_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
-    tools
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                }
-            })
-        })
-        .collect()
+    tools.iter().map(ToolSchema::to_openai_json).collect()
 }
 
 fn parse_openai_sse(resp: reqwest::Response) -> EventStream {
+    use crate::http::sse::{SseDelimiter, SseLine, SseParser};
     use futures::StreamExt;
 
     let stream = async_stream::stream! {
         let mut bytes_stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut parser = SseParser::new(SseDelimiter::SingleNewline);
         let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
@@ -157,33 +146,27 @@ fn parse_openai_sse(resp: reqwest::Response) -> EventStream {
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            parser.push(&chunk);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer = buffer[pos + 1..].to_string();
-
-                if line.is_empty() {
-                    continue;
-                }
-
-                let Some(data) = line.strip_prefix("data: ") else { continue };
-                if data == "[DONE]" {
-                    for (_, (id, name, args)) in std::mem::take(&mut tool_calls) {
-                        yield Event::ToolCall {
-                            id,
-                            name,
-                            args_json: if args.is_empty() { "{}".into() } else { args },
+            while let Some(line) = parser.next_line() {
+                let json = match line {
+                    SseLine::Data(json) => json,
+                    SseLine::Done => {
+                        for (_, (id, name, args)) in std::mem::take(&mut tool_calls) {
+                            yield Event::ToolCall {
+                                id,
+                                name,
+                                args_json: if args.is_empty() { "{}".into() } else { args },
+                            };
+                        }
+                        yield Event::Done {
+                            stop_reason: stop_reason.clone(),
+                            usage: Usage { input_tokens, output_tokens, cache_creation_tokens: 0, cache_read_tokens },
                         };
+                        return;
                     }
-                    yield Event::Done {
-                        stop_reason: stop_reason.clone(),
-                        usage: Usage { input_tokens, output_tokens, cache_creation_tokens: 0, cache_read_tokens },
-                    };
-                    return;
-                }
-
-                let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+                    SseLine::Raw(_) => continue,
+                };
 
                 if let Some(usage) = json.get("usage") {
                     input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(input_tokens);

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
-use ratatui::widgets::*;
+use ratatui::widgets::ListItem;
 
 use crate::tui::picker::{PickerItem, PickerMode, PickerState};
 use crate::tui::theme::Theme;
@@ -137,8 +137,6 @@ pub fn render_modal_picker(frame: &mut Frame, picker: &PickerState, theme: &Them
     let area = frame.area();
     let popup_area = popup_rect(area);
 
-    frame.render_widget(Clear, popup_area);
-
     let title = match picker.mode {
         PickerMode::Theme => " Theme ",
         PickerMode::Model => " Model ",
@@ -147,18 +145,16 @@ pub fn render_modal_picker(frame: &mut Frame, picker: &PickerState, theme: &Them
     };
 
     let inner_height = popup_area.height.saturating_sub(2) as usize;
-    let scroll = picker.cursor.saturating_sub(inner_height.saturating_sub(1));
 
-    let items: Vec<ListItem> = picker
-        .filtered
-        .iter()
-        .skip(scroll)
-        .take(inner_height)
-        .enumerate()
-        .map(|(i, &idx)| {
-            let item = &picker.items[idx];
-            let display_idx = scroll + i;
-            let style = if display_idx == picker.cursor {
+    crate::tui::picker::render_picker_list(
+        frame,
+        popup_area,
+        picker,
+        theme,
+        inner_height,
+        title,
+        |item, is_selected| {
+            let style = if is_selected {
                 Style::default().fg(theme.background).bg(theme.accent)
             } else {
                 Style::default().fg(theme.foreground)
@@ -169,16 +165,6 @@ pub fn render_modal_picker(frame: &mut Frame, picker: &PickerState, theme: &Them
                 format!("  {:<20} {}", item.label, item.description)
             };
             ListItem::new(text).style(style)
-        })
-        .collect();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.accent))
-        .border_type(BorderType::Rounded)
-        .style(Style::default().bg(theme.background))
-        .title(title);
-
-    let list = List::new(items).block(block);
-    frame.render_widget(list, popup_area);
+        },
+    );
 }

@@ -114,24 +114,16 @@ fn build_contents(opts: &SendOptions) -> Vec<serde_json::Value> {
 }
 
 fn build_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
-    tools
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-            })
-        })
-        .collect()
+    tools.iter().map(ToolSchema::to_simple_json).collect()
 }
 
 fn parse_google_sse(resp: reqwest::Response) -> EventStream {
+    use crate::http::sse::{SseDelimiter, SseLine, SseParser};
     use futures::StreamExt;
 
     let stream = async_stream::stream! {
         let mut bytes_stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut parser = SseParser::new(SseDelimiter::SingleNewline);
         let mut total_input: u64 = 0;
         let mut total_output: u64 = 0;
 
@@ -145,14 +137,13 @@ fn parse_google_sse(resp: reqwest::Response) -> EventStream {
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            parser.push(&chunk);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer = buffer[pos + 1..].to_string();
-
-                let Some(data) = line.strip_prefix("data: ") else { continue };
-                let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+            while let Some(line) = parser.next_line() {
+                let json = match line {
+                    SseLine::Data(json) => json,
+                    SseLine::Done | SseLine::Raw(_) => continue,
+                };
 
                 if let Some(usage) = json.get("usageMetadata") {
                     total_input = usage.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);

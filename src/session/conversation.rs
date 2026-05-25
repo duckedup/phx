@@ -6,12 +6,11 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::providers::traits::{
-    Event, Provider, ProviderError, ProviderMessage, ProviderRole, ProviderToolCall,
-    ProviderToolResult, SendOptions, StopReason, ToolSchema,
+    Event, Provider, ProviderError, SendOptions, StopReason, ToolSchema,
 };
 use crate::session::agent_loop::Session;
 use crate::session::context;
-use crate::session::message::{Message, Role};
+use crate::session::message::{self, Message};
 use crate::session::skills;
 use crate::store::session_store::SessionStore;
 use crate::tools::traits::ToolRegistry;
@@ -546,35 +545,13 @@ fn build_system_prompt(
     blocks
 }
 
-fn build_provider_messages(session: &Session) -> Vec<ProviderMessage> {
+fn build_provider_messages(session: &Session) -> Vec<crate::providers::traits::ProviderMessage> {
     let messages = if session.profile.compression {
         crate::session::compress::compress_for_provider(&session.messages)
     } else {
         session.messages.clone()
     };
-    messages
-        .iter()
-        .map(|m| ProviderMessage {
-            role: match m.role {
-                Role::System => ProviderRole::System,
-                Role::User => ProviderRole::User,
-                Role::Assistant => ProviderRole::Assistant,
-                Role::ToolCall => ProviderRole::Assistant,
-                Role::ToolResult => ProviderRole::Tool,
-            },
-            content: m.content.clone(),
-            tool_call: m.tool_call.as_ref().map(|tc| ProviderToolCall {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                args_json: tc.args_json.clone(),
-            }),
-            tool_result: m.tool_result.as_ref().map(|tr| ProviderToolResult {
-                id: tr.id.clone(),
-                output: tr.output.clone(),
-                is_error: tr.is_error,
-            }),
-        })
-        .collect()
+    message::to_provider_messages(&messages)
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {

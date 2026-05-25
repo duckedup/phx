@@ -278,43 +278,7 @@ impl Session {
             } else {
                 self.messages.clone()
             };
-            let provider_messages = messages
-                .iter()
-                .map(|m| crate::providers::traits::ProviderMessage {
-                    role: match m.role {
-                        crate::session::message::Role::System => {
-                            crate::providers::traits::ProviderRole::System
-                        }
-                        crate::session::message::Role::User => {
-                            crate::providers::traits::ProviderRole::User
-                        }
-                        crate::session::message::Role::Assistant => {
-                            crate::providers::traits::ProviderRole::Assistant
-                        }
-                        crate::session::message::Role::ToolCall => {
-                            crate::providers::traits::ProviderRole::Assistant
-                        }
-                        crate::session::message::Role::ToolResult => {
-                            crate::providers::traits::ProviderRole::Tool
-                        }
-                    },
-                    content: m.content.clone(),
-                    tool_call: m.tool_call.as_ref().map(|tc| {
-                        crate::providers::traits::ProviderToolCall {
-                            id: tc.id.clone(),
-                            name: tc.name.clone(),
-                            args_json: tc.args_json.clone(),
-                        }
-                    }),
-                    tool_result: m.tool_result.as_ref().map(|tr| {
-                        crate::providers::traits::ProviderToolResult {
-                            id: tr.id.clone(),
-                            output: tr.output.clone(),
-                            is_error: tr.is_error,
-                        }
-                    }),
-                })
-                .collect();
+            let provider_messages = crate::session::message::to_provider_messages(&messages);
 
             let opts = SendOptions {
                 messages: provider_messages,

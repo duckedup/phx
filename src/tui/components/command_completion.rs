@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
-use ratatui::widgets::*;
+use ratatui::widgets::ListItem;
 
 use crate::tui::picker::{PickerItem, PickerMode, PickerState};
 use crate::tui::theme::Theme;
@@ -84,23 +84,16 @@ pub fn render_command_completion(
         height: popup_height,
     };
 
-    frame.render_widget(Clear, popup_area);
-
-    let scroll = if picker.cursor >= max_visible {
-        picker.cursor - max_visible + 1
-    } else {
-        0
-    };
-
-    let items: Vec<ListItem> = picker
-        .filtered
-        .iter()
-        .skip(scroll)
-        .take(max_visible)
-        .enumerate()
-        .map(|(i, &idx)| {
-            let item = &picker.items[idx];
-            let is_selected = (i + scroll) == picker.cursor;
+    let mut border_theme = theme.clone();
+    border_theme.accent = Theme::blend(theme.accent, theme.background, 0.5);
+    crate::tui::picker::render_picker_list(
+        frame,
+        popup_area,
+        picker,
+        &border_theme,
+        max_visible,
+        "",
+        |item, is_selected| {
             let base_style = if is_selected {
                 Style::default().fg(theme.background).bg(theme.accent)
             } else {
@@ -123,15 +116,6 @@ pub fn render_command_completion(
                 ),
                 Span::styled(tag, dim_style),
             ]))
-        })
-        .collect();
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Theme::blend(theme.accent, theme.background, 0.5)))
-        .border_type(BorderType::Rounded)
-        .style(Style::default().bg(theme.background));
-
-    let list = List::new(items).block(block);
-    frame.render_widget(list, popup_area);
+        },
+    );
 }

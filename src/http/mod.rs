@@ -1,3 +1,5 @@
+pub mod sse;
+
 use std::time::Duration;
 
 use reqwest::header::HeaderMap;
