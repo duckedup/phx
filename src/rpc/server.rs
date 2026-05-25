@@ -18,6 +18,7 @@ pub async fn run(
     let tool_registry = tools::build_registry_all();
     let project = std::env::current_dir().unwrap_or_default();
     let mut session: Option<Session> = None;
+    let mut current_session_id: Option<SessionId> = None;
 
     let mut lines = input.lines();
 
@@ -141,9 +142,41 @@ pub async fn run(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
-                let sess = session.get_or_insert_with(|| {
-                    Session::new(SessionId::new(), crate::config::SessionProfile::default())
-                });
+                let requested_sid = req
+                    .params
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| SessionId(s.to_string()));
+
+                if let Some(sid) = requested_sid
+                    && current_session_id.as_ref() != Some(&sid)
+                {
+                    let messages_json = store
+                        .load_messages(&project, &sid)
+                        .await
+                        .unwrap_or_default();
+                    let mut sess =
+                        Session::new(sid.clone(), crate::config::SessionProfile::default());
+                    for raw in &messages_json {
+                        if let Ok(msg) =
+                            serde_json::from_value::<crate::session::Message>(raw.clone())
+                        {
+                            sess.add_message(msg);
+                        }
+                    }
+                    session = Some(sess);
+                    current_session_id = Some(sid);
+                }
+
+                if session.is_none() {
+                    let new_id = SessionId::new();
+                    current_session_id = Some(new_id.clone());
+                    session = Some(Session::new(
+                        new_id,
+                        crate::config::SessionProfile::default(),
+                    ));
+                }
+                let sess = session.as_mut().expect("session initialized above");
 
                 sess.add_message(crate::session::Message::user(msg_text));
 
@@ -176,6 +209,16 @@ pub async fn run(
 
                 let id_clone = id.clone();
                 let run_fut = sess.run(&*provider, &tool_registry, &store, &project, &skills);
+
+                if let Some(sid) = &current_session_id {
+                    write_event_line(
+                        &mut output,
+                        &id,
+                        "session_id",
+                        serde_json::json!({"session_id": sid.0}),
+                    )
+                    .await?;
+                }
 
                 // Stream events as they arrive during session execution
                 tokio::pin!(run_fut);
@@ -253,6 +296,59 @@ pub async fn run(
                 }
             },
 
+            SESSION_RESUME => {
+                let sid = req
+                    .params
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| SessionId(s.to_string()));
+
+                let sid = match sid {
+                    Some(s) => s,
+                    None => {
+                        write_error(
+                            &mut output,
+                            &id,
+                            ErrorCode::InvalidParams,
+                            "missing session_id",
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+
+                let messages_json = match store.load_messages(&project, &sid).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        write_error(&mut output, &id, ErrorCode::InternalError, &e.to_string())
+                            .await?;
+                        continue;
+                    }
+                };
+
+                let mut sess = Session::new(sid.clone(), crate::config::SessionProfile::default());
+                for raw in &messages_json {
+                    if let Ok(msg) = serde_json::from_value::<crate::session::Message>(raw.clone())
+                    {
+                        sess.add_message(msg);
+                    }
+                }
+
+                current_session_id = Some(sid.clone());
+                session = Some(sess);
+
+                write_success(
+                    &mut output,
+                    &id,
+                    serde_json::json!({
+                        "session_id": sid.0,
+                        "message_count": messages_json.len(),
+                        "messages": messages_json,
+                    }),
+                )
+                .await?;
+            }
+
             _ => {
                 write_error(
                     &mut output,
@@ -271,7 +367,12 @@ pub async fn run(
 #[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
+    use crate::store::session_store::SessionState;
+    use chrono::Utc;
     use std::io::Cursor;
+    use tokio::sync::Mutex;
+
+    static HOME_LOCK: Mutex<()> = Mutex::const_new(());
 
     async fn run_rpc(input: &str) -> String {
         let config = Config::default();
@@ -308,5 +409,58 @@ mod tests {
         let output = run_rpc("not json at all\n").await;
         let parsed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
         assert_eq!(parsed["error"]["code"], -32700);
+    }
+
+    #[tokio::test]
+    async fn session_resume_missing_session_id() {
+        let output = run_rpc(r#"{"id":10,"method":"session.resume","params":{}}"#).await;
+        let parsed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(parsed["id"], 10);
+        assert_eq!(parsed["error"]["code"], -32602);
+        assert_eq!(parsed["error"]["message"], "missing session_id");
+    }
+
+    #[tokio::test]
+    async fn session_resume_loads_messages() {
+        let _guard = HOME_LOCK.lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        crate::config::paths::set_home_override(tmp.path());
+
+        let store = SessionStore::new(crate::config::paths::sessions_dir());
+        let project = std::env::current_dir().unwrap();
+        let sid = SessionId::new();
+
+        let now = Utc::now();
+        let state = SessionState {
+            id: sid.clone(),
+            display_name: "test session".into(),
+            provider: String::new(),
+            model: String::new(),
+            created_at: now,
+            updated_at: now,
+            token_input: 0,
+            token_output: 0,
+        };
+        store.create(&project, &state).await.unwrap();
+
+        let msg = serde_json::to_value(crate::session::Message::user("hello world")).unwrap();
+        store.append_message(&project, &sid, &msg).await.unwrap();
+
+        let req = format!(
+            r#"{{"id":11,"method":"session.resume","params":{{"session_id":"{}"}}}}"#,
+            sid.0
+        );
+        let output = run_rpc(&req).await;
+
+        crate::config::paths::clear_home_override();
+
+        let parsed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(parsed["id"], 11);
+        assert_eq!(parsed["result"]["session_id"], sid.0);
+        assert_eq!(parsed["result"]["message_count"], 1);
+        let messages = parsed["result"]["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "hello world");
     }
 }
