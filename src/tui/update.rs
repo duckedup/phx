@@ -315,7 +315,7 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
                 tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
                     crate::tui::tabs::ChatLine {
                         role: crate::session::message::Role::System,
-                        content: format!("Recovered after {attempts} attempts"),
+                        content: crate::http::format_recovered_msg(attempts),
                     },
                 ));
             }

@@ -36,12 +36,12 @@ struct Cli {
     #[arg(long = "plugin-dir", short = 'p')]
     plugin_dirs: Vec<PathBuf>,
 
-    /// Run as headless TCP server. Requires --port.
-    #[arg(long)]
+    /// Run as headless TCP server.
+    #[arg(long, requires = "port")]
     host: Option<String>,
 
-    /// TCP port for server mode. Used with --host.
-    #[arg(long)]
+    /// TCP port for server mode.
+    #[arg(long, requires = "host")]
     port: Option<u16>,
 
     /// Connect TUI to a remote phx server. Format: host:port
@@ -77,15 +77,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if cli.host.is_some() || cli.port.is_some() {
-        let host = match cli.host {
-            Some(h) => h,
-            None => anyhow::bail!("--host and --port must both be specified"),
-        };
-        let port = match cli.port {
-            Some(p) => p,
-            None => anyhow::bail!("--host and --port must both be specified"),
-        };
+    if let (Some(host), Some(port)) = (cli.host, cli.port) {
         remote::server::run(cfg, host, port).await?;
         return Ok(());
     }
@@ -137,5 +129,17 @@ mod tests {
     fn remote_alone_parses() {
         let cli = Cli::try_parse_from(["phx", "--remote", "127.0.0.1:4200"]).unwrap();
         assert_eq!(cli.remote.as_deref(), Some("127.0.0.1:4200"));
+    }
+
+    #[test]
+    fn host_without_port_fails() {
+        let result = Cli::try_parse_from(["phx", "--host", "0.0.0.0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn port_without_host_fails() {
+        let result = Cli::try_parse_from(["phx", "--port", "4200"]);
+        assert!(result.is_err());
     }
 }

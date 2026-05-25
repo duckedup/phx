@@ -8,7 +8,9 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 
-type Pending = Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<serde_json::Value>>>>;
+const CHANNEL_CAPACITY: usize = 256;
+
+type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<serde_json::Value>>>>;
 
 pub struct RemoteClient {
     writer: tokio::sync::Mutex<BufWriter<OwnedWriteHalf>>,
@@ -52,9 +54,9 @@ impl RemoteClient {
         &self,
         method: &str,
         params: serde_json::Value,
-    ) -> anyhow::Result<mpsc::UnboundedReceiver<serde_json::Value>> {
+    ) -> anyhow::Result<mpsc::Receiver<serde_json::Value>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         self.pending.lock().insert(id, tx);
 
         let req = serde_json::json!({
@@ -86,14 +88,14 @@ impl Drop for RemoteClient {
 }
 
 async fn read_loop(mut reader: BufReader<OwnedReadHalf>, pending: Pending) {
-    loop {
+    let disconnect_reason = loop {
         let mut line = String::new();
         match reader.read_line(&mut line).await {
-            Ok(0) => break,
+            Ok(0) => break "server disconnected",
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "remote client read error");
-                break;
+                break "read error";
             }
         }
         let trimmed = line.trim();
@@ -128,9 +130,17 @@ async fn read_loop(mut reader: BufReader<OwnedReadHalf>, pending: Pending) {
         };
 
         if let Some(sender) = sender {
-            let _ = sender.send(value);
+            let _ = sender.send(value).await;
         }
-    }
+    };
 
-    pending.lock().clear();
+    let orphans: Vec<_> = pending.lock().drain().collect();
+    for (id, sender) in orphans {
+        let _ = sender
+            .send(serde_json::json!({
+                "id": id,
+                "error": {"code": -1, "message": disconnect_reason},
+            }))
+            .await;
+    }
 }

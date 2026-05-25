@@ -9,6 +9,21 @@ use crate::session::agent_loop::Session;
 use crate::store::session_store::{SessionId, SessionStore};
 use crate::tools;
 
+async fn restore_session(
+    store: &SessionStore,
+    project: &std::path::Path,
+    sid: &SessionId,
+) -> anyhow::Result<(Session, Vec<serde_json::Value>)> {
+    let messages_json = store.load_messages(project, sid).await?;
+    let mut sess = Session::new(sid.clone(), crate::config::SessionProfile::default());
+    for raw in &messages_json {
+        if let Ok(msg) = serde_json::from_value::<crate::session::Message>(raw.clone()) {
+            sess.add_message(msg);
+        }
+    }
+    Ok((sess, messages_json))
+}
+
 pub async fn run(
     config: Config,
     input: impl AsyncBufRead + Unpin,
@@ -151,19 +166,14 @@ pub async fn run(
                 if let Some(sid) = requested_sid
                     && current_session_id.as_ref() != Some(&sid)
                 {
-                    let messages_json = store
-                        .load_messages(&project, &sid)
+                    let (sess, _) = restore_session(&store, &project, &sid)
                         .await
-                        .unwrap_or_default();
-                    let mut sess =
-                        Session::new(sid.clone(), crate::config::SessionProfile::default());
-                    for raw in &messages_json {
-                        if let Ok(msg) =
-                            serde_json::from_value::<crate::session::Message>(raw.clone())
-                        {
-                            sess.add_message(msg);
-                        }
-                    }
+                        .unwrap_or_else(|_| {
+                            (
+                                Session::new(sid.clone(), crate::config::SessionProfile::default()),
+                                Vec::new(),
+                            )
+                        });
                     session = Some(sess);
                     current_session_id = Some(sid);
                 }
@@ -317,7 +327,7 @@ pub async fn run(
                     }
                 };
 
-                let messages_json = match store.load_messages(&project, &sid).await {
+                let (sess, messages_json) = match restore_session(&store, &project, &sid).await {
                     Ok(v) => v,
                     Err(e) => {
                         write_error(&mut output, &id, ErrorCode::InternalError, &e.to_string())
@@ -325,14 +335,6 @@ pub async fn run(
                         continue;
                     }
                 };
-
-                let mut sess = Session::new(sid.clone(), crate::config::SessionProfile::default());
-                for raw in &messages_json {
-                    if let Ok(msg) = serde_json::from_value::<crate::session::Message>(raw.clone())
-                    {
-                        sess.add_message(msg);
-                    }
-                }
 
                 current_session_id = Some(sid.clone());
                 session = Some(sess);
@@ -370,9 +372,6 @@ mod tests {
     use crate::store::session_store::SessionState;
     use chrono::Utc;
     use std::io::Cursor;
-    use tokio::sync::Mutex;
-
-    static HOME_LOCK: Mutex<()> = Mutex::const_new(());
 
     async fn run_rpc(input: &str) -> String {
         let config = Config::default();
@@ -422,9 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_resume_loads_messages() {
-        let _guard = HOME_LOCK.lock().await;
-        let tmp = tempfile::tempdir().unwrap();
-        crate::config::paths::set_home_override(tmp.path());
+        let _home = crate::config::paths::HomeOverrideGuard::new();
 
         let store = SessionStore::new(crate::config::paths::sessions_dir());
         let project = std::env::current_dir().unwrap();
@@ -451,8 +448,6 @@ mod tests {
             sid.0
         );
         let output = run_rpc(&req).await;
-
-        crate::config::paths::clear_home_override();
 
         let parsed: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
         assert_eq!(parsed["id"], 11);

@@ -561,7 +561,7 @@ pub async fn send_message(
                         {
                             tab.chat_lines.push(ChatItem::Line(ChatLine {
                                 role: crate::session::message::Role::System,
-                                content: format!("Recovered after {attempt} attempts"),
+                                content: crate::http::format_recovered_msg(attempt),
                             }));
                         }
                         break 'retry s;
@@ -570,8 +570,7 @@ pub async fn send_message(
                         break 'retry futures::stream::empty().boxed();
                     }
                     Err(e) => {
-                        if !crate::http::is_retryable(&e) || attempt + 1 >= crate::http::MAX_RETRIES
-                        {
+                        if !crate::http::should_retry(&e, attempt) {
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                                 tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: crate::session::message::Role::System,
@@ -583,18 +582,14 @@ pub async fn send_message(
                             return;
                         }
 
-                        let delay = crate::http::backoff_delay(attempt);
                         if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                             tab.chat_lines.push(ChatItem::Line(ChatLine {
                                 role: crate::session::message::Role::System,
-                                content: format!(
-                                    "{e} — retrying in {}s (attempt {} of {})",
-                                    delay.as_secs(),
-                                    attempt + 1,
-                                    crate::http::MAX_RETRIES,
-                                ),
+                                content: crate::http::format_retry_msg(&e, attempt),
                             }));
                         }
+
+                        let delay = crate::http::backoff_delay(attempt);
 
                         let sleep_until = tokio::time::Instant::now() + delay;
                         while tokio::time::Instant::now() < sleep_until {

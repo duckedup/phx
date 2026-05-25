@@ -10,8 +10,7 @@ pub async fn run(config: Config, host: String, port: u16) -> anyhow::Result<()> 
     let listener = TcpListener::bind(&addr).await?;
     let config = Arc::new(config);
 
-    eprintln!("phx server listening on {addr}");
-    tracing::info!(%addr, "phx server bound");
+    tracing::info!(%addr, "phx server listening");
 
     let accept_loop = async {
         loop {
