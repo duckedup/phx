@@ -73,8 +73,11 @@ impl Provider for AnthropicProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
+        let url = format!("{}/v1/messages", self.base_url);
+        tracing::debug!(provider = "claude", model = %self.model, %url, "sending request");
+
         let resp = client
-            .post(format!("{}/v1/messages", self.base_url))
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -82,14 +85,25 @@ impl Provider for AnthropicProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::HttpError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(provider = "claude", %url, error = %e, "request failed");
+                ProviderError::HttpError(e.to_string())
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!(
+                provider = "claude",
+                %url,
+                %status,
+                response_body = %text,
+                "bad response from API",
+            );
             return Err(ProviderError::BadResponse(format!("{status}: {text}")));
         }
 
+        tracing::debug!(provider = "claude", status = %resp.status(), "stream started");
         let stream = parse_anthropic_sse(resp);
         Ok(stream)
     }
@@ -179,6 +193,7 @@ fn parse_anthropic_sse(resp: reqwest::Response) -> EventStream {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::error!(provider = "claude", error = %e, "stream read error");
                     yield Event::Error(e.to_string());
                     return;
                 }

@@ -71,3 +71,22 @@ Simplicity over cleverness.
 Readable over complex.
 Dont be unsafe.
 Code should be extracted for reusability.
+
+## Logging Standard
+
+All logging uses the `tracing` crate with leveled, structured fields. Logs are written to `~/.phx/phx.log` and the in-memory ring buffer (viewable in the TUI observer). The telemetry stack is initialized in `src/otel/mod.rs` — never set up a second subscriber.
+
+### Levels
+
+- `tracing::error!` — failures that stop an operation (HTTP errors, bad API responses, tool failures)
+- `tracing::warn!` — recoverable issues (fallback used, config missing, non-critical failure)
+- `tracing::info!` — significant lifecycle events (session start/end, plugin loaded, provider response with usage)
+- `tracing::debug!` — verbose diagnostics (request URLs, config loading, stream start)
+
+### Rules
+
+- Always include structured fields, not just a message string: `tracing::error!(provider = "claude", %url, %status, response_body = %text, "bad response from API")`
+- Every outbound HTTP request must log: `debug!` before send (with URL and provider), `error!` on failure (with URL, status, response body), `debug!` on stream start
+- Use spans from `otel::spans` for provider calls, tool execution, and sessions
+- Never use `println!`, `eprintln!`, or `dbg!` — all output goes through `tracing`
+- Default filter is `RUST_LOG=info`. Use `RUST_LOG=debug` to see request-level details

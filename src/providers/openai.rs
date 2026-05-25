@@ -51,22 +51,36 @@ impl Provider for OpenAIProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        tracing::debug!(provider = "openai", model = %self.model, %url, "sending request");
+
         let resp = client
-            .post(format!("{}/v1/chat/completions", self.base_url))
+            .post(&url)
             .header("authorization", format!("Bearer {}", self.api_key))
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::HttpError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(provider = "openai", %url, error = %e, "request failed");
+                ProviderError::HttpError(e.to_string())
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!(
+                provider = "openai",
+                %url,
+                %status,
+                response_body = %text,
+                "bad response from API",
+            );
             return Err(ProviderError::BadResponse(format!("{status}: {text}")));
         }
 
+        tracing::debug!(provider = "openai", status = %resp.status(), "stream started");
         Ok(parse_openai_sse(resp))
     }
 }
@@ -150,6 +164,7 @@ fn parse_openai_sse(resp: reqwest::Response) -> EventStream {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::error!(provider = "openai", error = %e, "stream read error");
                     yield Event::Error(e.to_string());
                     return;
                 }

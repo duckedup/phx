@@ -42,20 +42,34 @@ impl Provider for OllamaProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
+        let url = format!("{}/api/chat", self.base_url);
+        tracing::debug!(provider = "ollama", model = %self.model, %url, "sending request");
+
         let resp = client
-            .post(format!("{}/api/chat", self.base_url))
+            .post(&url)
             .header("content-type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::HttpError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(provider = "ollama", %url, error = %e, "request failed");
+                ProviderError::HttpError(e.to_string())
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!(
+                provider = "ollama",
+                %url,
+                %status,
+                response_body = %text,
+                "bad response from API",
+            );
             return Err(ProviderError::BadResponse(format!("{status}: {text}")));
         }
 
+        tracing::debug!(provider = "ollama", status = %resp.status(), "stream started");
         Ok(parse_ollama_stream(resp))
     }
 }
@@ -121,6 +135,7 @@ fn parse_ollama_stream(resp: reqwest::Response) -> EventStream {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::error!(provider = "ollama", error = %e, "stream read error");
                     yield Event::Error(e.to_string());
                     return;
                 }
