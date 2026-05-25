@@ -326,15 +326,37 @@ impl Session {
                 crate::otel::spans::provider_span(&self.provider_name, &self.model_name);
             let _provider_guard = provider_span.enter();
 
-            let stream = match provider.send(opts).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let msg = e.to_string();
-                    tracing::error!(parent: &provider_span, error = %msg, "provider call failed");
-                    self.state = SessionStatus::Error(msg.clone());
-                    let _ = self.events_tx.send(SessionEvent::Error(msg));
-                    return;
+            let stream = 'send: {
+                for attempt in 0..crate::http::MAX_RETRIES {
+                    match provider.send(&opts).await {
+                        Ok(s) => break 'send s,
+                        Err(e) => {
+                            if !crate::http::is_retryable(&e)
+                                || attempt + 1 >= crate::http::MAX_RETRIES
+                            {
+                                let msg = e.to_string();
+                                tracing::error!(parent: &provider_span, error = %msg, "provider call failed");
+                                self.state = SessionStatus::Error(msg.clone());
+                                let _ = self.events_tx.send(SessionEvent::Error(msg));
+                                return;
+                            }
+                            let delay = crate::http::backoff_delay(attempt);
+                            tracing::warn!(
+                                parent: &provider_span,
+                                attempt = attempt + 1,
+                                wait_secs = delay.as_secs(),
+                                error = %e,
+                                "retrying after error",
+                            );
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
                 }
+                let msg = "all retries exhausted".to_string();
+                tracing::error!(parent: &provider_span, error = %msg, "provider call failed");
+                self.state = SessionStatus::Error(msg.clone());
+                let _ = self.events_tx.send(SessionEvent::Error(msg));
+                return;
             };
 
             futures::pin_mut!(stream);

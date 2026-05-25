@@ -373,6 +373,23 @@ impl App {
                             remaining,
                         });
                     }
+                    ConvEvent::Retrying {
+                        attempt,
+                        max_retries,
+                        wait_secs,
+                        error,
+                    } => {
+                        messages.push(Msg::ConvRetrying {
+                            tab_idx,
+                            attempt,
+                            max_retries,
+                            wait_secs,
+                            error,
+                        });
+                    }
+                    ConvEvent::RetryRecovered { attempts } => {
+                        messages.push(Msg::ConvRetryRecovered { tab_idx, attempts });
+                    }
                     ConvEvent::Error(e) => {
                         messages.push(Msg::ConvError {
                             tab_idx,

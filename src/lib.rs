@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod config;
+pub mod http;
 pub mod otel;
 pub mod plugin;
 pub mod providers;

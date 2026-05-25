@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::config::ProviderProfile;
+use crate::http;
 use crate::providers::traits::*;
 
 pub struct AnthropicProvider {
@@ -38,9 +40,7 @@ impl Provider for AnthropicProvider {
         "claude"
     }
 
-    async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError> {
-        let client = reqwest::Client::new();
-
+    async fn send(&self, opts: &SendOptions) -> Result<EventStream, ProviderError> {
         let messages = build_messages(&opts.messages);
         let tools = build_tools(&opts.tools);
 
@@ -58,8 +58,6 @@ impl Provider for AnthropicProvider {
             .enumerate()
             .map(|(i, text)| {
                 let mut block = serde_json::json!({"type": "text", "text": text});
-                // Cache breakpoint on the last block (stable prefix stays cached
-                // even when later blocks change)
                 if i == opts.system_prompt.len() - 1 {
                     block["cache_control"] = serde_json::json!({"type": "ephemeral"});
                 }
@@ -73,39 +71,25 @@ impl Provider for AnthropicProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let url = format!("{}/v1/messages", self.base_url);
-        tracing::debug!(provider = "claude", model = %self.model, %url, "sending request");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(&self.api_key)
+                .map_err(|_| ProviderError::InvalidConfig("invalid API key".into()))?,
+        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        headers.insert("accept", HeaderValue::from_static("text/event-stream"));
 
-        let resp = client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(provider = "claude", %url, error = %e, "request failed");
-                ProviderError::HttpError(e.to_string())
-            })?;
+        let req = http::StreamingRequest {
+            url: format!("{}/v1/messages", self.base_url),
+            log_url: None,
+            headers,
+            body,
+            provider_name: "claude".into(),
+        };
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            tracing::error!(
-                provider = "claude",
-                %url,
-                %status,
-                response_body = %text,
-                "bad response from API",
-            );
-            return Err(ProviderError::BadResponse(format!("{status}: {text}")));
-        }
-
-        tracing::debug!(provider = "claude", status = %resp.status(), "stream started");
-        let stream = parse_anthropic_sse(resp);
-        Ok(stream)
+        let resp = http::send_streaming(&req).await?;
+        Ok(parse_anthropic_sse(resp))
     }
 }
 

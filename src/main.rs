@@ -3,6 +3,7 @@
 mod commands;
 mod config;
 mod crash;
+mod http;
 mod otel;
 mod plugin;
 mod providers;

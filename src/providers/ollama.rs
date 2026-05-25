@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 
 use crate::config::ProviderProfile;
+use crate::http;
 use crate::providers::traits::*;
 
 pub struct OllamaProvider {
@@ -26,10 +28,8 @@ impl Provider for OllamaProvider {
         "ollama"
     }
 
-    async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError> {
-        let client = reqwest::Client::new();
-
-        let messages = build_messages(&opts);
+    async fn send(&self, opts: &SendOptions) -> Result<EventStream, ProviderError> {
+        let messages = build_messages(opts);
         let tools = build_tools(&opts.tools);
 
         let mut body = serde_json::json!({
@@ -42,34 +42,15 @@ impl Provider for OllamaProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let url = format!("{}/api/chat", self.base_url);
-        tracing::debug!(provider = "ollama", model = %self.model, %url, "sending request");
+        let req = http::StreamingRequest {
+            url: format!("{}/api/chat", self.base_url),
+            log_url: None,
+            headers: HeaderMap::new(),
+            body,
+            provider_name: "ollama".into(),
+        };
 
-        let resp = client
-            .post(&url)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(provider = "ollama", %url, error = %e, "request failed");
-                ProviderError::HttpError(e.to_string())
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            tracing::error!(
-                provider = "ollama",
-                %url,
-                %status,
-                response_body = %text,
-                "bad response from API",
-            );
-            return Err(ProviderError::BadResponse(format!("{status}: {text}")));
-        }
-
-        tracing::debug!(provider = "ollama", status = %resp.status(), "stream started");
+        let resp = http::send_streaming(&req).await?;
         Ok(parse_ollama_stream(resp))
     }
 }

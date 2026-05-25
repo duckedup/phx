@@ -104,7 +104,7 @@ pub enum ProviderError {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
-    async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError>;
+    async fn send(&self, opts: &SendOptions) -> Result<EventStream, ProviderError>;
 }
 
 // --- Mock provider for tests ---
@@ -182,7 +182,7 @@ impl Provider for MockProvider {
         "mock"
     }
 
-    async fn send(&self, _opts: SendOptions) -> Result<EventStream, ProviderError> {
+    async fn send(&self, _opts: &SendOptions) -> Result<EventStream, ProviderError> {
         if let Some(err) = &self.error {
             return Err(ProviderError::HttpError(err.clone()));
         }
@@ -212,7 +212,7 @@ mod tests {
         ]);
 
         let stream = provider
-            .send(SendOptions {
+            .send(&SendOptions {
                 messages: vec![],
                 tools: vec![],
                 system_prompt: vec![],
@@ -230,7 +230,7 @@ mod tests {
     async fn mock_provider_error() {
         let provider = MockProvider::with_error("connection refused");
         let result = provider
-            .send(SendOptions {
+            .send(&SendOptions {
                 messages: vec![],
                 tools: vec![],
                 system_prompt: vec![],

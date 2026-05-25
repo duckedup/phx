@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 
 use crate::config::ProviderProfile;
+use crate::http;
 use crate::providers::traits::*;
 
 pub struct GoogleProvider {
@@ -38,10 +40,8 @@ impl Provider for GoogleProvider {
         &self.provider_name
     }
 
-    async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError> {
-        let client = reqwest::Client::new();
-
-        let contents = build_contents(&opts);
+    async fn send(&self, opts: &SendOptions) -> Result<EventStream, ProviderError> {
+        let contents = build_contents(opts);
         let tools = build_tools(&opts.tools);
 
         let mut body = serde_json::json!({
@@ -57,41 +57,21 @@ impl Provider for GoogleProvider {
             body["tools"] = serde_json::json!([{"function_declarations": tools}]);
         }
 
-        let url = format!(
-            "{}/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
-            self.base_url, self.model, self.api_key
-        );
-        let log_url = format!(
-            "{}/v1beta/models/{}:streamGenerateContent",
-            self.base_url, self.model,
-        );
-        tracing::debug!(provider = %self.provider_name, model = %self.model, url = %log_url, "sending request");
+        let req = http::StreamingRequest {
+            url: format!(
+                "{}/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
+                self.base_url, self.model, self.api_key
+            ),
+            log_url: Some(format!(
+                "{}/v1beta/models/{}:streamGenerateContent",
+                self.base_url, self.model,
+            )),
+            headers: HeaderMap::new(),
+            body,
+            provider_name: self.provider_name.clone(),
+        };
 
-        let resp = client
-            .post(&url)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(provider = %self.provider_name, url = %log_url, error = %e, "request failed");
-                ProviderError::HttpError(e.to_string())
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            tracing::error!(
-                provider = %self.provider_name,
-                url = %log_url,
-                %status,
-                response_body = %text,
-                "bad response from API",
-            );
-            return Err(ProviderError::BadResponse(format!("{status}: {text}")));
-        }
-
-        tracing::debug!(provider = %self.provider_name, status = %resp.status(), "stream started");
+        let resp = http::send_streaming(&req).await?;
         Ok(parse_google_sse(resp))
     }
 }

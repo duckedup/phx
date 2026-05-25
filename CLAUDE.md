@@ -71,6 +71,7 @@ Simplicity over cleverness.
 Readable over complex.
 Dont be unsafe.
 Code should be extracted for reusability.
+Everything that can be reused across modules should be extracted into a specific top-level module (e.g. `src/http/`, `src/config/`) — never duplicate logic across sibling modules. Name modules for what they do, not generic catch-alls.
 
 ## Logging Standard
 

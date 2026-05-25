@@ -6,8 +6,8 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::providers::traits::{
-    Event, Provider, ProviderMessage, ProviderRole, ProviderToolCall, ProviderToolResult,
-    SendOptions, StopReason, ToolSchema,
+    Event, Provider, ProviderError, ProviderMessage, ProviderRole, ProviderToolCall,
+    ProviderToolResult, SendOptions, StopReason, ToolSchema,
 };
 use crate::session::agent_loop::Session;
 use crate::session::context;
@@ -38,6 +38,15 @@ pub enum ConvEvent {
     ContextCompacted {
         removed: usize,
         remaining: usize,
+    },
+    Retrying {
+        attempt: u32,
+        max_retries: u32,
+        wait_secs: u64,
+        error: String,
+    },
+    RetryRecovered {
+        attempts: u32,
     },
     Error(String),
     Done(Session),
@@ -133,14 +142,57 @@ pub fn spawn_conversation(
                 system_prompt,
             };
 
-            // --- Send to LLM, get the stream ---
-            let stream = match current_provider.send(opts).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
-                    let _ = tx.send(ConvEvent::Done(session));
-                    return;
+            // --- Send to LLM, get the stream (with retry + backoff) ---
+            let stream = 'send: {
+                let mut last_err = None;
+                for attempt in 0..crate::http::MAX_RETRIES {
+                    if cancel.load(Ordering::Relaxed) {
+                        let _ = tx.send(ConvEvent::Cancelled(session));
+                        return;
+                    }
+
+                    match current_provider.send(&opts).await {
+                        Ok(s) => {
+                            if attempt > 0 {
+                                let _ = tx.send(ConvEvent::RetryRecovered { attempts: attempt });
+                            }
+                            break 'send s;
+                        }
+                        Err(e) => {
+                            if !crate::http::is_retryable(&e)
+                                || attempt + 1 >= crate::http::MAX_RETRIES
+                            {
+                                let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
+                                let _ = tx.send(ConvEvent::Done(session));
+                                return;
+                            }
+
+                            let delay = crate::http::backoff_delay(attempt);
+                            let _ = tx.send(ConvEvent::Retrying {
+                                attempt: attempt + 1,
+                                max_retries: crate::http::MAX_RETRIES,
+                                wait_secs: delay.as_secs(),
+                                error: e.to_string(),
+                            });
+
+                            let sleep_until = tokio::time::Instant::now() + delay;
+                            while tokio::time::Instant::now() < sleep_until {
+                                if cancel.load(Ordering::Relaxed) {
+                                    let _ = tx.send(ConvEvent::Cancelled(session));
+                                    return;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+
+                            last_err = Some(e);
+                        }
+                    }
                 }
+                let e =
+                    last_err.unwrap_or(ProviderError::HttpError("all retries exhausted".into()));
+                let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
+                let _ = tx.send(ConvEvent::Done(session));
+                return;
             };
 
             futures::pin_mut!(stream);
