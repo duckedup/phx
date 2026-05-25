@@ -4,20 +4,45 @@ This project uses **bd** (beads) for issue tracking. Run `bd prime` for full wor
 
 ## Build & Test
 
+Always use `just` commands instead of running `cargo` directly.
+
 ```bash
+just check             # Run all quality gates: lint, build, test, lockfile
 just lint              # Run cargo fmt + clippy
 just test              # Run cargo test --all-features
+just build             # Run cargo build
 ```
 
-## Quick Reference
+## Architecture Overview
 
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work atomically
-bd close <id>         # Complete work
-bd dolt push          # Push beads data to remote
-```
+phx is rpc based harness that uses a tui. It should use an event loop to process requests. Themain goals of the harness are observability, flexibilty and usability.
+
+## Conventions & Patterns
+
+Simplicity over cleverness.
+Readable over complex.
+Dont be unsafe.
+Code should be extracted for reusability.
+Everything that can be reused across modules should be extracted into a specific top-level module (e.g. `src/http/`, `src/config/`) — never duplicate logic across sibling modules. Name modules for what they do, not generic catch-alls.
+
+## Logging Standard
+
+All logging uses the `tracing` crate with leveled, structured fields. Logs are written to `~/.phx/phx.log` and the in-memory ring buffer (viewable in the TUI observer). The telemetry stack is initialized in `src/otel/mod.rs` — never set up a second subscriber.
+
+### Levels
+
+- `tracing::error!` — failures that stop an operation (HTTP errors, bad API responses, tool failures)
+- `tracing::warn!` — recoverable issues (fallback used, config missing, non-critical failure)
+- `tracing::info!` — significant lifecycle events (session start/end, plugin loaded, provider response with usage)
+- `tracing::debug!` — verbose diagnostics (request URLs, config loading, stream start)
+
+### Rules
+
+- Always include structured fields, not just a message string: `tracing::error!(provider = "claude", %url, %status, response_body = %text, "bad response from API")`
+- Every outbound HTTP request must log: `debug!` before send (with URL and provider), `error!` on failure (with URL, status, response body), `debug!` on stream start
+- Use spans from `otel::spans` for provider calls, tool execution, and sessions
+- Never use `println!`, `eprintln!`, or `dbg!` — all output goes through `tracing`
+- Log level is configurable via `"log_level"` in `phx.json` (project `.phx/phx.json` overrides global `~/.phx/phx.json`). `PHX_LOG` env var overrides both. Default is `info`
 
 ## Non-Interactive Shell Commands
 
