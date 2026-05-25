@@ -245,10 +245,7 @@ pub async fn send_message(
 
     crate::tui::runtime::redraw(app, terminal);
 
-    use crate::providers::traits::{
-        Event, ProviderMessage, ProviderRole, ProviderToolCall, ProviderToolResult, SendOptions,
-        StopReason, ToolSchema,
-    };
+    use crate::providers::traits::{Event, SendOptions, StopReason, ToolSchema};
     use crossterm::event::EventStream;
     use futures::StreamExt;
 
@@ -344,29 +341,7 @@ pub async fn send_message(
         } else {
             session.messages.clone()
         };
-        let provider_messages: Vec<ProviderMessage> = messages
-            .iter()
-            .map(|m| ProviderMessage {
-                role: match m.role {
-                    crate::session::message::Role::System => ProviderRole::System,
-                    crate::session::message::Role::User => ProviderRole::User,
-                    crate::session::message::Role::Assistant => ProviderRole::Assistant,
-                    crate::session::message::Role::ToolCall => ProviderRole::Assistant,
-                    crate::session::message::Role::ToolResult => ProviderRole::Tool,
-                },
-                content: m.content.clone(),
-                tool_call: m.tool_call.as_ref().map(|tc| ProviderToolCall {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    args_json: tc.args_json.clone(),
-                }),
-                tool_result: m.tool_result.as_ref().map(|tr| ProviderToolResult {
-                    id: tr.id.clone(),
-                    output: tr.output.clone(),
-                    is_error: tr.is_error,
-                }),
-            })
-            .collect();
+        let provider_messages = crate::session::message::to_provider_messages(&messages);
 
         let opts = SendOptions {
             messages: provider_messages,
@@ -375,16 +350,62 @@ pub async fn send_message(
         };
 
         let mut tick = tokio::time::interval(Duration::from_millis(16));
-        let send_fut = provider.send(opts);
-        futures::pin_mut!(send_fut);
 
         let mut cancelled = false;
-        let stream = loop {
-            tokio::select! {
-                result = &mut send_fut => {
-                    match result {
-                        Ok(s) => break s,
-                        Err(e) => {
+        let stream = 'retry: {
+            for attempt in 0..crate::http::MAX_RETRIES {
+                let send_fut = provider.send(&opts);
+                futures::pin_mut!(send_fut);
+
+                let result = loop {
+                    tokio::select! {
+                        r = &mut send_fut => { break r; }
+                        maybe_term = term_events.next() => {
+                            match maybe_term {
+                                Some(Ok(CEvent::Key(key)))
+                                    if key.code == KeyCode::Char('c')
+                                        && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    app.handle_key(key).await;
+                                    cancelled = true;
+                                    break Err(crate::providers::traits::ProviderError::Cancelled);
+                                }
+                                Some(Ok(CEvent::Key(key)))
+                                    if key.code == KeyCode::Esc =>
+                                {
+                                    cancelled = true;
+                                    break Err(crate::providers::traits::ProviderError::Cancelled);
+                                }
+                                Some(Ok(CEvent::Mouse(mouse))) => {
+                                    crate::tui::event_handler::handle_sidebar_click(app, mouse);
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ = tick.tick() => {
+                            crate::tui::runtime::redraw(app, terminal);
+                        }
+                    }
+                };
+
+                match result {
+                    Ok(s) => {
+                        if attempt > 0
+                            && let Some(tab) = app.tabs.get_mut(app.active_tab)
+                        {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: format!("Recovered after {attempt} attempts"),
+                            }));
+                        }
+                        break 'retry s;
+                    }
+                    Err(_) if cancelled => {
+                        break 'retry futures::stream::empty().boxed();
+                    }
+                    Err(e) => {
+                        if !crate::http::is_retryable(&e) || attempt + 1 >= crate::http::MAX_RETRIES
+                        {
                             if let Some(tab) = app.tabs.get_mut(app.active_tab) {
                                 tab.chat_lines.push(ChatItem::Line(ChatLine {
                                     role: crate::session::message::Role::System,
@@ -395,34 +416,66 @@ pub async fn send_message(
                             app.session = Some(session);
                             return;
                         }
+
+                        let delay = crate::http::backoff_delay(attempt);
+                        if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                            tab.chat_lines.push(ChatItem::Line(ChatLine {
+                                role: crate::session::message::Role::System,
+                                content: format!(
+                                    "{e} — retrying in {}s (attempt {} of {})",
+                                    delay.as_secs(),
+                                    attempt + 1,
+                                    crate::http::MAX_RETRIES,
+                                ),
+                            }));
+                        }
+
+                        let sleep_until = tokio::time::Instant::now() + delay;
+                        while tokio::time::Instant::now() < sleep_until {
+                            tokio::select! {
+                                maybe_term = term_events.next() => {
+                                    match maybe_term {
+                                        Some(Ok(CEvent::Key(key)))
+                                            if key.code == KeyCode::Char('c')
+                                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                        {
+                                            app.handle_key(key).await;
+                                            cancelled = true;
+                                        }
+                                        Some(Ok(CEvent::Key(key)))
+                                            if key.code == KeyCode::Esc =>
+                                        {
+                                            cancelled = true;
+                                        }
+                                        Some(Ok(CEvent::Mouse(mouse))) => {
+                                            crate::tui::event_handler::handle_sidebar_click(app, mouse);
+                                        }
+                                        _ => {}
+                                    }
+                                    if cancelled { break; }
+                                }
+                                _ = tick.tick() => {
+                                    crate::tui::runtime::redraw(app, terminal);
+                                }
+                            }
+                        }
+
+                        if cancelled {
+                            break 'retry futures::stream::empty().boxed();
+                        }
                     }
-                }
-                maybe_term = term_events.next() => {
-                    match maybe_term {
-                        Some(Ok(CEvent::Key(key)))
-                            if key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            app.handle_key(key).await;
-                            cancelled = true;
-                            break futures::stream::empty().boxed();
-                        }
-                        Some(Ok(CEvent::Key(key)))
-                            if key.code == KeyCode::Esc =>
-                        {
-                            cancelled = true;
-                            break futures::stream::empty().boxed();
-                        }
-                        Some(Ok(CEvent::Mouse(mouse))) => {
-                            crate::tui::event_handler::handle_sidebar_click(app, mouse);
-                        }
-                        _ => {}
-                    }
-                }
-                _ = tick.tick() => {
-                    crate::tui::runtime::redraw(app, terminal);
                 }
             }
+            // All retries exhausted
+            if let Some(tab) = app.tabs.get_mut(app.active_tab) {
+                tab.chat_lines.push(ChatItem::Line(ChatLine {
+                    role: crate::session::message::Role::System,
+                    content: "Provider error: all retries exhausted".into(),
+                }));
+            }
+            app.is_running = false;
+            app.session = Some(session);
+            return;
         };
 
         if cancelled {

@@ -292,6 +292,34 @@ pub fn update(app: &mut App, msg: Msg) -> Cmd {
                 ));
             }
         }
+        Msg::ConvRetrying {
+            tab_idx,
+            attempt,
+            max_retries,
+            wait_secs,
+            error,
+        } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
+                    crate::tui::tabs::ChatLine {
+                        role: crate::session::message::Role::System,
+                        content: format!(
+                            "{error} — retrying in {wait_secs}s (attempt {attempt} of {max_retries})"
+                        ),
+                    },
+                ));
+            }
+        }
+        Msg::ConvRetryRecovered { tab_idx, attempts } => {
+            if let Some(tab) = app.tabs.get_mut(tab_idx) {
+                tab.chat_lines.push(crate::tui::tabs::ChatItem::Line(
+                    crate::tui::tabs::ChatLine {
+                        role: crate::session::message::Role::System,
+                        content: format!("Recovered after {attempts} attempts"),
+                    },
+                ));
+            }
+        }
         Msg::ConvError { tab_idx, message } => {
             if let Some(tab) = app.tabs.get_mut(tab_idx) {
                 tab.streaming_text.clear();
@@ -694,6 +722,46 @@ mod tests {
         assert!(app.tabs[0].streaming_text.is_empty());
         assert!(app.tabs[0].stream_buffer.is_empty());
         assert!(!app.tabs[0].chat_lines.is_empty());
+    }
+
+    #[test]
+    fn conv_retrying_adds_system_line() {
+        let mut app = test_app();
+        update(
+            &mut app,
+            Msg::ConvRetrying {
+                tab_idx: 0,
+                attempt: 2,
+                max_retries: 10,
+                wait_secs: 5,
+                error: "429 Too Many Requests: rate limited".into(),
+            },
+        );
+        assert_eq!(app.tabs[0].chat_lines.len(), 1);
+        if let crate::tui::tabs::ChatItem::Line(line) = &app.tabs[0].chat_lines[0] {
+            assert!(line.content.contains("retrying in 5s"));
+            assert!(line.content.contains("attempt 2 of 10"));
+        } else {
+            panic!("expected ChatItem::Line");
+        }
+    }
+
+    #[test]
+    fn conv_retry_recovered_adds_system_line() {
+        let mut app = test_app();
+        update(
+            &mut app,
+            Msg::ConvRetryRecovered {
+                tab_idx: 0,
+                attempts: 3,
+            },
+        );
+        assert_eq!(app.tabs[0].chat_lines.len(), 1);
+        if let crate::tui::tabs::ChatItem::Line(line) = &app.tabs[0].chat_lines[0] {
+            assert!(line.content.contains("Recovered after 3 attempts"));
+        } else {
+            panic!("expected ChatItem::Line");
+        }
     }
 
     #[test]

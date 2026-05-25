@@ -66,6 +66,17 @@ pub enum Msg {
         removed: usize,
         remaining: usize,
     },
+    ConvRetrying {
+        tab_idx: usize,
+        attempt: u32,
+        max_retries: u32,
+        wait_secs: u64,
+        error: String,
+    },
+    ConvRetryRecovered {
+        tab_idx: usize,
+        attempts: u32,
+    },
     ConvError {
         tab_idx: usize,
         message: String,

@@ -429,6 +429,8 @@ pub struct Config {
     pub tool_routing: BTreeMap<String, ToolRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<PathBuf>,
 }
@@ -545,6 +547,9 @@ impl Config {
         }
         if other.theme.is_some() {
             self.theme = other.theme;
+        }
+        if other.log_level.is_some() {
+            self.log_level = other.log_level;
         }
     }
 }

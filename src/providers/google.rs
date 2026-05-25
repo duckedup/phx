@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use reqwest::header::HeaderMap;
 
 use crate::config::ProviderProfile;
+use crate::http;
 use crate::providers::traits::*;
 
 pub struct GoogleProvider {
@@ -38,10 +40,8 @@ impl Provider for GoogleProvider {
         &self.provider_name
     }
 
-    async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError> {
-        let client = reqwest::Client::new();
-
-        let contents = build_contents(&opts);
+    async fn send(&self, opts: &SendOptions) -> Result<EventStream, ProviderError> {
+        let contents = build_contents(opts);
         let tools = build_tools(&opts.tools);
 
         let mut body = serde_json::json!({
@@ -57,25 +57,21 @@ impl Provider for GoogleProvider {
             body["tools"] = serde_json::json!([{"function_declarations": tools}]);
         }
 
-        let url = format!(
-            "{}/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
-            self.base_url, self.model, self.api_key
-        );
+        let req = http::StreamingRequest {
+            url: format!(
+                "{}/v1beta/models/{}:streamGenerateContent?key={}&alt=sse",
+                self.base_url, self.model, self.api_key
+            ),
+            log_url: Some(format!(
+                "{}/v1beta/models/{}:streamGenerateContent",
+                self.base_url, self.model,
+            )),
+            headers: HeaderMap::new(),
+            body,
+            provider_name: self.provider_name.clone(),
+        };
 
-        let resp = client
-            .post(&url)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::HttpError(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::BadResponse(format!("{status}: {text}")));
-        }
-
+        let resp = http::send_streaming(&req).await?;
         Ok(parse_google_sse(resp))
     }
 }
@@ -118,24 +114,16 @@ fn build_contents(opts: &SendOptions) -> Vec<serde_json::Value> {
 }
 
 fn build_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
-    tools
-        .iter()
-        .map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-            })
-        })
-        .collect()
+    tools.iter().map(ToolSchema::to_simple_json).collect()
 }
 
 fn parse_google_sse(resp: reqwest::Response) -> EventStream {
+    use crate::http::sse::{SseDelimiter, SseLine, SseParser};
     use futures::StreamExt;
 
     let stream = async_stream::stream! {
         let mut bytes_stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut parser = SseParser::new(SseDelimiter::SingleNewline);
         let mut total_input: u64 = 0;
         let mut total_output: u64 = 0;
 
@@ -143,19 +131,19 @@ fn parse_google_sse(resp: reqwest::Response) -> EventStream {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::error!(provider = "google", error = %e, "stream read error");
                     yield Event::Error(e.to_string());
                     return;
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            parser.push(&chunk);
 
-            while let Some(pos) = buffer.find('\n') {
-                let line = buffer[..pos].trim().to_string();
-                buffer = buffer[pos + 1..].to_string();
-
-                let Some(data) = line.strip_prefix("data: ") else { continue };
-                let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+            while let Some(line) = parser.next_line() {
+                let json = match line {
+                    SseLine::Data(json) => json,
+                    SseLine::Done | SseLine::Raw(_) => continue,
+                };
 
                 if let Some(usage) = json.get("usageMetadata") {
                     total_input = usage.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);

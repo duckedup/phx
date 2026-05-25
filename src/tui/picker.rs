@@ -1,4 +1,8 @@
+use ratatui::prelude::*;
+use ratatui::widgets::*;
 use serde::{Deserialize, Serialize};
+
+use crate::tui::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerMode {
@@ -103,6 +107,50 @@ fn subsequence_match(text: &str, pattern: &str) -> bool {
         }
     }
     current.is_none()
+}
+
+pub fn render_picker_list<F>(
+    frame: &mut Frame,
+    popup_area: Rect,
+    picker: &PickerState,
+    theme: &Theme,
+    max_visible: usize,
+    title: &str,
+    format_item: F,
+) where
+    F: Fn(&PickerItem, bool) -> ListItem<'static>,
+{
+    frame.render_widget(Clear, popup_area);
+
+    let inner_height = (popup_area.height.saturating_sub(2) as usize).min(max_visible);
+    let scroll = if picker.cursor >= inner_height {
+        picker.cursor - inner_height + 1
+    } else {
+        0
+    };
+
+    let items: Vec<ListItem> = picker
+        .filtered
+        .iter()
+        .skip(scroll)
+        .take(inner_height)
+        .enumerate()
+        .map(|(i, &idx)| {
+            let item = &picker.items[idx];
+            let is_selected = (i + scroll) == picker.cursor;
+            format_item(item, is_selected)
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .border_type(BorderType::Rounded)
+        .style(Style::default().bg(theme.background))
+        .title(title);
+
+    let list = List::new(items).block(block);
+    frame.render_widget(list, popup_area);
 }
 
 pub fn fuzzy_score(text: &str, pattern: &str) -> u32 {

@@ -68,6 +68,27 @@ pub struct SendOptions {
     pub system_prompt: Vec<String>,
 }
 
+impl ToolSchema {
+    pub fn to_openai_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            }
+        })
+    }
+
+    pub fn to_simple_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     Token(String),
@@ -93,8 +114,8 @@ pub enum ProviderError {
     MissingCredential,
     #[error("HTTP error: {0}")]
     HttpError(String),
-    #[error("bad response: {0}")]
-    BadResponse(String),
+    #[error("bad response ({status}): {body}")]
+    BadResponse { status: u16, body: String },
     #[error("cancelled")]
     Cancelled,
     #[error("timeout")]
@@ -104,7 +125,7 @@ pub enum ProviderError {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
-    async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError>;
+    async fn send(&self, opts: &SendOptions) -> Result<EventStream, ProviderError>;
 }
 
 // --- Mock provider for tests ---
@@ -182,9 +203,9 @@ impl Provider for MockProvider {
         "mock"
     }
 
-    async fn send(&self, _opts: SendOptions) -> Result<EventStream, ProviderError> {
+    async fn send(&self, _opts: &SendOptions) -> Result<EventStream, ProviderError> {
         if let Some(err) = &self.error {
-            return Err(ProviderError::HttpError(err.clone()));
+            return Err(ProviderError::InvalidConfig(err.clone()));
         }
         let events = self.events.clone();
         Ok(Box::pin(futures::stream::iter(events)))
@@ -212,7 +233,7 @@ mod tests {
         ]);
 
         let stream = provider
-            .send(SendOptions {
+            .send(&SendOptions {
                 messages: vec![],
                 tools: vec![],
                 system_prompt: vec![],
@@ -230,7 +251,7 @@ mod tests {
     async fn mock_provider_error() {
         let provider = MockProvider::with_error("connection refused");
         let result = provider
-            .send(SendOptions {
+            .send(&SendOptions {
                 messages: vec![],
                 tools: vec![],
                 system_prompt: vec![],

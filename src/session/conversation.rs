@@ -5,13 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use crate::providers::traits::{
-    Event, Provider, ProviderMessage, ProviderRole, ProviderToolCall, ProviderToolResult,
-    SendOptions, StopReason, ToolSchema,
-};
+use crate::providers::traits::{Event, Provider, SendOptions, StopReason, ToolSchema};
 use crate::session::agent_loop::Session;
 use crate::session::context;
-use crate::session::message::{Message, Role};
+use crate::session::message::{self, Message};
 use crate::session::skills;
 use crate::store::session_store::SessionStore;
 use crate::tools::traits::ToolRegistry;
@@ -38,6 +35,15 @@ pub enum ConvEvent {
     ContextCompacted {
         removed: usize,
         remaining: usize,
+    },
+    Retrying {
+        attempt: u32,
+        max_retries: u32,
+        wait_secs: u64,
+        error: String,
+    },
+    RetryRecovered {
+        attempts: u32,
     },
     Error(String),
     Done(Session),
@@ -133,12 +139,35 @@ pub fn spawn_conversation(
                 system_prompt,
             };
 
-            // --- Send to LLM, get the stream ---
-            let stream = match current_provider.send(opts).await {
-                Ok(s) => s,
-                Err(e) => {
+            // --- Send to LLM, get the stream (with retry + backoff) ---
+            let stream = match crate::http::send_with_retry(
+                current_provider.as_ref() as &dyn Provider,
+                &opts,
+                Some(&cancel),
+                |attempt, wait_secs, err| {
+                    let _ = tx.send(ConvEvent::Retrying {
+                        attempt,
+                        max_retries: crate::http::MAX_RETRIES,
+                        wait_secs,
+                        error: err.to_string(),
+                    });
+                },
+            )
+            .await
+            {
+                crate::http::RetryOutcome::Success { stream, attempts } => {
+                    if attempts > 0 {
+                        let _ = tx.send(ConvEvent::RetryRecovered { attempts });
+                    }
+                    stream
+                }
+                crate::http::RetryOutcome::Failed(e) => {
                     let _ = tx.send(ConvEvent::Error(format!("Provider error: {e}")));
                     let _ = tx.send(ConvEvent::Done(session));
+                    return;
+                }
+                crate::http::RetryOutcome::Cancelled => {
+                    let _ = tx.send(ConvEvent::Cancelled(session));
                     return;
                 }
             };
@@ -494,35 +523,13 @@ fn build_system_prompt(
     blocks
 }
 
-fn build_provider_messages(session: &Session) -> Vec<ProviderMessage> {
+fn build_provider_messages(session: &Session) -> Vec<crate::providers::traits::ProviderMessage> {
     let messages = if session.profile.compression {
         crate::session::compress::compress_for_provider(&session.messages)
     } else {
         session.messages.clone()
     };
-    messages
-        .iter()
-        .map(|m| ProviderMessage {
-            role: match m.role {
-                Role::System => ProviderRole::System,
-                Role::User => ProviderRole::User,
-                Role::Assistant => ProviderRole::Assistant,
-                Role::ToolCall => ProviderRole::Assistant,
-                Role::ToolResult => ProviderRole::Tool,
-            },
-            content: m.content.clone(),
-            tool_call: m.tool_call.as_ref().map(|tc| ProviderToolCall {
-                id: tc.id.clone(),
-                name: tc.name.clone(),
-                args_json: tc.args_json.clone(),
-            }),
-            tool_result: m.tool_result.as_ref().map(|tr| ProviderToolResult {
-                id: tr.id.clone(),
-                output: tr.output.clone(),
-                is_error: tr.is_error,
-            }),
-        })
-        .collect()
+    message::to_provider_messages(&messages)
 }
 
 fn truncate_str(s: &str, max_chars: usize) -> String {

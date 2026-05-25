@@ -1,6 +1,8 @@
 use async_trait::async_trait;
+use reqwest::header::{HeaderMap, HeaderValue};
 
 use crate::config::ProviderProfile;
+use crate::http;
 use crate::providers::traits::*;
 
 pub struct AnthropicProvider {
@@ -38,9 +40,7 @@ impl Provider for AnthropicProvider {
         "claude"
     }
 
-    async fn send(&self, opts: SendOptions) -> Result<EventStream, ProviderError> {
-        let client = reqwest::Client::new();
-
+    async fn send(&self, opts: &SendOptions) -> Result<EventStream, ProviderError> {
         let messages = build_messages(&opts.messages);
         let tools = build_tools(&opts.tools);
 
@@ -58,8 +58,6 @@ impl Provider for AnthropicProvider {
             .enumerate()
             .map(|(i, text)| {
                 let mut block = serde_json::json!({"type": "text", "text": text});
-                // Cache breakpoint on the last block (stable prefix stays cached
-                // even when later blocks change)
                 if i == opts.system_prompt.len() - 1 {
                     block["cache_control"] = serde_json::json!({"type": "ephemeral"});
                 }
@@ -73,25 +71,25 @@ impl Provider for AnthropicProvider {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let resp = client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::HttpError(e.to_string()))?;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-api-key",
+            HeaderValue::from_str(&self.api_key)
+                .map_err(|_| ProviderError::InvalidConfig("invalid API key".into()))?,
+        );
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        headers.insert("accept", HeaderValue::from_static("text/event-stream"));
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::BadResponse(format!("{status}: {text}")));
-        }
+        let req = http::StreamingRequest {
+            url: format!("{}/v1/messages", self.base_url),
+            log_url: None,
+            headers,
+            body,
+            provider_name: "claude".into(),
+        };
 
-        let stream = parse_anthropic_sse(resp);
-        Ok(stream)
+        let resp = http::send_streaming(&req).await?;
+        Ok(parse_anthropic_sse(resp))
     }
 }
 
@@ -162,11 +160,12 @@ fn build_tools(tools: &[ToolSchema]) -> Vec<serde_json::Value> {
 }
 
 fn parse_anthropic_sse(resp: reqwest::Response) -> EventStream {
+    use crate::http::sse::{SseDelimiter, SseLine, SseParser};
     use futures::StreamExt;
 
     let stream = async_stream::stream! {
         let mut bytes_stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut parser = SseParser::new(SseDelimiter::DoubleNewline);
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut current_tool_args = String::new();
@@ -179,92 +178,87 @@ fn parse_anthropic_sse(resp: reqwest::Response) -> EventStream {
             let chunk = match chunk {
                 Ok(c) => c,
                 Err(e) => {
+                    tracing::error!(provider = "claude", error = %e, "stream read error");
                     yield Event::Error(e.to_string());
                     return;
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            parser.push(&chunk);
 
-            while let Some(pos) = buffer.find("\n\n") {
-                let block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+            while let Some(line) = parser.next_line() {
+                let json = match line {
+                    SseLine::Data(json) => json,
+                    SseLine::Done => continue,
+                    SseLine::Raw(_) => continue,
+                };
 
-                for line in block.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if data == "[DONE]" {
-                            continue;
+                let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match event_type {
+                    "content_block_start" => {
+                        if let Some(cb) = json.get("content_block") {
+                            let cb_type = cb.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if cb_type == "tool_use" {
+                                current_tool_id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").into();
+                                current_tool_name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").into();
+                                current_tool_args.clear();
+                            }
                         }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            match event_type {
-                                "content_block_start" => {
-                                    if let Some(cb) = json.get("content_block") {
-                                        let cb_type = cb.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                        if cb_type == "tool_use" {
-                                            current_tool_id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").into();
-                                            current_tool_name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").into();
-                                            current_tool_args.clear();
-                                        }
+                    }
+                    "content_block_delta" => {
+                        if let Some(delta) = json.get("delta") {
+                            let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match delta_type {
+                                "text_delta" => {
+                                    if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                        yield Event::Token(text.into());
                                     }
                                 }
-                                "content_block_delta" => {
-                                    if let Some(delta) = json.get("delta") {
-                                        let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                        match delta_type {
-                                            "text_delta" => {
-                                                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                                    yield Event::Token(text.into());
-                                                }
-                                            }
-                                            "input_json_delta" => {
-                                                if let Some(partial) = delta.get("partial_json").and_then(|t| t.as_str()) {
-                                                    current_tool_args.push_str(partial);
-                                                }
-                                            }
-                                            _ => {}
-                                        }
+                                "input_json_delta" => {
+                                    if let Some(partial) = delta.get("partial_json").and_then(|t| t.as_str()) {
+                                        current_tool_args.push_str(partial);
                                     }
-                                }
-                                "content_block_stop"
-                                    if !current_tool_name.is_empty() => {
-                                        yield Event::ToolCall {
-                                            id: std::mem::take(&mut current_tool_id),
-                                            name: std::mem::take(&mut current_tool_name),
-                                            args_json: if current_tool_args.is_empty() { "{}".into() } else { std::mem::take(&mut current_tool_args) },
-                                        };
-                                    }
-                                "message_start" => {
-                                    if let Some(usage) = json.get("message").and_then(|m| m.get("usage")) {
-                                        input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                        cache_creation_tokens = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                        cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    }
-                                }
-                                "message_delta" => {
-                                    if let Some(usage) = json.get("usage") {
-                                        output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    }
-                                    let stop_reason = json.get("delta")
-                                        .and_then(|d| d.get("stop_reason"))
-                                        .and_then(|s| s.as_str())
-                                        .unwrap_or("end_turn");
-                                    let reason = match stop_reason {
-                                        "end_turn" => StopReason::EndTurn,
-                                        "max_tokens" => StopReason::MaxTokens,
-                                        "tool_use" => StopReason::ToolUse,
-                                        "stop_sequence" => StopReason::StopSequence,
-                                        other => StopReason::Other(other.into()),
-                                    };
-                                    yield Event::Done {
-                                        stop_reason: reason,
-                                        usage: Usage { input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens },
-                                    };
                                 }
                                 _ => {}
                             }
                         }
                     }
+                    "content_block_stop"
+                        if !current_tool_name.is_empty() => {
+                            yield Event::ToolCall {
+                                id: std::mem::take(&mut current_tool_id),
+                                name: std::mem::take(&mut current_tool_name),
+                                args_json: if current_tool_args.is_empty() { "{}".into() } else { std::mem::take(&mut current_tool_args) },
+                            };
+                        }
+                    "message_start" => {
+                        if let Some(usage) = json.get("message").and_then(|m| m.get("usage")) {
+                            input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            cache_creation_tokens = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            cache_read_tokens = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                        }
+                    }
+                    "message_delta" => {
+                        if let Some(usage) = json.get("usage") {
+                            output_tokens = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                        }
+                        let stop_reason = json.get("delta")
+                            .and_then(|d| d.get("stop_reason"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("end_turn");
+                        let reason = match stop_reason {
+                            "end_turn" => StopReason::EndTurn,
+                            "max_tokens" => StopReason::MaxTokens,
+                            "tool_use" => StopReason::ToolUse,
+                            "stop_sequence" => StopReason::StopSequence,
+                            other => StopReason::Other(other.into()),
+                        };
+                        yield Event::Done {
+                            stop_reason: reason,
+                            usage: Usage { input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens },
+                        };
+                    }
+                    _ => {}
                 }
             }
         }
