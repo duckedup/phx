@@ -10,7 +10,7 @@ members = [
 
 [package]
 name = "phx"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 license = "MIT"
 description = "everyone else is rewriting things in rust."
