@@ -84,10 +84,45 @@ This is the enabling trick. Without it, worktree-per-agent isn't viable on a rea
 |---|---|
 | **Go** | Nothing. `GOCACHE` / `GOMODCACHE` are global and concurrency-safe. |
 | **Rust** | Clone `target/`. Set `RUSTC_WRAPPER=sccache`. **Never** a shared `CARGO_TARGET_DIR` — cargo's exclusive lock serializes agents. |
-| **Bun** | Clone `node_modules/`. Fallback `bun install` hardlinks from the global cache and is fast. |
+| **Bun** | Clone the root `node_modules/` **and every per-package `node_modules/`**. Then run `bun install` to reconcile. See "Bun workspaces" below. |
 | **Generated code** | Clone, or run the repo's codegen as part of `setup`. |
 | **Untracked config** | Copy `.env` and friends at every level they appear. Copy, not symlink — agents edit these. |
 | **Agent access** | Copy `.mcp.json` and `.claude/settings.local.json` so the harness comes up with its Jira/Linear MCP servers and tokens already wired. An instance that can't reach the tracker is useless; an instance where phx reaches it for them is the wrong design. |
+
+### Bun workspaces (primary use case) — verified
+
+Bun 1.3 uses the **isolated linker** for workspaces, not hoisting. The layout is:
+
+```
+node_modules/.bun/is-odd@3.0.1/node_modules/is-odd     # content-addressed store
+node_modules/.bun/node_modules/is-odd  -> ../is-odd@3.0.1/node_modules/is-odd
+packages/app/node_modules/is-odd       -> ../../../node_modules/.bun/is-odd@3.0.1/node_modules/is-odd
+packages/app/node_modules/@acme/core   -> ../../../core
+```
+
+Two consequences:
+
+1. **Every symlink bun writes is relative.** Both store links and workspace links. This is
+   what makes cloning safe — nothing points at an absolute path in the primary checkout.
+2. **Dependencies live in per-package `node_modules/`, not just the root.** Cloning only the
+   root directory would produce a worktree that cannot resolve anything. The clone list must
+   cover `packages/*/node_modules` (and any other workspace globs).
+
+`cp -Rc` recreates symlinks as symlinks rather than following them, and clonefiles the
+regular files underneath.
+
+**Verified experimentally** on a two-package workspace (bun 1.3.14, APFS):
+
+- worktree resolves `@acme/core` to *its own* `packages/core`, primary still resolves to its
+  own — edits in one are invisible to the other
+- external deps (`is-odd`) resolve correctly in the worktree
+- every symlink under the worktree resolves to a path inside the worktree; nothing escapes
+
+**Still unverified at scale.** The toy case has a handful of symlinks; a real workspace has
+tens of thousands, and `cp -Rc` recreates each one individually. That is metadata-bound work,
+so it may not be as fast as the byte-level CoW win suggests. Measure clone-vs-`bun install`
+on the real monorepo before committing to either — bun installs by hardlinking from
+`~/.bun/install/cache`, so a plain `bun install` may already be competitive.
 
 ### Collision matrix
 
@@ -126,7 +161,9 @@ port_base     = 4200
 port_stride   = 100
 
 # copy-on-write cloned from the primary checkout
-clone = ["node_modules", "target", "packages/*/node_modules", "gen"]
+# bun's isolated linker puts real deps in per-package node_modules; the root alone
+# is not enough. Every workspace glob needs an entry.
+clone = ["node_modules", "packages/*/node_modules", "apps/*/node_modules", "target", "gen"]
 
 # copied verbatim
 copy  = [".env", ".env.local", "packages/*/.env", ".mcp.json", ".claude/settings.local.json"]
@@ -165,7 +202,7 @@ For harnesses opensessions has no watcher for (grok, cursor, anything new), fall
 
 ## 9. Open questions
 
-1. **Clone freshness.** A cloned `node_modules` is a snapshot. When the primary checkout's lockfile moves ahead, instances drift. Does `setup` reconcile every spawn, or only on lockfile change? Cheap heuristic: hash the lockfiles at clone time, re-run `setup` only when they differ.
+1. **Clone freshness.** *Largely resolved for Bun.* A cloned `node_modules` is a snapshot, and drifts once the primary's `bun.lock` moves ahead — but `bun install` against an already-correct tree completed in **7ms** in testing, so reconciling unconditionally after every clone is close to free. Run it always rather than hashing lockfiles. Still open for Rust and for any codegen step, where the equivalent reconcile is not cheap.
 2. **Port convention.** How much monorepo change is needed before `PHX_PORT_BASE` actually works end to end? This gates the services half of isolation and is work in the repo, not in phx.
 3. **Compose stacks.** Opt-in per instance, or always? RAM says opt-in; convenience says always.
 4. **Dependency on opensessions.** It's early — its own README notes theme/config/plugin hooks parse but don't fully function. Acceptable risk, or vendor the sidebar later?
