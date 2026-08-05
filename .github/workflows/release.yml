@@ -67,9 +67,17 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+          git config --global init.defaultBranch main
+
       - name: Run checks
         run: just check
 
+  # Asset names are the contract with phx.tmux, which downloads the matching
+  # binary on first load. Do not rename without updating the shim.
   build-binaries:
     name: Build ${{ matrix.target }}
     needs: [check-version, test]
@@ -85,8 +93,6 @@ jobs:
             os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -107,58 +113,20 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package (unix)
-        if: runner.os != 'Windows'
+      - name: Package
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../phx-${{ matrix.target }}.tar.gz phx
-          cd ../../..
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/phx.exe" -DestinationPath "phx-${{ matrix.target }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
-          path: phx-${{ matrix.target }}.*
-
-  publish-crate:
-    name: Publish to crates.io
-    needs: [check-version, test]
-    if: needs.check-version.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-
-      - name: Cache cargo registry and build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - uses: extractions/setup-just@v4
-
-      - name: Publish
-        run: just publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          path: phx-${{ matrix.target }}.tar.gz
 
   github-release:
     name: Create GitHub Release
-    needs: [check-version, test, publish-crate, build-binaries]
+    needs: [check-version, test, build-binaries]
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -189,15 +157,17 @@ jobs:
           fi
 
           gh release create "${{ needs.check-version.outputs.tag }}" \
-            phx-*.tar.gz phx-*.zip \
+            phx-*.tar.gz \
             --title "${{ needs.check-version.outputs.tag }}" \
             --notes "## phx ${{ needs.check-version.outputs.version }}
 
-          \`\`\`sh
-          cargo binstall phx
-          # or
-          cargo install phx@${{ needs.check-version.outputs.version }}
+          Install with [TPM](https://github.com/tmux-plugins/tpm):
+
+          \`\`\`tmux
+          set -g @plugin 'duckedup/phx'
           \`\`\`
+
+          Then \`prefix + I\`. The binary for your platform is downloaded on first load.
 
           ### Changes
 
