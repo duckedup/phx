@@ -1,19 +1,9 @@
-[workspace]
-members = [
-    ".",
-    "examples/plugins/now",
-    "examples/plugins/plan",
-    "examples/plugins/review",
-    "examples/plugins/feature",
-    "examples/plugins/ask-user-questions",
-]
-
 [package]
 name = "phx"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 license = "MIT"
-description = "everyone else is rewriting things in rust."
+description = "tmux plugin for spawning isolated coding-agent instances in a monorepo"
 repository = "https://github.com/duckedup/phx"
 
 [[bin]]
@@ -21,37 +11,15 @@ name = "phx"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "io-std", "fs", "net", "process", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }
-dirs = "6"
-ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
-uuid = { version = "1", features = ["v7", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-parking_lot = "0.12"
-fs2 = "0.4"
-futures = "0.3"
-async-trait = "0.1"
-async-stream = "0.3"
-pin-project-lite = "0.2"
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "blocking"], default-features = false }
 glob = "0.3"
-base64 = "0.22.1"
-ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
-unicode-width = "0.2"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
 pretty_assertions = "1"
-assert_cmd = "2"
-predicates = "3"
